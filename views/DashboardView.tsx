@@ -1,6 +1,4 @@
-
-
-import React, { useState } from 'react';
+import React, { useState, useMemo } from 'react';
 import { useApp } from '../store';
 import { calculateDailyBucketCost, calculateDailyBucketCostSoFar, calculateFixedBucketCost, calculateGoalBucketCost, formatMoney, getLatestDailyDeduction, getTotalFamilyIncome, getUserIncome } from '../utils';
 import { Card, cn } from '../components/components';
@@ -11,77 +9,87 @@ export const DashboardView: React.FC = () => {
   const [scenarioAdjustment, setScenarioAdjustment] = useState(0); // Slider value
 
   // 1. Calculate Actual Inflow (Cash that really exists)
-  const totalActualIncome = getTotalFamilyIncome(users, selectedMonth);
+  // Memoized: Only recalculates when users or month changes
+  const totalActualIncome = useMemo(() => 
+    getTotalFamilyIncome(users, selectedMonth), 
+  [users, selectedMonth]);
 
   // 2. Calculate Outflow (Expenses + Savings)
-  let totalProjectedExpenses = 0;
-  let totalFixedExpenses = 0; // Fixed + Goals
-  let totalDailyExpensesSoFar = 0; // Variable up to today
+  // Memoized: Heavy iteration over buckets
+  const { totalProjectedExpenses, totalFixedExpenses, totalDailyExpensesSoFar } = useMemo(() => {
+    let projected = 0;
+    let fixed = 0; // Fixed + Goals
+    let dailySoFar = 0; // Variable up to today
 
-  buckets.forEach(b => {
-    // Skip if explicitly set to take from balance
-    if (b.paymentSource === 'BALANCE') return;
+    buckets.forEach(b => {
+        // Skip if explicitly set to take from balance
+        if (b.paymentSource === 'BALANCE') return;
 
-    let cost = 0;
-    if (b.type === 'FIXED') {
-        cost = calculateFixedBucketCost(b, selectedMonth);
-        totalFixedExpenses += cost;
-    } else if (b.type === 'GOAL') {
-        cost = calculateGoalBucketCost(b, selectedMonth);
-        totalFixedExpenses += cost; // Treat goals as fixed monthly costs
-    } else if (b.type === 'DAILY') {
-        cost = calculateDailyBucketCost(b, selectedMonth, settings.payday);
-        const soFar = calculateDailyBucketCostSoFar(b, selectedMonth, settings.payday);
-        totalDailyExpensesSoFar += soFar;
-    }
-    
-    totalProjectedExpenses += cost;
-  });
+        let cost = 0;
+        if (b.type === 'FIXED') {
+            cost = calculateFixedBucketCost(b, selectedMonth);
+            fixed += cost;
+        } else if (b.type === 'GOAL') {
+            cost = calculateGoalBucketCost(b, selectedMonth);
+            fixed += cost; // Treat goals as fixed monthly costs
+        } else if (b.type === 'DAILY') {
+            cost = calculateDailyBucketCost(b, selectedMonth, settings.payday);
+            const soFar = calculateDailyBucketCostSoFar(b, selectedMonth, settings.payday);
+            dailySoFar += soFar;
+        }
+        
+        projected += cost;
+    });
+
+    return { totalProjectedExpenses: projected, totalFixedExpenses: fixed, totalDailyExpensesSoFar: dailySoFar };
+  }, [buckets, selectedMonth, settings.payday]);
 
   // 3. CALCULATE SURPLUS (From Actual Income)
   // This is the real pot of money available to distribute
   const effectiveExpenses = totalProjectedExpenses + scenarioAdjustment;
   const surplus = totalActualIncome - effectiveExpenses;
 
-  // 4. CALCULATE THEORETICAL INCOME (For Fair Distribution Keys)
-  // Logic: We define the "Contribution Share" based on what people WOULD have earned
-  // if they hadn't taken the income loss (VAB/Sick leave).
-  // But we distribute the ACTUAL surplus. This means the family shares the loss proportionally.
-  
-  const userCalculations = users.map(user => {
-      const data = user.incomeData[selectedMonth] || {};
-      const actualIncome = getUserIncome(user, selectedMonth);
-      
-      // Calculate loss: Days * (Daily Rate OR Last Known Daily Rate)
-      const days = data.vabDays || 0;
-      const rate = data.dailyDeduction !== undefined ? data.dailyDeduction : getLatestDailyDeduction(user, selectedMonth);
-      const incomeLoss = days * rate;
-      
-      // Theoretical Income = What they brought home + What they lost
-      const theoreticalIncome = actualIncome + incomeLoss;
-  
-      return {
-          ...user,
-          actualIncome,
-          incomeLoss,
-          theoreticalIncome
-      };
-  });
-
-  const totalTheoreticalIncome = userCalculations.reduce((sum, u) => sum + u.theoreticalIncome, 0);
-
-  // 5. Distribution Logic
-  const distribution = userCalculations.map(user => {
-    // The share is based on the Theoretical Income
-    const contributionShare = totalTheoreticalIncome > 0 ? user.theoreticalIncome / totalTheoreticalIncome : 0;
+  // 4. CALCULATE THEORETICAL INCOME & DISTRIBUTION
+  // Memoized to avoid re-calculating distribution on simple renders
+  const { distribution, totalDistributed } = useMemo(() => {
+    // 4a. Theoretical Income Calculation
+    const userCalculations = users.map(user => {
+        const data = user.incomeData[selectedMonth] || {};
+        const actualIncome = getUserIncome(user, selectedMonth);
+        
+        // Calculate loss: Days * (Daily Rate OR Last Known Daily Rate)
+        const days = data.vabDays || 0;
+        const rate = data.dailyDeduction !== undefined ? data.dailyDeduction : getLatestDailyDeduction(user, selectedMonth);
+        const incomeLoss = days * rate;
+        
+        // Theoretical Income = What they brought home + What they lost
+        const theoreticalIncome = actualIncome + incomeLoss;
     
-    // The payout comes from the Actual Surplus
-    const returnAmount = Math.max(0, surplus * contributionShare);
-    
-    return { ...user, returnAmount, contributionShare };
-  });
+        return {
+            ...user,
+            actualIncome,
+            incomeLoss,
+            theoreticalIncome
+        };
+    });
 
-  const totalDistributed = distribution.reduce((sum, d) => sum + d.returnAmount, 0);
+    const totalTheoreticalIncome = userCalculations.reduce((sum, u) => sum + u.theoreticalIncome, 0);
+
+    // 4b. Distribution Logic
+    const dist = userCalculations.map(user => {
+        // The share is based on the Theoretical Income
+        const contributionShare = totalTheoreticalIncome > 0 ? user.theoreticalIncome / totalTheoreticalIncome : 0;
+        
+        // The payout comes from the Actual Surplus
+        const returnAmount = Math.max(0, surplus * contributionShare);
+        
+        return { ...user, returnAmount, contributionShare };
+    });
+
+    const totalDist = dist.reduce((sum, d) => sum + d.returnAmount, 0);
+
+    return { distribution: dist, totalDistributed: totalDist };
+  }, [users, selectedMonth, surplus]);
   
   // Total cash surplus (visually displayed at top)
   const displaySurplus = surplus;

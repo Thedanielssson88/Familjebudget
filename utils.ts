@@ -2,8 +2,8 @@ import { format, subMonths, addMonths, startOfMonth, endOfMonth, setDate, isAfte
 import { sv } from 'date-fns/locale';
 import { Bucket, BucketData, User } from './types';
 
-// Generate a unique ID
-export const generateId = () => Math.random().toString(36).substring(2, 9);
+// Generate a unique ID using crypto API for safety
+export const generateId = () => self.crypto.randomUUID();
 
 // Format currency
 export const formatMoney = (amount: number) => {
@@ -21,28 +21,34 @@ export const getBudgetInterval = (monthKey: string, payday: number) => {
 
 /**
  * Retrieves the bucket data for a specific month.
- * If data does not exist for the specific month, it searches backwards for the
- * most recent previous configuration (Inheritance), provided it wasn't explicitly deleted.
+ * Optimized to avoid sorting all keys. Iterates backwards from current month
+ * to find the nearest previous configuration (Inheritance).
  */
 export const getEffectiveBucketData = (bucket: Bucket, monthKey: string): { data: BucketData | null, isInherited: boolean } => {
-  // 1. Check exact month
+  // 1. Check exact month (O(1))
   if (bucket.monthlyData[monthKey]) {
      return { data: bucket.monthlyData[monthKey], isInherited: false };
   }
 
-  // 2. Search backwards
-  const allMonths = Object.keys(bucket.monthlyData).sort();
-  const previousMonths = allMonths.filter(m => m < monthKey);
+  // 2. Search backwards max 36 months (3 years) to find inheritance.
+  // This avoids sorting the entire monthlyData keys array which is expensive.
+  let currentSearchDate = parseISO(`${monthKey}-01`);
+  
+  // Safety check for invalid dates
+  if (!isValid(currentSearchDate)) return { data: null, isInherited: false };
 
-  if (previousMonths.length > 0) {
-     const lastKey = previousMonths[previousMonths.length - 1];
-     const lastData = bucket.monthlyData[lastKey];
-     
-     // If the chain was broken by deletion, don't inherit
-     if (lastData.isExplicitlyDeleted) return { data: null, isInherited: false };
-     
-     // Return the previous month's data as inherited
-     return { data: lastData, isInherited: true };
+  for (let i = 0; i < 36; i++) {
+      currentSearchDate = subMonths(currentSearchDate, 1);
+      const searchKey = format(currentSearchDate, 'yyyy-MM');
+      
+      const foundData = bucket.monthlyData[searchKey];
+      if (foundData) {
+          // If the chain was broken by deletion, don't inherit
+          if (foundData.isExplicitlyDeleted) return { data: null, isInherited: false };
+          
+          // Return the previous month's data as inherited
+          return { data: foundData, isInherited: true };
+      }
   }
 
   return { data: null, isInherited: false };
@@ -57,15 +63,17 @@ export const getLatestDailyDeduction = (user: User, monthKey: string): number =>
   const current = user.incomeData[monthKey]?.dailyDeduction;
   if (current !== undefined && current > 0) return current;
 
-  // 2. Search backwards
-  const sortedMonths = Object.keys(user.incomeData).sort();
-  // Filter for months strictly before current
-  const previous = sortedMonths.filter(m => m < monthKey).reverse();
-  
-  for (const m of previous) {
-      const val = user.incomeData[m]?.dailyDeduction;
+  // 2. Search backwards (Optimized loop similar to bucket data)
+  let currentSearchDate = parseISO(`${monthKey}-01`);
+  if (!isValid(currentSearchDate)) return 0;
+
+  for (let i = 0; i < 24; i++) {
+      currentSearchDate = subMonths(currentSearchDate, 1);
+      const searchKey = format(currentSearchDate, 'yyyy-MM');
+      const val = user.incomeData[searchKey]?.dailyDeduction;
       if (val !== undefined && val > 0) return val;
   }
+
   return 0;
 };
 

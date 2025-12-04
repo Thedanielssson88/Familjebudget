@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useMemo } from 'react';
 import { useApp } from '../store';
 import { calculateGoalBucketCost, calculateFixedBucketCost, calculateDailyBucketCost, formatMoney } from '../utils';
 import { PieChart, Pie, Cell, Tooltip, ResponsiveContainer, BarChart, Bar, XAxis, YAxis } from 'recharts';
@@ -9,30 +9,39 @@ export const StatsView: React.FC = () => {
   const { buckets, selectedMonth, accounts, settings } = useApp();
 
   // 1. Prepare Data for Pie Chart (Expenses by Account)
-  const pieData = accounts.map(acc => {
-    const accBuckets = buckets.filter(b => b.accountId === acc.id);
-    const value = accBuckets.reduce((sum, b) => {
-        let cost = 0;
-        if (b.type === 'FIXED') cost = calculateFixedBucketCost(b, selectedMonth);
-        else if (b.type === 'DAILY') cost = calculateDailyBucketCost(b, selectedMonth, settings.payday);
-        else if (b.type === 'GOAL') cost = calculateGoalBucketCost(b, selectedMonth);
-        return sum + cost;
-    }, 0);
-    return { name: acc.name, value };
-  }).filter(d => d.value > 0);
+  // Memoized: Only recalculate if accounts/buckets/month settings change
+  const pieData = useMemo(() => {
+    return accounts.map(acc => {
+      const accBuckets = buckets.filter(b => b.accountId === acc.id);
+      const value = accBuckets.reduce((sum, b) => {
+          let cost = 0;
+          if (b.type === 'FIXED') cost = calculateFixedBucketCost(b, selectedMonth);
+          else if (b.type === 'DAILY') cost = calculateDailyBucketCost(b, selectedMonth, settings.payday);
+          else if (b.type === 'GOAL') cost = calculateGoalBucketCost(b, selectedMonth);
+          return sum + cost;
+      }, 0);
+      return { name: acc.name, value };
+    }).filter(d => d.value > 0);
+  }, [accounts, buckets, selectedMonth, settings.payday]);
 
   const COLORS = ['#3b82f6', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6'];
 
   // 2. Future Projection (Next 6 months of savings goals)
-  const savingsGoals = buckets.filter(b => b.type === 'GOAL');
-  const projectionData = Array.from({ length: 6 }).map((_, i) => {
-    const month = format(addMonths(new Date(selectedMonth), i), 'yyyy-MM');
-    const totalSavingLoad = savingsGoals.reduce((sum, b) => sum + calculateGoalBucketCost(b, month), 0);
-    return {
-        month: format(addMonths(new Date(selectedMonth), i), 'MMM', { locale: sv }),
-        belopp: Math.round(totalSavingLoad)
-    };
-  });
+  // Memoized: Only recalculate if savings goals or buckets change
+  const { savingsGoals, projectionData } = useMemo(() => {
+      const goals = buckets.filter(b => b.type === 'GOAL');
+      
+      const data = Array.from({ length: 6 }).map((_, i) => {
+        const month = format(addMonths(new Date(selectedMonth), i), 'yyyy-MM');
+        const totalSavingLoad = goals.reduce((sum, b) => sum + calculateGoalBucketCost(b, month), 0);
+        return {
+            month: format(addMonths(new Date(selectedMonth), i), 'MMM', { locale: sv }),
+            belopp: Math.round(totalSavingLoad)
+        };
+      });
+
+      return { savingsGoals: goals, projectionData: data };
+  }, [buckets, selectedMonth]);
 
   return (
     <div className="space-y-8 pb-24 animate-in slide-in-from-right duration-300">
