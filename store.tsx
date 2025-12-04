@@ -5,7 +5,7 @@ import { getEffectiveBucketData } from './utils';
 
 interface AppContextType extends GlobalState {
   addUser: (name: string, avatar: string) => void;
-  updateUserIncome: (userId: string, month: MonthKey, type: 'salary'|'childBenefit'|'insurance', value: number) => void;
+  updateUserIncome: (userId: string, month: MonthKey, type: 'salary'|'childBenefit'|'insurance'|'vabDays'|'dailyDeduction'|'incomeLoss', value: number) => void;
   updateUserName: (userId: string, name: string) => void;
   addAccount: (name: string, icon: string) => void;
   addBucket: (bucket: Bucket) => void;
@@ -93,16 +93,27 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setUsers([...users, { id: Math.random().toString(), name, avatar, incomeData: {} }]);
   };
 
-  const updateUserIncome = (userId: string, month: MonthKey, type: 'salary'|'childBenefit'|'insurance', value: number) => {
+  const updateUserIncome = (userId: string, month: MonthKey, type: 'salary'|'childBenefit'|'insurance'|'vabDays'|'dailyDeduction'|'incomeLoss', value: number) => {
     setUsers(prev => prev.map(u => {
       if (u.id !== userId) return u;
-      const currentMonthData = u.incomeData[month] || { salary: 0, childBenefit: 0, insurance: 0 };
+      
+      const newIncomeData = { ...u.incomeData };
+      const currentMonthData = newIncomeData[month] || { salary: 0, childBenefit: 0, insurance: 0 };
+      
+      newIncomeData[month] = { ...currentMonthData, [type]: value };
+
+      // Propagate daily deduction changes to future months to save re-entry
+      if (type === 'dailyDeduction') {
+          Object.keys(newIncomeData).forEach(key => {
+              if (key > month && newIncomeData[key]) {
+                  newIncomeData[key] = { ...newIncomeData[key], dailyDeduction: value };
+              }
+          });
+      }
+
       return {
         ...u,
-        incomeData: {
-          ...u.incomeData,
-          [month]: { ...currentMonthData, [type]: value }
-        }
+        incomeData: newIncomeData
       };
     }));
   };

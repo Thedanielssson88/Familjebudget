@@ -48,6 +48,27 @@ export const getEffectiveBucketData = (bucket: Bucket, monthKey: string): { data
   return { data: null, isInherited: false };
 }
 
+/**
+ * Helper to get the most recent daily deduction value for a user.
+ * Used to pre-fill or calculate "inherited" deduction rates.
+ */
+export const getLatestDailyDeduction = (user: User, monthKey: string): number => {
+  // 1. Check current month
+  const current = user.incomeData[monthKey]?.dailyDeduction;
+  if (current !== undefined && current > 0) return current;
+
+  // 2. Search backwards
+  const sortedMonths = Object.keys(user.incomeData).sort();
+  // Filter for months strictly before current
+  const previous = sortedMonths.filter(m => m < monthKey).reverse();
+  
+  for (const m of previous) {
+      const val = user.incomeData[m]?.dailyDeduction;
+      if (val !== undefined && val > 0) return val;
+  }
+  return 0;
+};
+
 // Calculate cost for a daily bucket within the interval
 export const calculateDailyBucketCost = (bucket: Bucket, monthKey: string, payday: number): number => {
   if (bucket.type !== 'DAILY') return 0;

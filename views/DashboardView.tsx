@@ -1,20 +1,19 @@
 
+
 import React, { useState } from 'react';
 import { useApp } from '../store';
-import { calculateDailyBucketCost, calculateDailyBucketCostSoFar, calculateFixedBucketCost, calculateGoalBucketCost, formatMoney, getTotalFamilyIncome, getUserIncome } from '../utils';
+import { calculateDailyBucketCost, calculateDailyBucketCostSoFar, calculateFixedBucketCost, calculateGoalBucketCost, formatMoney, getLatestDailyDeduction, getTotalFamilyIncome, getUserIncome } from '../utils';
 import { Card, cn } from '../components/components';
-import { ArrowDown, TrendingUp, Sliders, Landmark, Calculator } from 'lucide-react';
+import { ArrowDown, TrendingUp, Sliders, Landmark, Calculator, ShieldCheck } from 'lucide-react';
 
 export const DashboardView: React.FC = () => {
   const { users, buckets, selectedMonth, settings } = useApp();
   const [scenarioAdjustment, setScenarioAdjustment] = useState(0); // Slider value
 
-  // 1. Calculate Inflow
-  const totalIncome = getTotalFamilyIncome(users, selectedMonth);
+  // 1. Calculate Actual Inflow (Cash that really exists)
+  const totalActualIncome = getTotalFamilyIncome(users, selectedMonth);
 
   // 2. Calculate Outflow (Expenses + Savings)
-  // CRITICAL: Only include buckets where paymentSource is 'INCOME' (default) or undefined. 
-  // If paymentSource is 'BALANCE', it's taken from assets, not monthly cash flow.
   let totalProjectedExpenses = 0;
   let totalFixedExpenses = 0; // Fixed + Goals
   let totalDailyExpensesSoFar = 0; // Variable up to today
@@ -39,26 +38,59 @@ export const DashboardView: React.FC = () => {
     totalProjectedExpenses += cost;
   });
 
-  // Apply scenario
+  // 3. CALCULATE SURPLUS (From Actual Income)
+  // This is the real pot of money available to distribute
   const effectiveExpenses = totalProjectedExpenses + scenarioAdjustment;
-  const surplus = totalIncome - effectiveExpenses;
+  const surplus = totalActualIncome - effectiveExpenses;
 
-  // 3. Distribution Logic
-  const distribution = users.map(user => {
-    const userIncome = getUserIncome(user, selectedMonth);
-    const contributionShare = totalIncome > 0 ? userIncome / totalIncome : 0;
+  // 4. CALCULATE THEORETICAL INCOME (For Fair Distribution Keys)
+  // Logic: We define the "Contribution Share" based on what people WOULD have earned
+  // if they hadn't taken the income loss (VAB/Sick leave).
+  // But we distribute the ACTUAL surplus. This means the family shares the loss proportionally.
+  
+  const userCalculations = users.map(user => {
+      const data = user.incomeData[selectedMonth] || {};
+      const actualIncome = getUserIncome(user, selectedMonth);
+      
+      // Calculate loss: Days * (Daily Rate OR Last Known Daily Rate)
+      const days = data.vabDays || 0;
+      const rate = data.dailyDeduction !== undefined ? data.dailyDeduction : getLatestDailyDeduction(user, selectedMonth);
+      const incomeLoss = days * rate;
+      
+      // Theoretical Income = What they brought home + What they lost
+      const theoreticalIncome = actualIncome + incomeLoss;
+  
+      return {
+          ...user,
+          actualIncome,
+          incomeLoss,
+          theoreticalIncome
+      };
+  });
+
+  const totalTheoreticalIncome = userCalculations.reduce((sum, u) => sum + u.theoreticalIncome, 0);
+
+  // 5. Distribution Logic
+  const distribution = userCalculations.map(user => {
+    // The share is based on the Theoretical Income
+    const contributionShare = totalTheoreticalIncome > 0 ? user.theoreticalIncome / totalTheoreticalIncome : 0;
+    
+    // The payout comes from the Actual Surplus
     const returnAmount = Math.max(0, surplus * contributionShare);
+    
     return { ...user, returnAmount, contributionShare };
   });
 
   const totalDistributed = distribution.reduce((sum, d) => sum + d.returnAmount, 0);
+  
+  // Total cash surplus (visually displayed at top)
+  const displaySurplus = surplus;
 
   // CALCULATIONS FOR DASHBOARD STATUS
   // 1. Balance on transfer account TODAY (Income - All Fixed - Variable So Far)
-  const currentAccountBalance = totalIncome - totalFixedExpenses - totalDailyExpensesSoFar;
+  const currentAccountBalance = totalActualIncome - totalFixedExpenses - totalDailyExpensesSoFar;
 
   // 2. Remaining on account AFTER transfers (Current Balance - Distributed Surplus)
-  // This represents the buffer left for the remaining days of variable expenses.
   const balanceAfterTransfers = currentAccountBalance - totalDistributed;
 
   return (
@@ -66,12 +98,12 @@ export const DashboardView: React.FC = () => {
       {/* HEADER: FLOW SUMMARY */}
       <div className="text-center space-y-2 py-4">
         <div className="inline-block px-4 py-1 rounded-full bg-slate-800 text-slate-400 text-xs font-mono uppercase tracking-widest">
-            Kassaflöde
+            Kassaflöde (Överskott)
         </div>
         <div className="flex items-end justify-center gap-2">
-            <span className="text-5xl font-bold text-white tracking-tighter">{formatMoney(surplus)}</span>
+            <span className="text-5xl font-bold text-white tracking-tighter">{formatMoney(displaySurplus)}</span>
         </div>
-        <p className="text-emerald-400 text-sm font-medium">Kvar till familjen (Fickpengar)</p>
+        <p className="text-emerald-400 text-sm font-medium">Totalt kvar efter räkningar</p>
       </div>
 
       {/* WATERFALL VISUALIZATION */}
@@ -79,8 +111,8 @@ export const DashboardView: React.FC = () => {
         {/* Step 1: Income */}
         <div className="bg-emerald-600 rounded-xl p-4 text-white relative z-10 shadow-lg shadow-emerald-900/20">
             <div className="flex justify-between items-center">
-                <span className="font-medium opacity-90">Total Inkomst</span>
-                <span className="font-bold font-mono">{formatMoney(totalIncome)}</span>
+                <span className="font-medium opacity-90">Total Inkomst (Faktisk)</span>
+                <span className="font-bold font-mono">{formatMoney(totalActualIncome)}</span>
             </div>
             {/* Connector */}
             <div className="absolute left-1/2 -bottom-4 w-0.5 h-4 bg-emerald-600/50"></div>
@@ -91,8 +123,8 @@ export const DashboardView: React.FC = () => {
         {/* Step 2: Expenses */}
         <div className="bg-rose-600 rounded-xl p-4 text-white relative z-10 shadow-lg shadow-rose-900/20">
             <div className="flex justify-between items-center">
-                <span className="font-medium opacity-90">Budget & Kostnader (Från lön)</span>
-                <span className="font-bold font-mono">-{formatMoney(effectiveExpenses)}</span>
+                <span className="font-medium opacity-90">Budget & Kostnader</span>
+                <span className="font-bold font-mono">-{formatMoney(totalProjectedExpenses + scenarioAdjustment)}</span>
             </div>
             {/* Scenario Indicator */}
             {scenarioAdjustment !== 0 && (
@@ -135,9 +167,16 @@ export const DashboardView: React.FC = () => {
                     <div className="text-2xl font-bold text-white mb-1">
                         {formatMoney(d.returnAmount)}
                     </div>
-                    <div className="text-[10px] text-slate-500 uppercase tracking-wide">
-                        Baserat på {Math.round(d.contributionShare * 100)}% bidrag
+                    
+                    <div className="text-[10px] text-slate-500 uppercase tracking-wide mt-2">
+                        Andel: {Math.round(d.contributionShare * 100)}%
                     </div>
+                    
+                    {d.incomeLoss > 0 && (
+                        <div className="mt-1 text-[10px] text-rose-300 bg-rose-500/10 px-1 py-0.5 rounded inline-block">
+                             Kompenserad för {formatMoney(d.incomeLoss)}
+                        </div>
+                    )}
                 </Card>
             ))}
         </div>

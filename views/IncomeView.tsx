@@ -1,9 +1,10 @@
 
+
 import React from 'react';
 import { useApp } from '../store';
 import { Card, Input } from '../components/components';
-import { User, Wallet, Shield, Baby } from 'lucide-react';
-import { formatMoney, getTotalFamilyIncome } from '../utils';
+import { User, Wallet, Shield, Baby, Calendar } from 'lucide-react';
+import { formatMoney, getTotalFamilyIncome, getLatestDailyDeduction } from '../utils';
 
 export const IncomeView: React.FC = () => {
   const { users, selectedMonth, updateUserIncome, updateUserName } = useApp();
@@ -21,9 +22,14 @@ export const IncomeView: React.FC = () => {
 
       <div className="grid gap-4">
         {users.map(user => {
-          const data = user.incomeData[selectedMonth] || { salary: 0, childBenefit: 0, insurance: 0 };
+          const data = user.incomeData[selectedMonth] || { salary: 0, childBenefit: 0, insurance: 0, incomeLoss: 0, vabDays: 0, dailyDeduction: 0 };
           const userTotal = (data.salary || 0) + (data.childBenefit || 0) + (data.insurance || 0);
           const share = totalIncome > 0 ? (userTotal / totalIncome) * 100 : 0;
+          
+          // Determine the daily deduction value to show (either explicitly set, or inferred from previous months)
+          const latestDeduction = getLatestDailyDeduction(user, selectedMonth);
+          const currentDailyDeduction = data.dailyDeduction !== undefined ? data.dailyDeduction : latestDeduction;
+          const totalLoss = (data.vabDays || 0) * currentDailyDeduction;
 
           return (
             <Card key={user.id} className="border-emerald-500/20 bg-gradient-to-br from-surface to-emerald-950/10">
@@ -75,12 +81,54 @@ export const IncomeView: React.FC = () => {
                   <Shield className="w-5 h-5 text-slate-500" />
                   <Input 
                     type="number" 
-                    placeholder="Försäkringskassan/Övrigt" 
+                    placeholder="Försäkringskassan (VAB)" 
                     value={data.insurance || ''} 
                     onChange={(e) => updateUserIncome(user.id, selectedMonth, 'insurance', Number(e.target.value))}
                     className="flex-1 py-2 text-right"
                   />
                 </div>
+
+                {/* VAB / Income Loss Section */}
+                {(data.insurance > 0 || (data.vabDays || 0) > 0 || totalLoss > 0) && (
+                    <div className="mt-2 p-3 bg-rose-500/10 rounded-lg border border-rose-500/20 animate-in slide-in-from-top-2">
+                        <div className="flex justify-between items-center mb-2">
+                            <span className="text-xs text-rose-300 font-bold uppercase">Löneavdrag (VAB/Sjuk)</span>
+                        </div>
+                        <div className="grid grid-cols-2 gap-3 mb-2">
+                            <div className="flex flex-col gap-1">
+                                <label className="text-[10px] text-slate-400 uppercase">Antal Dagar</label>
+                                <div className="flex items-center bg-slate-900/50 rounded-xl border border-rose-500/30 focus-within:border-rose-500">
+                                    <span className="pl-3 text-rose-400"><Calendar className="w-4 h-4"/></span>
+                                    <input 
+                                        type="number"
+                                        value={data.vabDays || ''}
+                                        onChange={(e) => updateUserIncome(user.id, selectedMonth, 'vabDays', Number(e.target.value))}
+                                        className="w-full bg-transparent px-2 py-2 text-right text-white focus:outline-none"
+                                    />
+                                </div>
+                            </div>
+                            <div className="flex flex-col gap-1">
+                                <label className="text-[10px] text-slate-400 uppercase">Avdrag per dag</label>
+                                <input 
+                                    type="number"
+                                    placeholder={latestDeduction ? `${latestDeduction}` : "0"}
+                                    value={data.dailyDeduction || (latestDeduction > 0 ? latestDeduction : '')}
+                                    onChange={(e) => updateUserIncome(user.id, selectedMonth, 'dailyDeduction', Number(e.target.value))}
+                                    className="w-full bg-slate-900/50 rounded-xl border border-rose-500/30 px-3 py-2 text-right text-white focus:outline-none focus:border-rose-500"
+                                />
+                            </div>
+                        </div>
+                        
+                        <div className="flex justify-between items-center text-xs pt-1 border-t border-rose-500/10">
+                           <span className="text-slate-400">Total inkomstförlust:</span>
+                           <span className="text-rose-300 font-mono font-bold">-{formatMoney(totalLoss)}</span>
+                        </div>
+                        
+                        <p className="text-[10px] text-slate-400 mt-2">
+                            Detta belopp läggs tillbaka på din "teoretiska inkomst" för att rättvist beräkna din andel av fickpengarna.
+                        </p>
+                    </div>
+                )}
               </div>
             </Card>
           );

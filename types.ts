@@ -1,4 +1,5 @@
 
+
 export type MonthKey = string; // Format: "YYYY-MM"
 
 export interface User {
@@ -9,6 +10,9 @@ export interface User {
     salary: number;
     childBenefit: number;
     insurance: number;
+    incomeLoss?: number; // Deprecated, calculated from days * deduction
+    vabDays?: number; 
+    dailyDeduction?: number; 
   }>;
 }
 
