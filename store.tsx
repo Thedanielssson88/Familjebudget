@@ -11,6 +11,7 @@ interface AppContextType extends GlobalState {
   addBucket: (bucket: Bucket) => void;
   updateBucket: (bucket: Bucket) => void;
   deleteBucket: (id: string, month: MonthKey, scope: 'THIS_MONTH' | 'THIS_AND_FUTURE' | 'ALL') => void;
+  archiveBucket: (id: string, month: MonthKey) => void;
   confirmBucketAmount: (id: string, month: MonthKey) => void;
   setMonth: (month: MonthKey) => void;
   setPayday: (day: number) => void;
@@ -202,6 +203,16 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     });
   };
 
+  const archiveBucket = (id: string, month: MonthKey) => {
+    setBuckets(prev => prev.map(b => {
+        if (b.id !== id) return b;
+        return {
+            ...b,
+            archivedDate: month
+        };
+    }));
+  };
+
   const setPayday = (day: number) => setSettings({ ...settings, payday: day });
 
   // BACKUP FUNCTIONS
@@ -233,7 +244,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   return (
     <AppContext.Provider value={{
       users, accounts, buckets, settings, selectedMonth,
-      addUser, updateUserIncome, updateUserName, addAccount, addBucket, updateBucket, deleteBucket, confirmBucketAmount, setMonth: setSelectedMonth, setPayday,
+      addUser, updateUserIncome, updateUserName, addAccount, addBucket, updateBucket, deleteBucket, archiveBucket, confirmBucketAmount, setMonth: setSelectedMonth, setPayday,
       getExportData, importData
     }}>
       {children}

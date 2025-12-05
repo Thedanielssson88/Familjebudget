@@ -1,10 +1,11 @@
+
 import React, { useState, useEffect } from 'react';
 import { useApp } from '../store';
 import { Bucket, BucketData } from '../types';
 import { calculateDailyBucketCost, calculateFixedBucketCost, calculateGoalBucketCost, formatMoney, generateId, getBudgetInterval, isBucketActiveInMonth, getEffectiveBucketData } from '../utils';
 import { Card, Button, Input, Modal, cn } from '../components/components';
-import { Plus, Trash2, Calendar, Target, Repeat, Wallet, PiggyBank, CreditCard, Image as ImageIcon, X, Check } from 'lucide-react';
-import { format, addMonths, parseISO } from 'date-fns';
+import { Plus, Trash2, Calendar, Target, Repeat, Wallet, PiggyBank, CreditCard, Image as ImageIcon, X, Check, ChevronDown, ChevronUp, Settings } from 'lucide-react';
+import { format, addMonths, parseISO, differenceInMonths } from 'date-fns';
 import { sv } from 'date-fns/locale';
 
 const DREAM_IMAGES = [
@@ -25,6 +26,8 @@ export const BudgetView: React.FC = () => {
   const [editingMonthData, setEditingMonthData] = useState<BucketData>({ amount: 0, dailyAmount: 0, activeDays: [1,2,3,4,5] });
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [deleteMode, setDeleteMode] = useState(false); // Toggle for delete options
+  const [showGoalDetails, setShowGoalDetails] = useState(false); // Toggle for advanced goal settings
+  const [showRegularDetails, setShowRegularDetails] = useState(false); // Toggle for advanced settings on regular buckets
 
   // Account creation state
   const [isAccountModalOpen, setIsAccountModalOpen] = useState(false);
@@ -44,13 +47,30 @@ export const BudgetView: React.FC = () => {
   // Helper to open modal for new or edit
   const openModal = (bucket?: Bucket, accountId?: string) => {
     setDeleteMode(false);
+    setShowGoalDetails(false); // Default collapsed details for goals
+    
     if (bucket) {
       setEditingBucket({ ...bucket });
+      setShowRegularDetails(false); // Default collapsed for editing existing
+
       // Load data for this month if exists, otherwise try to load inherited or defaults
       const { data } = getEffectiveBucketData(bucket, selectedMonth);
-      setEditingMonthData(data ? { ...data, isExplicitlyDeleted: false } : { amount: 0, dailyAmount: 0, activeDays: [1,2,3,4,5] });
+      
+      // For Goals: We might want to pre-fill the "Amount" with the calculated cost if no explicit override exists
+      // This makes it easy to just click save or see what the current plan is.
+      let initialData = data ? { ...data, isExplicitlyDeleted: false } : { amount: 0, dailyAmount: 0, activeDays: [1,2,3,4,5] };
+      
+      if (bucket.type === 'GOAL' && (!data || data.amount === 0)) {
+          // Calculate the recommended amount so the input isn't empty (which looks like 0)
+          // We only do this for display initial state
+          const recommended = calculateGoalBucketCost(bucket, selectedMonth);
+          initialData.amount = Math.round(recommended);
+      }
+
+      setEditingMonthData(initialData);
     } else if (accountId) {
       // New Bucket
+      setShowRegularDetails(true); // Auto expand for new buckets so user can see Name input
       setEditingBucket({
         id: generateId(),
         accountId,
@@ -72,17 +92,59 @@ export const BudgetView: React.FC = () => {
   const handleSave = () => {
     if (!editingBucket) return;
 
-    // Check if we should reuse an existing bucket definition (by name/account)
-    // This supports the "Add existing expense to this month" flow implicitly
+    // Check if we are updating an existing bucket in a way that requires a "Split" in history.
+    // Structural changes (Type, Savings Status, Payment Source, Account) should NOT apply retroactively.
+    // Instead, we effectively "End" the old bucket at the previous month, and create a "New" bucket from this month.
+    const originalBucket = buckets.find(b => b.id === editingBucket.id);
+    const isExistingBucket = !!originalBucket;
+    
+    // Define what constitutes a "Structural Change" that breaks history
+    const isStructuralChange = isExistingBucket && (
+        originalBucket.type !== editingBucket.type ||
+        originalBucket.isSavings !== editingBucket.isSavings ||
+        originalBucket.paymentSource !== editingBucket.paymentSource ||
+        originalBucket.accountId !== editingBucket.accountId
+    );
+
+    if (isStructuralChange) {
+        // --- HISTORY SPLIT LOGIC ---
+        
+        // 1. Soft delete the OLD bucket from this month forward
+        // This ensures historical data (Jan) stays as "Fixed", but it stops existing in Feb.
+        deleteBucket(originalBucket.id, selectedMonth, 'THIS_AND_FUTURE');
+
+        // 2. Create a NEW bucket with the new settings
+        // This bucket starts fresh from this month.
+        const newBucketId = generateId();
+        const newBucket: Bucket = {
+            ...editingBucket,
+            id: newBucketId,
+            monthlyData: {
+                // Initialize with the data for the current month
+                [selectedMonth]: editingMonthData
+            }
+        };
+
+        // If we split a goal, we might need to handle linked IDs, but typically users don't change Goal types this way.
+        // Assuming standard behavior for Fixed/Daily.
+
+        addBucket(newBucket);
+
+        // Close and exit, we are done.
+        setIsModalOpen(false);
+        return;
+    }
+
+    // --- STANDARD UPDATE LOGIC (No History Split) ---
+    // Used for: New buckets, Name changes, Amount changes, or Goal adjustments without type change.
+
     let finalBucket = editingBucket;
     
-    // If it's a new bucket (not in list), check for name collision in this account
-    if (!buckets.find(b => b.id === editingBucket.id)) {
-        const existingBucket = buckets.find(b => b.accountId === editingBucket.accountId && b.name.toLowerCase() === editingBucket.name.toLowerCase());
-        if (existingBucket) {
-            // Reuse existing bucket ID, just update its monthly data
-            finalBucket = { ...existingBucket, ...editingBucket, id: existingBucket.id };
-        }
+    // If it's a new bucket (not in list), check for name collision in this account to potentially merge/reuse logic (optional)
+    // But since we handle splits above, standard reuse applies if ID matches.
+    if (!isExistingBucket) {
+        // Optional: Check if a bucket with this name exists and was deleted? 
+        // For simplicity, we create new.
     }
 
     // Merge the editingMonthData into the bucket's monthlyData
@@ -96,7 +158,7 @@ export const BudgetView: React.FC = () => {
         monthlyData: updatedMonthlyData
     };
 
-    if (buckets.find(b => b.id === bucketToSave.id)) {
+    if (isExistingBucket) {
       updateBucket(bucketToSave);
     } else {
       addBucket(bucketToSave);
@@ -168,6 +230,33 @@ export const BudgetView: React.FC = () => {
     return 0;
   };
 
+  // Helper to determine semantic style classes
+  const getBucketStyles = (bucket: Bucket) => {
+    if (bucket.isSavings) {
+        return {
+            container: "border-l-indigo-500 bg-indigo-500/5 hover:bg-indigo-500/10",
+            text: "text-indigo-300",
+            badge: "bg-indigo-500/20 text-indigo-300",
+            icon: "text-indigo-400"
+        };
+    }
+    if (bucket.paymentSource === 'BALANCE') {
+        return {
+            container: "border-l-amber-500 bg-amber-500/5 hover:bg-amber-500/10",
+            text: "text-amber-300",
+            badge: "bg-amber-500/20 text-amber-300",
+            icon: "text-amber-400"
+        };
+    }
+    // Default: Expense
+    return {
+        container: "border-l-rose-500 bg-rose-500/5 hover:bg-rose-500/10",
+        text: "text-rose-300",
+        badge: "bg-rose-500/20 text-rose-300",
+        icon: "text-rose-400"
+    };
+  };
+
   // When changing type to GOAL, set reasonable defaults if missing
   const setType = (type: Bucket['type']) => {
       if (!editingBucket) return;
@@ -184,6 +273,22 @@ export const BudgetView: React.FC = () => {
       }
       setEditingBucket({ ...editingBucket, ...updates });
   };
+
+  // Calculate recommended rate for goal to show "Reset" option
+  const getRecommendedGoalAmount = () => {
+     if (!editingBucket || editingBucket.type !== 'GOAL') return 0;
+     // Create a temporary bucket WITHOUT the current month's override to see what the calculator suggests
+     const tempBucket = {
+         ...editingBucket,
+         monthlyData: {
+             ...editingBucket.monthlyData,
+             [selectedMonth]: { amount: 0, dailyAmount: 0, activeDays: [] } // Clear current
+         }
+     };
+     return Math.round(calculateGoalBucketCost(tempBucket, selectedMonth));
+  };
+  const recommendedAmount = getRecommendedGoalAmount();
+  const isOverride = editingMonthData.amount !== recommendedAmount;
 
   return (
     <div className="space-y-6 pb-24 animate-in slide-in-from-right duration-300">
@@ -211,18 +316,26 @@ export const BudgetView: React.FC = () => {
                 const cost = calculateCost(bucket);
                 // Check if this cost is inherited (i.e. not confirmed for this month yet)
                 const { isInherited } = getEffectiveBucketData(bucket, selectedMonth);
-                // Goals usually don't have inheritance in the same way, so ignore check button for them
+                // Goals don't use inheritance flag for confirmation usually, but standard buckets do
                 const showConfirmButton = isInherited && bucket.type !== 'GOAL';
+                const styles = getBucketStyles(bucket);
 
                 return (
-                  <Card key={bucket.id} onClick={() => openModal(bucket)} className="flex items-center justify-between py-3 px-4 border-l-4 border-l-slate-600 hover:border-l-blue-500 cursor-pointer active:scale-[0.98] transition-all group">
+                  <Card 
+                    key={bucket.id} 
+                    onClick={() => openModal(bucket)} 
+                    className={cn(
+                        "flex items-center justify-between py-3 px-4 border-l-4 cursor-pointer active:scale-[0.98] transition-all group", 
+                        styles.container
+                    )}
+                  >
                     <div className="flex-1">
                       <div className="flex items-center gap-2">
                          <span className="font-medium text-white">{bucket.name}</span>
-                         {bucket.isSavings && <span className="bg-indigo-500/20 text-indigo-300 text-[10px] px-1.5 py-0.5 rounded uppercase tracking-wider">Spar</span>}
-                         {bucket.paymentSource === 'BALANCE' && <span className="bg-amber-500/20 text-amber-300 text-[10px] px-1.5 py-0.5 rounded uppercase tracking-wider">Saldo</span>}
+                         {bucket.isSavings && <span className={cn("text-[10px] px-1.5 py-0.5 rounded uppercase tracking-wider", styles.badge)}>Spar</span>}
+                         {bucket.paymentSource === 'BALANCE' && <span className={cn("text-[10px] px-1.5 py-0.5 rounded uppercase tracking-wider", styles.badge)}>Saldo</span>}
                       </div>
-                      <div className="text-xs text-slate-400 mt-1 flex gap-2">
+                      <div className={cn("text-xs mt-1 flex gap-2 opacity-80 transition-colors", styles.text)}>
                         {bucket.type === 'FIXED' && <span className="flex items-center gap-1"><Repeat className="w-3 h-3"/> Fast belopp</span>}
                         {bucket.type === 'DAILY' && <span className="flex items-center gap-1"><Calendar className="w-3 h-3"/> Rörligt (Dagligt)</span>}
                         {bucket.type === 'GOAL' && <span className="flex items-center gap-1"><Target className="w-3 h-3"/> Målsparande</span>}
@@ -242,7 +355,7 @@ export const BudgetView: React.FC = () => {
                                 <Check className="w-4 h-4" />
                             </button>
                         )}
-                        <div className={cn("text-right font-mono font-medium", showConfirmButton ? "text-slate-400 italic" : "text-rose-300")}>
+                        <div className={cn("text-right font-mono font-medium", showConfirmButton ? "text-slate-400 italic" : styles.text)}>
                         -{formatMoney(cost)}
                         </div>
                     </div>
@@ -287,141 +400,232 @@ export const BudgetView: React.FC = () => {
       </Modal>
 
       {/* MODAL FOR EDITING BUCKET */}
-      <Modal isOpen={isModalOpen} onClose={() => setIsModalOpen(false)} title={editingBucket?.id && buckets.find(b => b.id === editingBucket.id) ? 'Redigera Utgift' : 'Ny Utgift'}>
+      <Modal isOpen={isModalOpen} onClose={() => setIsModalOpen(false)} title={editingBucket?.id && buckets.find(b => b.id === editingBucket.id) ? (editingBucket?.type === 'GOAL' ? editingBucket.name : 'Redigera Utgift') : 'Ny Utgift'}>
         {editingBucket && (
           <div className="space-y-6">
-            <Input label="Namn" value={editingBucket.name} onChange={e => setEditingBucket({...editingBucket, name: e.target.value})} autoFocus />
             
-            <div className="grid grid-cols-2 gap-2">
-                <div className="col-span-2 text-xs font-medium text-slate-400 uppercase">Typ av post</div>
-                <button 
-                  onClick={() => setType('FIXED')}
-                  className={cn("p-3 rounded-xl border text-sm font-medium transition-colors flex flex-col items-center gap-2", editingBucket.type === 'FIXED' ? "bg-blue-600 border-blue-500 text-white" : "border-slate-700 text-slate-400")}
-                >
-                  <Repeat className="w-5 h-5" />
-                  Fast Månad
-                </button>
-                <button 
-                  onClick={() => setType('DAILY')}
-                  className={cn("p-3 rounded-xl border text-sm font-medium transition-colors flex flex-col items-center gap-2", editingBucket.type === 'DAILY' ? "bg-blue-600 border-blue-500 text-white" : "border-slate-700 text-slate-400")}
-                >
-                  <Calendar className="w-5 h-5" />
-                  Rörlig Daglig
-                </button>
-                <button 
-                  onClick={() => setType('GOAL')}
-                  className={cn("p-3 rounded-xl border text-sm font-medium transition-colors col-span-2 flex items-center justify-center gap-2", editingBucket.type === 'GOAL' ? "bg-blue-600 border-blue-500 text-white" : "border-slate-700 text-slate-400")}
-                >
-                  <Target className="w-5 h-5" />
-                  Dröm & Målsparande
-                </button>
-            </div>
-
-            {/* HIDE PAYMENT SOURCE SELECTOR FOR GOALS (ALWAYS INCOME) */}
+            {/* =======================================================
+                REGULAR EXPENSES (FIXED / DAILY) - SIMPLIFIED LAYOUT
+               ======================================================= */}
             {editingBucket.type !== 'GOAL' && (
-                <div className="space-y-3">
-                    <div className="text-xs font-medium text-slate-400 uppercase">Finansiering</div>
-                    <div className="flex flex-col gap-2">
-                        <button 
-                        onClick={() => setEditingBucket({...editingBucket, paymentSource: 'INCOME'})}
-                        className={cn("p-3 rounded-xl border text-left flex items-center gap-3", (!editingBucket.paymentSource || editingBucket.paymentSource === 'INCOME') ? "bg-emerald-500/20 border-emerald-500 text-white" : "border-slate-700 text-slate-400")}
-                        >
-                            <Wallet className="w-5 h-5" />
-                            <div>
-                                <div className="font-bold text-sm">Från Månadslön</div>
-                                <div className="text-[10px] opacity-70">Minskar månadens utrymme/fickpengar</div>
+                <>
+                    {/* PRIMARY: AMOUNT INPUT */}
+                    <div className="bg-slate-800/50 p-4 rounded-2xl border border-slate-700 shadow-inner">
+                        <label className="text-xs font-bold text-slate-400 uppercase tracking-wider block mb-2 text-center">
+                            {editingBucket.type === 'DAILY' ? 'Daglig Kostnad' : 'Kostnad denna månad'}
+                        </label>
+                        <div className="flex items-center justify-center gap-2">
+                            <input 
+                                type="number" 
+                                value={editingBucket.type === 'DAILY' ? (editingMonthData.dailyAmount || '') : (editingMonthData.amount || '')} 
+                                onChange={e => {
+                                    const val = Number(e.target.value);
+                                    if (editingBucket.type === 'DAILY') {
+                                        setEditingMonthData({...editingMonthData, dailyAmount: val});
+                                    } else {
+                                        setEditingMonthData({...editingMonthData, amount: val});
+                                    }
+                                }}
+                                className="bg-transparent text-5xl font-mono font-bold text-center text-white w-full focus:outline-none placeholder-slate-700"
+                                placeholder="0"
+                                autoFocus={!editingBucket.name} // Focus here if name is present
+                            />
+                        </div>
+
+                         {/* DAILY ACTIVE DAYS SELECTOR (Keep visible for Daily as it is common to change) */}
+                        {editingBucket.type === 'DAILY' && (
+                            <div className="mt-4 border-t border-slate-700/50 pt-3">
+                                <label className="text-[10px] font-bold text-slate-500 uppercase tracking-wider block mb-2 text-center">
+                                    Aktiva dagar ({editingMonthData.activeDays?.length || 0})
+                                </label>
+                                <div className="flex justify-between gap-1 max-w-[280px] mx-auto">
+                                    {['S','M','T','O','T','F','L'].map((d, i) => (
+                                        <button 
+                                        key={i}
+                                        onClick={() => {
+                                            const currentDays = editingMonthData.activeDays || [];
+                                            const days = currentDays.includes(i) 
+                                            ? currentDays.filter(day => day !== i)
+                                            : [...currentDays, i];
+                                            setEditingMonthData({...editingMonthData, activeDays: days});
+                                        }}
+                                        className={cn("w-9 h-9 rounded-full text-xs font-bold flex items-center justify-center transition-all", editingMonthData.activeDays?.includes(i) ? "bg-blue-600 text-white" : "bg-slate-900 text-slate-600")}
+                                        >
+                                        {d}
+                                        </button>
+                                    ))}
+                                </div>
                             </div>
-                        </button>
+                        )}
+                        
+                        {/* Summary of Monthly Total for Daily */}
+                        {editingBucket.type === 'DAILY' && (
+                             <div className="text-center mt-3 text-sm text-slate-400">
+                                 Totalt ca: <span className="text-white font-mono">{formatMoney(calculateDailyBucketCost({...editingBucket, monthlyData: {[selectedMonth]: editingMonthData}}, selectedMonth, settings.payday))}</span> / mån
+                             </div>
+                        )}
+                    </div>
+
+                    {/* SECONDARY: COLLAPSIBLE DETAILS */}
+                    <div className="border-t border-slate-700 pt-2">
                         <button 
-                        onClick={() => setEditingBucket({...editingBucket, paymentSource: 'BALANCE'})}
-                        className={cn("p-3 rounded-xl border text-left flex items-center gap-3", editingBucket.paymentSource === 'BALANCE' ? "bg-amber-500/20 border-amber-500 text-white" : "border-slate-700 text-slate-400")}
+                            onClick={() => setShowRegularDetails(!showRegularDetails)}
+                            className="flex items-center justify-between w-full p-2 text-sm text-slate-400 hover:text-white transition-colors"
                         >
-                            <PiggyBank className="w-5 h-5" />
-                            <div>
-                                <div className="font-bold text-sm">Från Kontosaldo / Sparade Medel</div>
-                                <div className="text-[10px] opacity-70">Påverkar ej månadens utrymme (Används för inköp av mål)</div>
+                            <span className="flex items-center gap-2"><Settings className="w-4 h-4" /> Fler inställningar (Namn, Typ, Konto)</span>
+                            {showRegularDetails ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
+                        </button>
+
+                        {showRegularDetails && (
+                            <div className="space-y-4 pt-4 animate-in slide-in-from-top-2">
+                                <Input label="Namn" value={editingBucket.name} onChange={e => setEditingBucket({...editingBucket, name: e.target.value})} />
+                                
+                                {/* TYPE SELECTOR */}
+                                <div className="grid grid-cols-2 gap-2">
+                                    <div className="col-span-2 text-xs font-medium text-slate-400 uppercase">Typ av post</div>
+                                    <button 
+                                    onClick={() => setType('FIXED')}
+                                    className={cn("p-3 rounded-xl border text-sm font-medium transition-colors flex flex-col items-center gap-2", editingBucket.type === 'FIXED' ? "bg-blue-600 border-blue-500 text-white" : "border-slate-700 text-slate-400")}
+                                    >
+                                    <Repeat className="w-5 h-5" />
+                                    Fast Månad
+                                    </button>
+                                    <button 
+                                    onClick={() => setType('DAILY')}
+                                    className={cn("p-3 rounded-xl border text-sm font-medium transition-colors flex flex-col items-center gap-2", editingBucket.type === 'DAILY' ? "bg-blue-600 border-blue-500 text-white" : "border-slate-700 text-slate-400")}
+                                    >
+                                    <Calendar className="w-5 h-5" />
+                                    Rörlig Daglig
+                                    </button>
+                                    <button 
+                                    onClick={() => setType('GOAL')}
+                                    className={cn("p-3 rounded-xl border text-sm font-medium transition-colors col-span-2 flex items-center justify-center gap-2", editingBucket.type === 'GOAL' ? "bg-blue-600 border-blue-500 text-white" : "border-slate-700 text-slate-400")}
+                                    >
+                                    <Target className="w-5 h-5" />
+                                    Byt till Dröm & Målsparande
+                                    </button>
+                                </div>
+
+                                {/* PAYMENT SOURCE */}
+                                <div className="space-y-3">
+                                    <div className="text-xs font-medium text-slate-400 uppercase">Finansiering</div>
+                                    <div className="flex flex-col gap-2">
+                                        <button 
+                                        onClick={() => setEditingBucket({...editingBucket, paymentSource: 'INCOME'})}
+                                        className={cn("p-3 rounded-xl border text-left flex items-center gap-3", (!editingBucket.paymentSource || editingBucket.paymentSource === 'INCOME') ? "bg-emerald-500/20 border-emerald-500 text-white" : "border-slate-700 text-slate-400")}
+                                        >
+                                            <Wallet className="w-5 h-5" />
+                                            <div>
+                                                <div className="font-bold text-sm">Från Månadslön</div>
+                                                <div className="text-[10px] opacity-70">Minskar månadens utrymme/fickpengar</div>
+                                            </div>
+                                        </button>
+                                        <button 
+                                        onClick={() => setEditingBucket({...editingBucket, paymentSource: 'BALANCE'})}
+                                        className={cn("p-3 rounded-xl border text-left flex items-center gap-3", editingBucket.paymentSource === 'BALANCE' ? "bg-amber-500/20 border-amber-500 text-white" : "border-slate-700 text-slate-400")}
+                                        >
+                                            <PiggyBank className="w-5 h-5" />
+                                            <div>
+                                                <div className="font-bold text-sm">Från Kontosaldo / Sparade Medel</div>
+                                                <div className="text-[10px] opacity-70">Påverkar ej månadens utrymme (Används för inköp av mål)</div>
+                                            </div>
+                                        </button>
+                                    </div>
+                                </div>
+
+                                {/* SAVINGS TOGGLE */}
+                                <div className="flex items-center gap-3 bg-slate-800/50 p-3 rounded-xl">
+                                    <span className="text-sm text-slate-300 flex-1">Är detta ett sparande?</span>
+                                    <div className="flex bg-slate-900 rounded-lg p-1">
+                                        <button onClick={() => setEditingBucket({...editingBucket, isSavings: false})} className={cn("px-3 py-1 rounded text-xs font-bold transition-all", !editingBucket.isSavings ? "bg-rose-500 text-white" : "text-slate-500")}>Kostnad</button>
+                                        <button onClick={() => setEditingBucket({...editingBucket, isSavings: true})} className={cn("px-3 py-1 rounded text-xs font-bold transition-all", editingBucket.isSavings ? "bg-indigo-500 text-white" : "text-slate-500")}>Sparande</button>
+                                    </div>
+                                </div>
                             </div>
-                        </button>
+                        )}
                     </div>
-                </div>
+                </>
             )}
 
-            {/* HIDE SAVINGS TOGGLE FOR GOALS (ALWAYS TRUE) */}
-            {editingBucket.type !== 'GOAL' && (
-                <div className="flex items-center gap-3 bg-slate-800/50 p-3 rounded-xl">
-                <span className="text-sm text-slate-300 flex-1">Är detta ett sparande?</span>
-                <div className="flex bg-slate-900 rounded-lg p-1">
-                    <button onClick={() => setEditingBucket({...editingBucket, isSavings: false})} className={cn("px-3 py-1 rounded text-xs font-bold transition-all", !editingBucket.isSavings ? "bg-rose-500 text-white" : "text-slate-500")}>Kostnad</button>
-                    <button onClick={() => setEditingBucket({...editingBucket, isSavings: true})} className={cn("px-3 py-1 rounded text-xs font-bold transition-all", editingBucket.isSavings ? "bg-indigo-500 text-white" : "text-slate-500")}>Sparande</button>
-                </div>
-                </div>
-            )}
-
-            {/* FIXED INPUTS */}
-            {editingBucket.type === 'FIXED' && (
-              <Input label="Belopp per månad" type="number" value={editingMonthData.amount || ''} onChange={e => setEditingMonthData({...editingMonthData, amount: Number(e.target.value)})} />
-            )}
-
-            {/* DAILY INPUTS */}
-            {editingBucket.type === 'DAILY' && (
-              <div className="space-y-4">
-                 <Input label="Kostnad per dag" type="number" value={editingMonthData.dailyAmount || ''} onChange={e => setEditingMonthData({...editingMonthData, dailyAmount: Number(e.target.value)})} />
-                 <div>
-                    <label className="text-xs font-medium text-slate-400 uppercase tracking-wider mb-2 block">Aktiva dagar</label>
-                    <div className="flex justify-between gap-1">
-                      {['S','M','T','O','T','F','L'].map((d, i) => (
-                        <button 
-                          key={i}
-                          onClick={() => {
-                            const currentDays = editingMonthData.activeDays || [];
-                            const days = currentDays.includes(i) 
-                              ? currentDays.filter(day => day !== i)
-                              : [...currentDays, i];
-                            setEditingMonthData({...editingMonthData, activeDays: days});
-                          }}
-                          className={cn("w-10 h-10 rounded-full text-sm font-bold flex items-center justify-center transition-all", editingMonthData.activeDays?.includes(i) ? "bg-blue-600 text-white" : "bg-slate-800 text-slate-500")}
-                        >
-                          {d}
-                        </button>
-                      ))}
-                    </div>
-                    <p className="text-xs text-slate-500 mt-2">
-                        {(() => {
-                            const {start, end} = getBudgetInterval(selectedMonth, settings.payday);
-                            return `Period: ${format(start, 'd MMM', {locale: sv})} - ${format(end, 'd MMM', {locale: sv})}`;
-                        })()}
-                    </p>
-                 </div>
-              </div>
-            )}
-
-            {/* GOAL INPUTS */}
+            {/* =======================================================
+                GOAL INPUTS (New Interface)
+               ======================================================= */}
             {editingBucket.type === 'GOAL' && (
-              <div className="space-y-4">
-                 <Input label="Totalt målbelopp" type="number" value={editingBucket.targetAmount} onChange={e => setEditingBucket({...editingBucket, targetAmount: Number(e.target.value)})} />
-                 <div className="grid grid-cols-2 gap-4">
-                   <Input label="Starta sparande" type="month" value={editingBucket.startSavingDate} onChange={e => setEditingBucket({...editingBucket, startSavingDate: e.target.value})} />
-                   <Input label="Måldatum (Utbetalning)" type="month" value={editingBucket.targetDate} onChange={e => setEditingBucket({...editingBucket, targetDate: e.target.value})} />
-                 </div>
-                 
-                 <div className="space-y-2">
-                     <label className="text-xs font-medium text-slate-400 uppercase tracking-wider">Välj Bild</label>
-                     <div className="flex gap-2 overflow-x-auto pb-2 no-scrollbar">
-                         {DREAM_IMAGES.map((img, i) => (
+              <div className="space-y-6">
+                 {/* PRIMARY: CURRENT MONTH ADJUSTMENT */}
+                 <div className="bg-slate-800/50 p-4 rounded-2xl border border-indigo-500/20 shadow-inner">
+                     <label className="text-xs font-bold text-indigo-300 uppercase tracking-wider block mb-2 text-center">
+                         Insättning {format(new Date(selectedMonth), 'MMMM', {locale: sv})}
+                     </label>
+                     <div className="flex items-center justify-center gap-2">
+                         <input 
+                            type="number" 
+                            value={editingMonthData.amount || ''} 
+                            onChange={e => setEditingMonthData({...editingMonthData, amount: Number(e.target.value)})} 
+                            className="bg-transparent text-5xl font-mono font-bold text-center text-white w-full focus:outline-none placeholder-slate-700"
+                            placeholder="0"
+                         />
+                     </div>
+                     
+                     {/* Suggestion / Reset Button */}
+                     <div className="flex justify-center mt-3">
+                         {isOverride ? (
                              <button 
-                                key={i}
-                                onClick={() => setEditingBucket({...editingBucket, backgroundImage: img})}
-                                className={cn("w-16 h-16 shrink-0 rounded-lg overflow-hidden border-2 transition-all", editingBucket.backgroundImage === img ? "border-blue-500 scale-105" : "border-transparent opacity-60 hover:opacity-100")}
+                                onClick={() => setEditingMonthData({...editingMonthData, amount: recommendedAmount})}
+                                className="text-xs text-orange-400 hover:text-orange-300 flex items-center gap-1 bg-orange-500/10 px-3 py-1.5 rounded-full border border-orange-500/20"
                              >
-                                 <img src={img} className="w-full h-full object-cover" alt="theme" />
+                                 <Repeat className="w-3 h-3" />
+                                 Återställ till plan: {formatMoney(recommendedAmount)}
                              </button>
-                         ))}
+                         ) : (
+                             <div className="text-xs text-slate-500 flex items-center gap-1">
+                                 <Check className="w-3 h-3 text-emerald-500" />
+                                 Följer plan ({formatMoney(recommendedAmount)})
+                             </div>
+                         )}
                      </div>
                  </div>
 
-                 <p className="text-xs text-indigo-300 bg-indigo-500/10 p-3 rounded-lg">
-                    Systemet beräknar automatiskt sparandet fram till månaden innan måldatumet. En separat utgiftspost för hela beloppet (som dras från saldot) kommer skapas på måldatumet.
-                 </p>
+                 {/* SECONDARY: DETAILS & PLANNING */}
+                 <div className="border-t border-slate-700 pt-2">
+                     <button 
+                        onClick={() => setShowGoalDetails(!showGoalDetails)}
+                        className="flex items-center justify-between w-full p-2 text-sm text-slate-400 hover:text-white transition-colors"
+                     >
+                         <span className="flex items-center gap-2"><Target className="w-4 h-4" /> Redigera Mål & Tidsplan</span>
+                         {showGoalDetails ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
+                     </button>
+                     
+                     {showGoalDetails && (
+                         <div className="space-y-4 pt-4 animate-in slide-in-from-top-2">
+                             <Input label="Namn" value={editingBucket.name} onChange={e => setEditingBucket({...editingBucket, name: e.target.value})} />
+                             <Input label="Totalt målbelopp" type="number" value={editingBucket.targetAmount} onChange={e => setEditingBucket({...editingBucket, targetAmount: Number(e.target.value)})} />
+                             <div className="grid grid-cols-2 gap-4">
+                                <Input label="Starta sparande" type="month" value={editingBucket.startSavingDate} onChange={e => setEditingBucket({...editingBucket, startSavingDate: e.target.value})} />
+                                <Input label="Måldatum (Utbetalning)" type="month" value={editingBucket.targetDate} onChange={e => setEditingBucket({...editingBucket, targetDate: e.target.value})} />
+                             </div>
+                             
+                             <div className="space-y-2">
+                                 <label className="text-xs font-medium text-slate-400 uppercase tracking-wider">Välj Bild</label>
+                                 <div className="flex gap-2 overflow-x-auto pb-2 no-scrollbar">
+                                     {DREAM_IMAGES.map((img, i) => (
+                                         <button 
+                                            key={i}
+                                            onClick={() => setEditingBucket({...editingBucket, backgroundImage: img})}
+                                            className={cn("w-16 h-16 shrink-0 rounded-lg overflow-hidden border-2 transition-all", editingBucket.backgroundImage === img ? "border-blue-500 scale-105" : "border-transparent opacity-60 hover:opacity-100")}
+                                         >
+                                             <img src={img} className="w-full h-full object-cover" alt="theme" />
+                                         </button>
+                                     ))}
+                                 </div>
+                             </div>
+
+                             <p className="text-xs text-indigo-300 bg-indigo-500/10 p-3 rounded-lg">
+                                Notera: Ändringar i målbelopp eller datum kommer att räkna om den rekommenderade månadsinsättningen för alla framtida månader.
+                             </p>
+                         </div>
+                     )}
+                 </div>
               </div>
             )}
 

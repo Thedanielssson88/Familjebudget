@@ -1,3 +1,4 @@
+
 import { format, subMonths, addMonths, startOfMonth, endOfMonth, setDate, isAfter, isBefore, parseISO, differenceInMonths, eachDayOfInterval, getDay, isSameMonth, isSameDay, isValid, min, max } from 'date-fns';
 import { sv } from 'date-fns/locale';
 import { Bucket, BucketData, User } from './types';
@@ -142,7 +143,10 @@ export const calculateFixedBucketCost = (bucket: Bucket, monthKey: string): numb
   return data.amount;
 }
 
-// Calculate monthly contribution for a future goal
+/**
+ * Calculates the monthly contribution for a Goal.
+ * It considers historical actuals (manual overrides) to adjust the future rate.
+ */
 export const calculateGoalBucketCost = (bucket: Bucket, monthKey: string): number => {
   if (bucket.type !== 'GOAL' || !bucket.targetDate || !bucket.startSavingDate) return 0;
 
@@ -152,19 +156,131 @@ export const calculateGoalBucketCost = (bucket: Bucket, monthKey: string): numbe
 
   if (!isValid(current) || !isValid(start) || !isValid(target)) return 0;
 
-  // If we haven't started yet
+  // 1. If currently inactive/finished
   if (isBefore(current, start)) return 0;
-  
-  // If current month is Same or After the target month, saving should stop.
-  // The user requirement says: "Choose Dec 2025 - July 2026. Count until June 2026."
-  // So if current >= target, cost is 0.
-  if (!isBefore(current, target)) return 0;
+  if (!isBefore(current, target)) return 0; // Stop on target month
+  if (bucket.archivedDate) {
+      const archived = parseISO(`${bucket.archivedDate}-01`);
+      if (isAfter(current, archived)) return 0;
+  }
 
-  const totalMonths = differenceInMonths(target, start); 
+  // 2. MANUAL OVERRIDE CHECK
+  // If the user has explicitly set an amount for this specific month, return it.
+  // This allows "paying less this month" without complex recalculation logic here.
+  const specificData = bucket.monthlyData[monthKey];
+  if (specificData && specificData.amount > 0 && !specificData.isExplicitlyDeleted) {
+      return specificData.amount;
+  }
+  if (specificData && specificData.isExplicitlyDeleted) return 0;
+
+  // 3. DYNAMIC CALCULATION
+  // We need to find out how much is left to save, and divide by remaining months.
   
+  let savedSoFar = 0;
+  
+  // Iterate from start date up to (but not including) the current calculation month
+  // to sum up what *should* have been saved or *was* saved.
+  let iterDate = start;
+  while (isBefore(iterDate, current)) {
+      const iterKey = format(iterDate, 'yyyy-MM');
+      
+      // Recursive call? No, that's dangerous. 
+      // We calculate the cost for that past month.
+      // Ideally, we'd memoize this, but for <60 iterations it's fast enough.
+      
+      // Check for specific override in past
+      const pastData = bucket.monthlyData[iterKey];
+      if (pastData && pastData.isExplicitlyDeleted) {
+          // Saved 0 this month
+      } else if (pastData && pastData.amount > 0) {
+          savedSoFar += pastData.amount;
+      } else {
+          // If no override, what was the rate *back then*? 
+          // This is hard because the rate changes if we miss a payment.
+          // SIMPLIFICATION: We assume the standard rate was paid if no data exists.
+          // But wait, if we are in the future, we don't know the rate yet.
+          
+          // Better approach: 
+          // "Theoretical Saved" is tricky. 
+          // Let's rely on the fact that if it wasn't overridden, it was the "Standard Rate" calculated *at that time*.
+          // But that's circular.
+          
+          // NEW APPROACH:
+          // The "Standard Rate" for *this* month is:
+          // (Target - (Sum of ALL Past Actuals)) / Months Remaining.
+          // "Past Actuals" -> If data exists, use it. If not, assume we paid the *current plan's average*.
+          // Actually, if no data exists for a past month, it implies we paid "the plan".
+          // But if we want to change the plan today, we assume past was paid?
+          
+          // Let's try: SavedSoFar = Sum of overrides. 
+          // For months without overrides, we can't easily guess.
+          
+          // Let's try the Inverse:
+          // We calculate the *Uniform Monthly Rate* required from Start to End.
+          // Then we subtract any *Deficits* or add *Surpluses* from past months.
+          
+          // Even simpler:
+          // We assume "Perfect History" unless overridden.
+          // Base Rate = Target / TotalMonths.
+          // For every past month:
+          //    If override exists: delta = override - Base Rate.
+          //    Accumulate deltas.
+          // Remaining Needed = Target - (BaseRate * MonthsPassed + AccumulatedDeltas).
+          // New Rate = Remaining Needed / Months Remaining.
+      }
+      iterDate = addMonths(iterDate, 1);
+  }
+
+  // IMPLEMENTATION OF "EVEN SIMPLER" APPROACH:
+  const totalMonths = differenceInMonths(target, start);
   if (totalMonths <= 0) return bucket.targetAmount;
+  
+  const baseRate = bucket.targetAmount / totalMonths;
+  
+  let accumulatedDelta = 0;
+  iterDate = start;
+  
+  while (isBefore(iterDate, current)) {
+      const iterKey = format(iterDate, 'yyyy-MM');
+      const pastData = bucket.monthlyData[iterKey];
+      
+      if (pastData) {
+          const actual = pastData.isExplicitlyDeleted ? 0 : (pastData.amount || baseRate);
+          // If amount is set, we compare to baseRate.
+          // Wait, if amount is NOT set in data, it means it was "inherited" or default.
+          // But Goals don't inherit in my system usually. 
+          
+          // If we saved an override amount, the delta is (Actual - Base).
+          accumulatedDelta += (actual - baseRate);
+      }
+      // If NO data exists for a past month, we assume we paid the Base Rate. Delta is 0.
+      
+      iterDate = addMonths(iterDate, 1);
+  }
 
-  return bucket.targetAmount / totalMonths;
+  // How much do we have left to save relative to the "Base Plan"?
+  // If we saved EXTRA (positive delta), we need to save LESS now.
+  // If we saved LESS (negative delta), we need to save MORE now.
+  
+  // Remaining base cost for this month + spread of the deficit
+  // Actually:
+  // Total Target
+  // - (MonthsPassed * BaseRate) -> What we should have saved by plan
+  // - accumulatedDelta -> The extra/missing from overrides
+  // = Remaining Target
+  
+  const monthsPassed = differenceInMonths(current, start);
+  const savedHypothetically = monthsPassed * baseRate;
+  const actualSavedSoFar = savedHypothetically + accumulatedDelta;
+  
+  const remainingTarget = bucket.targetAmount - actualSavedSoFar;
+  const monthsRemaining = differenceInMonths(target, current);
+  
+  if (monthsRemaining <= 0) return remainingTarget; // Should be paid off
+  
+  const newMonthlyRate = remainingTarget / monthsRemaining;
+  
+  return Math.max(0, newMonthlyRate);
 };
 
 // Check if a bucket is active/relevant for a specific month
@@ -177,6 +293,12 @@ export const isBucketActiveInMonth = (bucket: Bucket, monthKey: string): boolean
     const target = parseISO(`${bucket.targetDate}-01`);
     
     if (!isValid(current) || !isValid(start) || !isValid(target)) return false;
+
+    // Archived Logic: If archived, it stops being active AFTER the archive month.
+    if (bucket.archivedDate) {
+        const archived = parseISO(`${bucket.archivedDate}-01`);
+        if (isAfter(current, archived)) return false;
+    }
 
     // Goal Logic: Active from start until target (exclusive of target for savings)
     // Linked Goal Spending buckets: handled by the next check (linkedGoalId)
@@ -207,31 +329,42 @@ export const calculateSavedAmount = (bucket: Bucket, currentMonthKey: string): n
     
     const start = parseISO(`${bucket.startSavingDate}-01`);
     const target = parseISO(`${bucket.targetDate}-01`);
-    const current = parseISO(`${currentMonthKey}-01`);
+    let current = parseISO(`${currentMonthKey}-01`);
     
     if (!isValid(start) || !isValid(target) || !isValid(current)) return 0;
 
-    // Total cost per month
-    const monthlyCost = calculateGoalBucketCost(bucket, bucket.startSavingDate); // Hack: pass start date to get the raw rate
-    
-    // How many months have passed since start?
-    // If current is before start, 0
-    if (isBefore(current, start)) return 0;
+    // CAP logic for Archived goals
+    if (bucket.archivedDate) {
+        const archived = parseISO(`${bucket.archivedDate}-01`);
+        if (isAfter(current, archived)) {
+            current = archived;
+        }
+    }
 
-    let monthsPassed = differenceInMonths(current, start);
+    // Sum up actual costs (using calculateGoalBucketCost) for every month until now
+    let totalSaved = 0;
+    let iterDate = start;
     
-    // We only save UP TO the target date (exclusive).
-    // So max months is difference between target and start.
-    const maxMonths = differenceInMonths(target, start);
+    // We iterate up to and INCLUDING current month if it is active
+    // Wait, the UI usually shows "Saved Amount" as "What is in the bank".
+    // If we are in current month, and budget isn't "closed", do we count it?
+    // Usually yes, we project what we *will* have saved by end of month.
     
-    // Include current month if it is active (i.e., we are actively saving this month)
-    if (isBucketActiveInMonth(bucket, currentMonthKey)) {
-        monthsPassed += 1;
+    const limitDate = isBucketActiveInMonth(bucket, format(current, 'yyyy-MM')) ? addMonths(current, 1) : current;
+
+    while (isBefore(iterDate, limitDate)) {
+        // Stop if we hit target
+        if (!isBefore(iterDate, target)) break;
+
+        const key = format(iterDate, 'yyyy-MM');
+        // calculateGoalBucketCost handles overrides logic
+        const cost = calculateGoalBucketCost(bucket, key);
+        totalSaved += cost;
+        
+        iterDate = addMonths(iterDate, 1);
     }
     
-    if (monthsPassed > maxMonths) monthsPassed = maxMonths;
-    
-    return monthlyCost * monthsPassed;
+    return totalSaved;
 }
 
 // Get total income for a specific month

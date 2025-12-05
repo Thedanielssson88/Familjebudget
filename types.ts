@@ -34,6 +34,7 @@ export interface Bucket {
   paymentSource?: 'INCOME' | 'BALANCE'; // 'INCOME' = Deducted from monthly flow. 'BALANCE' = Deducted from account assets (transfer/spend).
   backgroundImage?: string; // URL for the dream card background
   linkedGoalId?: string; // If this bucket is a generated spending post, this ID links to the parent Goal
+  archivedDate?: string; // YYYY-MM. If set, the bucket is considered finished/inactive after this month.
 
   // Configuration per month. Values here are isolated per month.
   monthlyData: Record<MonthKey, BucketData>;

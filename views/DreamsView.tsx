@@ -3,9 +3,10 @@ import React, { useEffect, useState } from 'react';
 import { useApp } from '../store';
 import { calculateSavedAmount, formatMoney } from '../utils';
 import { PieChart, Pie, Cell, ResponsiveContainer } from 'recharts';
-import { format, parseISO, differenceInDays, isValid } from 'date-fns';
+import { format, parseISO, isValid } from 'date-fns';
 import { sv } from 'date-fns/locale';
-import { Plus } from 'lucide-react';
+import { Archive, CheckCircle } from 'lucide-react';
+import { cn } from '../components/components';
 
 // Animated Number Component
 const AnimatedNumber = ({ value }: { value: number }) => {
@@ -36,8 +37,22 @@ const AnimatedNumber = ({ value }: { value: number }) => {
 };
 
 export const DreamsView: React.FC = () => {
-    const { buckets, selectedMonth } = useApp();
-    const goals = buckets.filter(b => b.type === 'GOAL');
+    const { buckets, selectedMonth, archiveBucket } = useApp();
+    const [activeTab, setActiveTab] = useState<'active' | 'archived'>('active');
+
+    // Filter goals based on buckets
+    // A goal is "archived" if it has an archivedDate.
+    const allGoals = buckets.filter(b => b.type === 'GOAL');
+    const activeGoals = allGoals.filter(b => !b.archivedDate);
+    const archivedGoals = allGoals.filter(b => !!b.archivedDate);
+
+    const goalsToShow = activeTab === 'active' ? activeGoals : archivedGoals;
+
+    const handleArchive = (id: string, name: string) => {
+        if (confirm(`Vill du arkivera "${name}"? Detta avslutar sparandet från och med denna månad, men sparar historiken.`)) {
+            archiveBucket(id, selectedMonth);
+        }
+    };
 
     return (
         <div className="space-y-6 pb-24 animate-in slide-in-from-right duration-300">
@@ -46,15 +61,43 @@ export const DreamsView: React.FC = () => {
                 <p className="text-slate-400">Följ era sparmål mot verklighet</p>
             </header>
 
+            {/* TABS */}
+            <div className="flex p-1 bg-slate-800 rounded-xl">
+                <button 
+                    onClick={() => setActiveTab('active')}
+                    className={cn(
+                        "flex-1 py-2 text-sm font-medium rounded-lg transition-all",
+                        activeTab === 'active' ? "bg-purple-600 text-white shadow-lg" : "text-slate-400 hover:text-white"
+                    )}
+                >
+                    Aktiva ({activeGoals.length})
+                </button>
+                <button 
+                    onClick={() => setActiveTab('archived')}
+                    className={cn(
+                        "flex-1 py-2 text-sm font-medium rounded-lg transition-all",
+                        activeTab === 'archived' ? "bg-slate-600 text-white shadow-lg" : "text-slate-400 hover:text-white"
+                    )}
+                >
+                    Arkiv ({archivedGoals.length})
+                </button>
+            </div>
+
             <div className="grid gap-6">
-                {goals.length === 0 && (
+                {goalsToShow.length === 0 && (
                     <div className="text-center py-10 opacity-50">
-                        <p>Inga drömmar tillagda ännu.</p>
-                        <p className="text-sm">Gå till Budget och lägg till en "Dröm & Målsparande" post.</p>
+                        {activeTab === 'active' ? (
+                            <>
+                                <p>Inga aktiva drömmar.</p>
+                                <p className="text-sm">Gå till Budget och lägg till en "Dröm & Målsparande" post.</p>
+                            </>
+                        ) : (
+                            <p>Inga arkiverade drömmar än.</p>
+                        )}
                     </div>
                 )}
 
-                {goals.map(goal => {
+                {goalsToShow.map(goal => {
                     // Calculate progress
                     const saved = calculateSavedAmount(goal, selectedMonth);
                     const remaining = Math.max(0, goal.targetAmount - saved);
@@ -66,16 +109,19 @@ export const DreamsView: React.FC = () => {
                     ];
                     
                     let dateLabel = 'Ej satt';
-                    
                     if (goal.targetDate) {
                         const targetD = parseISO(`${goal.targetDate}-01`);
                         if (isValid(targetD)) {
                             dateLabel = format(targetD, 'MMMM yyyy', {locale: sv});
                         }
                     }
+
+                    // Visuals for archived state
+                    const isArchived = activeTab === 'archived';
+                    const grayscale = isArchived ? "grayscale opacity-80" : "";
                     
                     return (
-                        <div key={goal.id} className="relative w-full h-64 rounded-3xl overflow-hidden shadow-2xl group bg-slate-800">
+                        <div key={goal.id} className={cn("relative w-full h-64 rounded-3xl overflow-hidden shadow-2xl group bg-slate-800 transition-all", grayscale)}>
                             {/* Background Image */}
                             <div 
                                 className="absolute inset-0 bg-cover bg-center transition-transform duration-700 group-hover:scale-105"
@@ -87,19 +133,43 @@ export const DreamsView: React.FC = () => {
                             {/* Dark Gradient Overlay */}
                             <div className="absolute inset-0 bg-gradient-to-t from-black via-black/60 to-transparent" />
 
+                            {/* Archive Button (Only on Active) */}
+                            {!isArchived && (
+                                <button 
+                                    onClick={(e) => { 
+                                        e.preventDefault();
+                                        e.stopPropagation(); 
+                                        handleArchive(goal.id, goal.name); 
+                                    }}
+                                    className="absolute top-4 right-4 z-50 bg-black/40 hover:bg-black/80 text-white/80 hover:text-white p-3 rounded-full transition-all backdrop-blur-md shadow-lg border border-white/10"
+                                    title="Arkivera / Avsluta sparande"
+                                >
+                                    <Archive className="w-5 h-5" />
+                                </button>
+                            )}
+
                             {/* Content */}
-                            <div className="absolute inset-0 p-6 flex flex-col justify-end text-white">
-                                <div className="flex items-end justify-between">
+                            <div className="absolute inset-0 p-6 flex flex-col justify-end text-white z-10 pointer-events-none">
+                                <div className="flex items-end justify-between pointer-events-auto">
                                     <div className="flex-1">
-                                        <h2 className="text-2xl font-bold mb-1 leading-none shadow-black drop-shadow-lg">{goal.name}</h2>
+                                        <div className="flex items-center gap-2 mb-1">
+                                            <h2 className="text-2xl font-bold leading-none shadow-black drop-shadow-lg">{goal.name}</h2>
+                                            {isArchived && <CheckCircle className="w-5 h-5 text-emerald-400" />}
+                                        </div>
                                         <p className="text-sm text-slate-300 mb-4 font-medium drop-shadow-md">
-                                            Mål: {dateLabel}
+                                            {isArchived ? `Avslutad: ${goal.archivedDate}` : `Mål: ${dateLabel}`}
                                         </p>
                                         
                                         <div className="space-y-1">
-                                            <div className="text-xs font-bold uppercase tracking-widest text-purple-300">Kvar till drömmen</div>
+                                            <div className="text-xs font-bold uppercase tracking-widest text-purple-300">
+                                                {isArchived ? "Totalt Sparat" : "Kvar till drömmen"}
+                                            </div>
                                             <div className="text-4xl font-bold font-mono tracking-tighter text-white drop-shadow-lg">
-                                                <AnimatedNumber value={remaining} />
+                                                {isArchived ? (
+                                                    <span>{formatMoney(saved)}</span>
+                                                ) : (
+                                                    <AnimatedNumber value={remaining} />
+                                                )}
                                             </div>
                                         </div>
                                     </div>
@@ -117,7 +187,7 @@ export const DreamsView: React.FC = () => {
                                                     dataKey="value"
                                                     stroke="none"
                                                 >
-                                                    <Cell fill="#a855f7" /> {/* Purple for saved */}
+                                                    <Cell fill={isArchived ? "#64748b" : "#a855f7"} /> {/* Color for saved */}
                                                     <Cell fill="#ffffff" fillOpacity={0.2} /> {/* White/Transparent for remaining */}
                                                 </Pie>
                                             </PieChart>
