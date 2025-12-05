@@ -3,6 +3,11 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+    <meta name="theme-color" content="#0f172a" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="FamilyFlow" />
+    <link rel="apple-touch-icon" href="/pwa-192x192.png" />
     <title>FamilyFlow</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script>
@@ -28,6 +33,7 @@
         color: #f8fafc;
         font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
         -webkit-tap-highlight-color: transparent;
+        overscroll-behavior-y: none; /* Prevents pull-to-refresh on mobile */
       }
       /* Hide scrollbar for clean mobile look */
       .no-scrollbar::-webkit-scrollbar {
@@ -49,10 +55,17 @@
     "date-fns/": "https://aistudiocdn.com/date-fns@^4.1.0/",
     "date-fns": "https://aistudiocdn.com/date-fns@^4.1.0",
     "recharts": "https://aistudiocdn.com/recharts@^3.5.1",
-    "clsx": "https://aistudiocdn.com/clsx@^2.1.1"
+    "clsx": "https://aistudiocdn.com/clsx@^2.1.1",
+    "vite": "https://aistudiocdn.com/vite@^7.2.6",
+    "@vitejs/plugin-react": "https://aistudiocdn.com/@vitejs/plugin-react@^5.1.1",
+    "vite-plugin-pwa": "https://aistudiocdn.com/vite-plugin-pwa@^1.2.0"
   }
 }
 </script>
+<!-- Google Identity Services -->
+<script src="https://accounts.google.com/gsi/client" async defer></script>
+<!-- Google API Client -->
+<script src="https://apis.google.com/js/api.js" async defer></script>
 </head>
   <body>
     <div id="root"></div>

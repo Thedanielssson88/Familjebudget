@@ -14,6 +14,9 @@ interface AppContextType extends GlobalState {
   confirmBucketAmount: (id: string, month: MonthKey) => void;
   setMonth: (month: MonthKey) => void;
   setPayday: (day: number) => void;
+  // Backup features
+  getExportData: () => string;
+  importData: (json: string) => boolean;
 }
 
 const AppContext = createContext<AppContextType | undefined>(undefined);
@@ -201,12 +204,37 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const setPayday = (day: number) => setSettings({ ...settings, payday: day });
 
+  // BACKUP FUNCTIONS
+  const getExportData = () => {
+      const state = { users, accounts, buckets, settings };
+      return JSON.stringify(state);
+  };
+
+  const importData = (json: string): boolean => {
+      try {
+          const parsed = JSON.parse(json);
+          // Basic validation
+          if (!parsed.users || !parsed.buckets) throw new Error("Invalid format");
+          
+          setUsers(parsed.users);
+          setAccounts(parsed.accounts);
+          setBuckets(parsed.buckets);
+          if (parsed.settings) setSettings(parsed.settings);
+          
+          return true;
+      } catch (e) {
+          console.error("Failed to import data", e);
+          return false;
+      }
+  };
+
   if (!isLoaded) return <div className="min-h-screen bg-background flex items-center justify-center text-white">Laddar FamilyFlow...</div>;
 
   return (
     <AppContext.Provider value={{
       users, accounts, buckets, settings, selectedMonth,
-      addUser, updateUserIncome, updateUserName, addAccount, addBucket, updateBucket, deleteBucket, confirmBucketAmount, setMonth: setSelectedMonth, setPayday
+      addUser, updateUserIncome, updateUserName, addAccount, addBucket, updateBucket, deleteBucket, confirmBucketAmount, setMonth: setSelectedMonth, setPayday,
+      getExportData, importData
     }}>
       {children}
     </AppContext.Provider>
