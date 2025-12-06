@@ -1,7 +1,73 @@
 import React, { createContext, useContext, useEffect, useState } from 'react';
 import { Account, AppSettings, Bucket, GlobalState, User, MonthKey } from './types';
 import { format, addMonths, parseISO } from 'date-fns';
-import { getEffectiveBucketData } from './utils';
+import { getEffectiveBucketData, generateId } from './utils';
+import { z } from 'zod';
+import { db } from './db';
+
+// --- ZOD SCHEMAS FOR VALIDATION (Still used for Import/Backup) ---
+
+const BucketDataSchema = z.object({
+  amount: z.number().optional().default(0),
+  dailyAmount: z.number().optional().default(0),
+  activeDays: z.array(z.number()).optional().default([]),
+  isExplicitlyDeleted: z.boolean().optional()
+});
+
+const BucketTypeSchema = z.enum(['FIXED', 'DAILY', 'GOAL']);
+const PaymentSourceSchema = z.enum(['INCOME', 'BALANCE']);
+
+const BucketSchema = z.object({
+  id: z.string(),
+  accountId: z.string(),
+  name: z.string(),
+  type: BucketTypeSchema,
+  isSavings: z.boolean(),
+  paymentSource: PaymentSourceSchema.optional(),
+  backgroundImage: z.string().optional(),
+  linkedGoalId: z.string().optional(),
+  archivedDate: z.string().optional(),
+  monthlyData: z.record(z.string(), BucketDataSchema),
+  targetAmount: z.number().optional().default(0),
+  targetDate: z.string().optional().default(''),
+  startSavingDate: z.string().optional().default('')
+});
+
+const UserIncomeDataSchema = z.object({
+  salary: z.number().optional().default(0),
+  childBenefit: z.number().optional().default(0),
+  insurance: z.number().optional().default(0),
+  incomeLoss: z.number().optional().default(0),
+  vabDays: z.number().optional().default(0),
+  dailyDeduction: z.number().optional().default(0)
+});
+
+const UserSchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  avatar: z.string(),
+  incomeData: z.record(z.string(), UserIncomeDataSchema)
+});
+
+const AccountSchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  icon: z.string(),
+  startBalances: z.record(z.string(), z.number()).optional().default({})
+});
+
+const AppSettingsSchema = z.object({
+  payday: z.number()
+});
+
+const GlobalStateSchema = z.object({
+  users: z.array(UserSchema).optional().default([]),
+  accounts: z.array(AccountSchema).optional().default([]),
+  buckets: z.array(BucketSchema).optional().default([]),
+  settings: AppSettingsSchema.optional().default({ payday: 25 })
+});
+
+// --- END SCHEMAS ---
 
 interface AppContextType extends GlobalState {
   addUser: (name: string, avatar: string) => void;
@@ -16,14 +82,13 @@ interface AppContextType extends GlobalState {
   setMonth: (month: MonthKey) => void;
   setPayday: (day: number) => void;
   // Backup features
-  getExportData: () => string;
-  importData: (json: string) => boolean;
+  getExportData: () => Promise<string>; // Changed to Promise due to DB
+  importData: (json: string) => Promise<boolean>; // Changed to Promise
 }
 
 const AppContext = createContext<AppContextType | undefined>(undefined);
 
-const STORAGE_KEY = 'familyflow_db_v3'; // Bumped version
-
+const STORAGE_KEY = 'familyflow_db_v3'; 
 const defaultSettings: AppSettings = { payday: 25 };
 
 export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
@@ -34,212 +99,271 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const [settings, setSettings] = useState<AppSettings>(defaultSettings);
   const [selectedMonth, setSelectedMonth] = useState<string>(format(new Date(), 'yyyy-MM'));
 
-  // Load from LS
+  // Initial Load & Migration Logic
   useEffect(() => {
-    const stored = localStorage.getItem(STORAGE_KEY);
-    if (stored) {
-      const parsed = JSON.parse(stored);
-      setUsers(parsed.users || []);
-      setAccounts(parsed.accounts || []);
-      setBuckets(parsed.buckets || []);
-      setSettings(parsed.settings || defaultSettings);
-    } else {
-        // Seed demo data
-        const demoUsers = [
-            { id: '1', name: 'Anna', avatar: '👩', incomeData: {} },
-            { id: '2', name: 'Erik', avatar: '👨', incomeData: {} }
-        ];
-        const demoAccounts = [
-            { id: 'acc1', name: 'Hushållskonto', icon: '🏠', startBalances: {} },
-            { id: 'acc2', name: 'Bil & Transport', icon: '🚗', startBalances: {} },
-            { id: 'acc3', name: 'Buffert', icon: '💰', startBalances: {} }
-        ];
+    const loadData = async () => {
+      try {
+        const userCount = await db.users.count();
         
-        // Initial month for demo data
-        const currentMonth = format(new Date(), 'yyyy-MM');
+        if (userCount === 0) {
+            // Check LocalStorage for migration
+            const storedLS = localStorage.getItem(STORAGE_KEY);
+            if (storedLS) {
+                console.log("Migrating data from LocalStorage to IndexedDB...");
+                const parsedRaw = JSON.parse(storedLS);
+                const result = GlobalStateSchema.safeParse(parsedRaw);
+
+                if (result.success) {
+                    const data = result.data;
+                    await (db as any).transaction('rw', db.users, db.accounts, db.buckets, db.settings, async () => {
+                        await db.users.bulkAdd(data.users);
+                        await db.accounts.bulkAdd(data.accounts);
+                        await db.buckets.bulkAdd(data.buckets);
+                        await db.settings.put({ ...data.settings, id: 1 });
+                    });
+                }
+            } else {
+                // Seed Demo Data
+                console.log("Seeding demo data...");
+                const currentMonth = format(new Date(), 'yyyy-MM');
+                const demoUsers: User[] = [
+                    { id: '1', name: 'Anna', avatar: '👩', incomeData: {} },
+                    { id: '2', name: 'Erik', avatar: '👨', incomeData: {} }
+                ];
+                const demoAccounts: Account[] = [
+                    { id: 'acc1', name: 'Hushållskonto', icon: '🏠', startBalances: {} },
+                    { id: 'acc2', name: 'Bil & Transport', icon: '🚗', startBalances: {} },
+                    { id: 'acc3', name: 'Buffert', icon: '💰', startBalances: {} }
+                ];
+                const demoBuckets: Bucket[] = [
+                    { 
+                        id: 'b1', accountId: 'acc1', name: 'Mat (Hemköp)', type: 'FIXED', isSavings: false, 
+                        monthlyData: { [currentMonth]: { amount: 6000, dailyAmount: 0, activeDays: [] } },
+                        targetAmount: 0, targetDate: '', startSavingDate: '' 
+                    },
+                    { 
+                        id: 'b2', accountId: 'acc1', name: 'Luncher', type: 'DAILY', isSavings: false, 
+                        monthlyData: { [currentMonth]: { amount: 0, dailyAmount: 135, activeDays: [1,2,3,4,5] } },
+                        targetAmount: 0, targetDate: '', startSavingDate: '' 
+                    },
+                    { 
+                        id: 'b3', accountId: 'acc3', name: 'Sommarsemester 2025', type: 'GOAL', isSavings: true, 
+                        monthlyData: {},
+                        targetAmount: 30000, targetDate: '2025-06', startSavingDate: '2024-01' 
+                    },
+                ];
+
+                await (db as any).transaction('rw', db.users, db.accounts, db.buckets, db.settings, async () => {
+                    await db.users.bulkAdd(demoUsers);
+                    await db.accounts.bulkAdd(demoAccounts);
+                    await db.buckets.bulkAdd(demoBuckets);
+                    await db.settings.put({ ...defaultSettings, id: 1 });
+                });
+            }
+        }
+
+        // Fetch from DB to State
+        const dbUsers = await db.users.toArray();
+        const dbAccounts = await db.accounts.toArray();
+        const dbBuckets = await db.buckets.toArray();
+        const dbSettings = await db.settings.get(1);
+
+        setUsers(dbUsers);
+        setAccounts(dbAccounts);
+        setBuckets(dbBuckets);
+        if (dbSettings) {
+            const { id, ...cleanSettings } = dbSettings;
+            setSettings(cleanSettings);
+        }
         
-        const demoBuckets: Bucket[] = [
-            { 
-              id: 'b1', accountId: 'acc1', name: 'Mat (Hemköp)', type: 'FIXED', isSavings: false, 
-              monthlyData: {
-                [currentMonth]: { amount: 6000, dailyAmount: 0, activeDays: [] }
-              },
-              targetAmount: 0, targetDate: '', startSavingDate: '' 
-            },
-            { 
-              id: 'b2', accountId: 'acc1', name: 'Luncher', type: 'DAILY', isSavings: false, 
-              monthlyData: {
-                [currentMonth]: { amount: 0, dailyAmount: 135, activeDays: [1,2,3,4,5] }
-              },
-              targetAmount: 0, targetDate: '', startSavingDate: '' 
-            },
-            { 
-              id: 'b3', accountId: 'acc3', name: 'Sommarsemester 2025', type: 'GOAL', isSavings: true, 
-              monthlyData: {},
-              targetAmount: 30000, targetDate: '2025-06', startSavingDate: '2024-01' 
-            },
-        ];
-        setUsers(demoUsers);
-        setAccounts(demoAccounts);
-        setBuckets(demoBuckets);
-    }
-    setIsLoaded(true);
+        setIsLoaded(true);
+      } catch (e) {
+        console.error("Database initialization failed", e);
+      }
+    };
+
+    loadData();
   }, []);
 
-  // Save to LS
-  useEffect(() => {
-    if (!isLoaded) return;
-    const state = { users, accounts, buckets, settings };
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
-  }, [users, accounts, buckets, settings, isLoaded]);
+  // --- ACTIONS ---
 
-  const addUser = (name: string, avatar: string) => {
-    setUsers([...users, { id: Math.random().toString(), name, avatar, incomeData: {} }]);
+  const addUser = async (name: string, avatar: string) => {
+    const newUser: User = { id: generateId(), name, avatar, incomeData: {} };
+    await db.users.add(newUser);
+    setUsers(prev => [...prev, newUser]);
   };
 
-  const updateUserIncome = (userId: string, month: MonthKey, type: 'salary'|'childBenefit'|'insurance'|'vabDays'|'dailyDeduction'|'incomeLoss', value: number) => {
-    setUsers(prev => prev.map(u => {
-      if (u.id !== userId) return u;
-      
-      const newIncomeData = { ...u.incomeData };
-      const currentMonthData = newIncomeData[month] || { salary: 0, childBenefit: 0, insurance: 0 };
-      
-      newIncomeData[month] = { ...currentMonthData, [type]: value };
+  const updateUserIncome = async (userId: string, month: MonthKey, type: 'salary'|'childBenefit'|'insurance'|'vabDays'|'dailyDeduction'|'incomeLoss', value: number) => {
+    const user = users.find(u => u.id === userId);
+    if (!user) return;
 
-      // Propagate daily deduction changes to future months to save re-entry
-      if (type === 'dailyDeduction') {
-          Object.keys(newIncomeData).forEach(key => {
-              if (key > month && newIncomeData[key]) {
-                  newIncomeData[key] = { ...newIncomeData[key], dailyDeduction: value };
-              }
-          });
-      }
+    const newIncomeData = { ...user.incomeData };
+    const currentMonthData = newIncomeData[month] || { salary: 0, childBenefit: 0, insurance: 0 };
+    newIncomeData[month] = { ...currentMonthData, [type]: value };
 
-      return {
-        ...u,
-        incomeData: newIncomeData
-      };
-    }));
+    if (type === 'dailyDeduction') {
+        Object.keys(newIncomeData).forEach(key => {
+            if (key > month && newIncomeData[key]) {
+                newIncomeData[key] = { ...newIncomeData[key], dailyDeduction: value };
+            }
+        });
+    }
+
+    const updatedUser = { ...user, incomeData: newIncomeData };
+    await db.users.put(updatedUser);
+    setUsers(prev => prev.map(u => u.id === userId ? updatedUser : u));
   };
 
-  const updateUserName = (userId: string, name: string) => {
-    setUsers(prev => prev.map(u => u.id === userId ? { ...u, name } : u));
+  const updateUserName = async (userId: string, name: string) => {
+    const user = users.find(u => u.id === userId);
+    if (!user) return;
+    const updatedUser = { ...user, name };
+    await db.users.put(updatedUser);
+    setUsers(prev => prev.map(u => u.id === userId ? updatedUser : u));
   };
 
-  const addAccount = (name: string, icon: string) => {
-    setAccounts(prev => [...prev, { id: Math.random().toString(), name, icon, startBalances: {} }]);
+  const addAccount = async (name: string, icon: string) => {
+    const newAccount: Account = { id: generateId(), name, icon, startBalances: {} };
+    await db.accounts.add(newAccount);
+    setAccounts(prev => [...prev, newAccount]);
   };
 
-  const addBucket = (bucket: Bucket) => setBuckets(prev => {
-      // Prevent duplicates if rapid clicks
-      if (prev.find(b => b.id === bucket.id)) return prev;
-      return [...prev, bucket];
-  });
+  const addBucket = async (bucket: Bucket) => {
+      // Prevent duplicates
+      if (buckets.find(b => b.id === bucket.id)) return;
+      await db.buckets.add(bucket);
+      setBuckets(prev => [...prev, bucket]);
+  };
   
-  const updateBucket = (bucket: Bucket) => {
+  const updateBucket = async (bucket: Bucket) => {
+    await db.buckets.put(bucket);
     setBuckets(prev => prev.map(b => b.id === bucket.id ? bucket : b));
   };
 
-  const confirmBucketAmount = (id: string, month: MonthKey) => {
-      setBuckets(prev => prev.map(b => {
-          if (b.id !== id) return b;
-          
-          const { data, isInherited } = getEffectiveBucketData(b, month);
-          // If we have inherited data, explicit save it to current month to "Confirm" it
-          if (isInherited && data) {
-              return {
-                  ...b,
-                  monthlyData: {
-                      ...b.monthlyData,
-                      [month]: { ...data, isExplicitlyDeleted: false }
-                  }
+  const confirmBucketAmount = async (id: string, month: MonthKey) => {
+      const bucket = buckets.find(b => b.id === id);
+      if (!bucket) return;
+
+      const { data, isInherited } = getEffectiveBucketData(bucket, month);
+      
+      if (isInherited && data) {
+          const updatedBucket = {
+              ...bucket,
+              monthlyData: {
+                  ...bucket.monthlyData,
+                  [month]: { ...data, isExplicitlyDeleted: false }
               }
           }
-          return b;
-      }));
+          await db.buckets.put(updatedBucket);
+          setBuckets(prev => prev.map(b => b.id === id ? updatedBucket : b));
+      }
   };
 
-  const deleteBucket = (id: string, month: MonthKey, scope: 'THIS_MONTH' | 'THIS_AND_FUTURE' | 'ALL') => {
+  const deleteBucket = async (id: string, month: MonthKey, scope: 'THIS_MONTH' | 'THIS_AND_FUTURE' | 'ALL') => {
     if (scope === 'ALL') {
+        await db.buckets.delete(id);
         setBuckets(prev => prev.filter(b => b.id !== id));
         return;
     }
 
-    setBuckets(prev => {
-      return prev.map(b => {
-        if (b.id !== id) return b;
-        
-        const newMonthlyData = { ...b.monthlyData };
-        // We need to know what we are deleting. If inherited, we first materialize it then delete.
-        const { data: effectiveData } = getEffectiveBucketData(b, month);
-        const currentData = effectiveData || { amount: 0, dailyAmount: 0, activeDays: [] };
+    const bucket = buckets.find(b => b.id === id);
+    if (!bucket) return;
 
-        if (scope === 'THIS_MONTH') {
-            // 1. Mark current month as explicitly deleted
-            newMonthlyData[month] = { ...currentData, amount: 0, dailyAmount: 0, isExplicitlyDeleted: true };
-            
-            // 2. To prevent propagation logic from hiding the NEXT month (because current is deleted),
-            // we must ensure the NEXT month exists and is valid (cloning current data before deletion).
-            // Only do this if next month doesn't already exist.
-            const nextMonth = format(addMonths(parseISO(`${month}-01`), 1), 'yyyy-MM');
-            if (!newMonthlyData[nextMonth]) {
-                // Restore the original settings for next month
-                newMonthlyData[nextMonth] = { ...currentData, isExplicitlyDeleted: false };
-            }
-        } else if (scope === 'THIS_AND_FUTURE') {
-            // Soft delete this month
-            newMonthlyData[month] = { ...currentData, amount: 0, dailyAmount: 0, isExplicitlyDeleted: true };
-            
-            // Soft delete any EXISTING future entries to ensure they don't override the stop
-            Object.keys(newMonthlyData).forEach(key => {
-                if (key > month) {
-                    newMonthlyData[key] = { ...newMonthlyData[key], isExplicitlyDeleted: true, amount: 0, dailyAmount: 0 };
-                }
-            });
+    const newMonthlyData = { ...bucket.monthlyData };
+    const { data: effectiveData } = getEffectiveBucketData(bucket, month);
+    const currentData = effectiveData || { amount: 0, dailyAmount: 0, activeDays: [] };
+
+    if (scope === 'THIS_MONTH') {
+        newMonthlyData[month] = { ...currentData, amount: 0, dailyAmount: 0, isExplicitlyDeleted: true };
+        const nextMonth = format(addMonths(parseISO(`${month}-01`), 1), 'yyyy-MM');
+        if (!newMonthlyData[nextMonth]) {
+            newMonthlyData[nextMonth] = { ...currentData, isExplicitlyDeleted: false };
         }
-        
-        return { ...b, monthlyData: newMonthlyData };
-      });
-    });
+    } else if (scope === 'THIS_AND_FUTURE') {
+        newMonthlyData[month] = { ...currentData, amount: 0, dailyAmount: 0, isExplicitlyDeleted: true };
+        Object.keys(newMonthlyData).forEach(key => {
+            if (key > month) {
+                newMonthlyData[key] = { ...newMonthlyData[key], isExplicitlyDeleted: true, amount: 0, dailyAmount: 0 };
+            }
+        });
+    }
+
+    const updatedBucket = { ...bucket, monthlyData: newMonthlyData };
+    await db.buckets.put(updatedBucket);
+    setBuckets(prev => prev.map(b => b.id === id ? updatedBucket : b));
   };
 
-  const archiveBucket = (id: string, month: MonthKey) => {
-    setBuckets(prev => prev.map(b => {
-        if (b.id !== id) return b;
-        return {
-            ...b,
-            archivedDate: month
-        };
-    }));
+  const archiveBucket = async (id: string, month: MonthKey) => {
+    const bucket = buckets.find(b => b.id === id);
+    if (!bucket) return;
+    const updatedBucket = { ...bucket, archivedDate: month };
+    await db.buckets.put(updatedBucket);
+    setBuckets(prev => prev.map(b => b.id === id ? updatedBucket : b));
   };
 
-  const setPayday = (day: number) => setSettings({ ...settings, payday: day });
+  const setPayday = async (day: number) => {
+      const newSettings = { ...settings, payday: day };
+      await db.settings.put({ ...newSettings, id: 1 });
+      setSettings(newSettings);
+  };
 
   // BACKUP FUNCTIONS
-  const getExportData = () => {
-      const state = { users, accounts, buckets, settings };
+  const getExportData = async () => {
+      const dbUsers = await db.users.toArray();
+      const dbAccounts = await db.accounts.toArray();
+      const dbBuckets = await db.buckets.toArray();
+      const dbSettings = await db.settings.get(1);
+      
+      const { id, ...cleanSettings } = dbSettings || defaultSettings;
+
+      const state = { 
+          users: dbUsers, 
+          accounts: dbAccounts, 
+          buckets: dbBuckets, 
+          settings: cleanSettings 
+      };
       return JSON.stringify(state);
   };
 
-  const importData = (json: string): boolean => {
+  const importData = async (json: string): Promise<boolean> => {
       try {
-          const parsed = JSON.parse(json);
-          // Basic validation
-          if (!parsed.users || !parsed.buckets) throw new Error("Invalid format");
+          const raw = JSON.parse(json);
+          const result = GlobalStateSchema.safeParse(raw);
           
-          setUsers(parsed.users);
-          setAccounts(parsed.accounts);
-          setBuckets(parsed.buckets);
-          if (parsed.settings) setSettings(parsed.settings);
+          if (!result.success) {
+              console.error("Backup file validation failed", result.error);
+              alert("Filen är trasig eller har fel format.");
+              return false;
+          }
+          
+          const data = result.data;
+          
+          await (db as any).transaction('rw', db.users, db.accounts, db.buckets, db.settings, async () => {
+             await db.users.clear();
+             await db.accounts.clear();
+             await db.buckets.clear();
+             await db.settings.clear();
+
+             await db.users.bulkAdd(data.users);
+             await db.accounts.bulkAdd(data.accounts);
+             await db.buckets.bulkAdd(data.buckets);
+             if (data.settings) await db.settings.put({ ...data.settings, id: 1 });
+          });
+          
+          setUsers(data.users);
+          setAccounts(data.accounts);
+          setBuckets(data.buckets);
+          if (data.settings) setSettings(data.settings);
           
           return true;
       } catch (e) {
           console.error("Failed to import data", e);
+          alert("Kunde inte läsa filen (JSON Parse Error).");
           return false;
       }
   };
 
-  if (!isLoaded) return <div className="min-h-screen bg-background flex items-center justify-center text-white">Laddar FamilyFlow...</div>;
+  if (!isLoaded) return <div className="min-h-screen bg-background flex items-center justify-center text-white">Laddar FamilyFlow från databas...</div>;
 
   return (
     <AppContext.Provider value={{
