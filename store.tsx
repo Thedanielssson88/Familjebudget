@@ -1,9 +1,10 @@
 import React, { createContext, useContext, useEffect, useState } from 'react';
-import { Account, AppSettings, Bucket, GlobalState, User, MonthKey, Transaction, ImportRule } from './types';
+import { Account, AppSettings, Bucket, GlobalState, User, MonthKey, Transaction, ImportRule, MainCategory, SubCategory } from './types';
 import { format, addMonths, parseISO } from 'date-fns';
 import { getEffectiveBucketData, generateId } from './utils';
 import { z } from 'zod';
 import { db } from './db';
+import { DEFAULT_MAIN_CATEGORIES, DEFAULT_SUB_CATEGORIES } from './constants/defaultCategories';
 
 // --- ZOD SCHEMAS FOR VALIDATION (Still used for Import/Backup) ---
 
@@ -60,13 +61,28 @@ const AppSettingsSchema = z.object({
   payday: z.number()
 });
 
+const MainCategorySchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  description: z.string().optional()
+});
+
+const SubCategorySchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  mainCategoryId: z.string(),
+  description: z.string().optional()
+});
+
 const TransactionSchema = z.object({
     id: z.string(),
     accountId: z.string(),
     date: z.string(),
     amount: z.number(),
     description: z.string(),
-    categoryId: z.string().optional(),
+    bucketId: z.string().optional(),
+    categoryMainId: z.string().optional(),
+    categorySubId: z.string().optional(),
     isVerified: z.boolean(),
     source: z.enum(['manual', 'import'])
 });
@@ -74,7 +90,9 @@ const TransactionSchema = z.object({
 const ImportRuleSchema = z.object({
     id: z.string(),
     keyword: z.string(),
-    targetBucketId: z.string(),
+    targetBucketId: z.string().optional(),
+    targetCategoryMainId: z.string().optional(),
+    targetCategorySubId: z.string().optional(),
     matchType: z.enum(['contains', 'exact', 'starts_with'])
 });
 
@@ -84,7 +102,9 @@ const GlobalStateSchema = z.object({
   buckets: z.array(BucketSchema).optional().default([]),
   settings: AppSettingsSchema.optional().default({ payday: 25 }),
   transactions: z.array(TransactionSchema).optional().default([]),
-  importRules: z.array(ImportRuleSchema).optional().default([])
+  importRules: z.array(ImportRuleSchema).optional().default([]),
+  mainCategories: z.array(MainCategorySchema).optional().default([]),
+  subCategories: z.array(SubCategorySchema).optional().default([])
 });
 
 // --- END SCHEMAS ---
@@ -106,6 +126,12 @@ interface AppContextType extends GlobalState {
   updateTransaction: (tx: Transaction) => Promise<void>;
   addImportRule: (rule: ImportRule) => Promise<void>;
   deleteTransaction: (id: string) => Promise<void>;
+  // Category Methods
+  addMainCategory: (name: string) => Promise<void>;
+  deleteMainCategory: (id: string) => Promise<void>;
+  addSubCategory: (mainCatId: string, name: string) => Promise<void>;
+  deleteSubCategory: (id: string) => Promise<void>;
+  resetCategoriesToDefault: () => Promise<void>;
   // Backup features
   getExportData: () => Promise<string>; 
   importData: (json: string) => Promise<boolean>; 
@@ -125,6 +151,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const [selectedMonth, setSelectedMonth] = useState<string>(format(new Date(), 'yyyy-MM'));
   const [transactions, setTransactions] = useState<Transaction[]>([]);
   const [importRules, setImportRules] = useState<ImportRule[]>([]);
+  const [mainCategories, setMainCategories] = useState<MainCategory[]>([]);
+  const [subCategories, setSubCategories] = useState<SubCategory[]>([]);
 
   // Initial Load & Migration Logic
   useEffect(() => {
@@ -142,13 +170,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
                 if (result.success) {
                     const data = result.data;
-                    await (db as any).transaction('rw', db.users, db.accounts, db.buckets, db.settings, db.transactions, db.importRules, async () => {
+                    await (db as any).transaction('rw', db.users, db.accounts, db.buckets, db.settings, db.transactions, db.importRules, db.mainCategories, db.subCategories, async () => {
                         await db.users.bulkAdd(data.users);
                         await db.accounts.bulkAdd(data.accounts);
                         await db.buckets.bulkAdd(data.buckets);
                         await db.settings.put({ ...data.settings, id: 1 });
                         if (data.transactions) await db.transactions.bulkAdd(data.transactions);
                         if (data.importRules) await db.importRules.bulkAdd(data.importRules);
+                        if (data.mainCategories) await db.mainCategories.bulkAdd(data.mainCategories);
+                        if (data.subCategories) await db.subCategories.bulkAdd(data.subCategories);
                     });
                 }
             } else {
@@ -182,11 +212,18 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
                     },
                 ];
 
-                await (db as any).transaction('rw', db.users, db.accounts, db.buckets, db.settings, async () => {
+                await (db as any).transaction('rw', db.users, db.accounts, db.buckets, db.settings, db.mainCategories, db.subCategories, async () => {
                     await db.users.bulkAdd(demoUsers);
                     await db.accounts.bulkAdd(demoAccounts);
                     await db.buckets.bulkAdd(demoBuckets);
                     await db.settings.put({ ...defaultSettings, id: 1 });
+                    
+                    // Seed Categories if empty
+                    const mains = await db.mainCategories.count();
+                    if (mains === 0) {
+                        await db.mainCategories.bulkAdd(DEFAULT_MAIN_CATEGORIES);
+                        await db.subCategories.bulkAdd(DEFAULT_SUB_CATEGORIES);
+                    }
                 });
             }
         }
@@ -198,12 +235,46 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         const dbSettings = await db.settings.get(1);
         const dbTransactions = await db.transactions.toArray();
         const dbRules = await db.importRules.toArray();
+        const dbMainCats = await db.mainCategories.toArray();
+        const dbSubCats = await db.subCategories.toArray();
 
         setUsers(dbUsers);
         setAccounts(dbAccounts);
         setBuckets(dbBuckets);
-        setTransactions(dbTransactions);
-        setImportRules(dbRules);
+        
+        // Check if categories are empty and load defaults if so (fallback for existing DBs)
+        if (dbMainCats.length === 0) {
+             await (db as any).transaction('rw', db.mainCategories, db.subCategories, async () => {
+                await db.mainCategories.bulkAdd(DEFAULT_MAIN_CATEGORIES);
+                await db.subCategories.bulkAdd(DEFAULT_SUB_CATEGORIES);
+             });
+             setMainCategories(DEFAULT_MAIN_CATEGORIES);
+             setSubCategories(DEFAULT_SUB_CATEGORIES);
+        } else {
+             setMainCategories(dbMainCats);
+             setSubCategories(dbSubCats);
+        }
+        
+        // MIGRATION: Map old categoryId to bucketId if needed
+        const migratedTransactions = dbTransactions.map(t => {
+            const anyT = t as any;
+            if (anyT.categoryId && !t.bucketId) {
+                return { ...t, bucketId: anyT.categoryId, categoryId: undefined };
+            }
+            return t;
+        });
+        
+        // MIGRATION: Update Rules
+        const migratedRules = dbRules.map(r => {
+             const anyR = r as any;
+             if (anyR.targetBucketId && !anyR.targetBucketId) {
+                 return r;
+             }
+             return r;
+        });
+
+        setTransactions(migratedTransactions);
+        setImportRules(migratedRules);
 
         if (dbSettings) {
             const { id, ...cleanSettings } = dbSettings;
@@ -361,6 +432,49 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       await db.importRules.add(rule);
       setImportRules(prev => [...prev, rule]);
   };
+  
+  // --- CATEGORY ACTIONS ---
+
+  const addMainCategory = async (name: string) => {
+      const newCat: MainCategory = { id: generateId(), name };
+      await db.mainCategories.add(newCat);
+      setMainCategories(prev => [...prev, newCat]);
+  };
+
+  const deleteMainCategory = async (id: string) => {
+      // Also delete subcategories
+      const subsToDelete = subCategories.filter(s => s.mainCategoryId === id).map(s => s.id);
+      
+      await (db as any).transaction('rw', db.mainCategories, db.subCategories, async () => {
+          await db.mainCategories.delete(id);
+          await db.subCategories.bulkDelete(subsToDelete);
+      });
+      
+      setMainCategories(prev => prev.filter(c => c.id !== id));
+      setSubCategories(prev => prev.filter(s => s.mainCategoryId !== id));
+  };
+
+  const addSubCategory = async (mainCategoryId: string, name: string) => {
+      const newSub: SubCategory = { id: generateId(), mainCategoryId, name };
+      await db.subCategories.add(newSub);
+      setSubCategories(prev => [...prev, newSub]);
+  };
+
+  const deleteSubCategory = async (id: string) => {
+      await db.subCategories.delete(id);
+      setSubCategories(prev => prev.filter(s => s.id !== id));
+  };
+  
+  const resetCategoriesToDefault = async () => {
+      await (db as any).transaction('rw', db.mainCategories, db.subCategories, async () => {
+          await db.mainCategories.clear();
+          await db.subCategories.clear();
+          await db.mainCategories.bulkAdd(DEFAULT_MAIN_CATEGORIES);
+          await db.subCategories.bulkAdd(DEFAULT_SUB_CATEGORIES);
+      });
+      setMainCategories(DEFAULT_MAIN_CATEGORIES);
+      setSubCategories(DEFAULT_SUB_CATEGORIES);
+  };
 
 
   // --- BACKUP FUNCTIONS ---
@@ -371,6 +485,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       const dbSettings = await db.settings.get(1);
       const dbTxs = await db.transactions.toArray();
       const dbRules = await db.importRules.toArray();
+      const dbMain = await db.mainCategories.toArray();
+      const dbSub = await db.subCategories.toArray();
       
       const { id, ...cleanSettings } = dbSettings || defaultSettings;
 
@@ -380,7 +496,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           buckets: dbBuckets, 
           settings: cleanSettings,
           transactions: dbTxs,
-          importRules: dbRules
+          importRules: dbRules,
+          mainCategories: dbMain,
+          subCategories: dbSub
       };
       return JSON.stringify(state);
   };
@@ -398,13 +516,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           
           const data = result.data;
           
-          await (db as any).transaction('rw', db.users, db.accounts, db.buckets, db.settings, db.transactions, db.importRules, async () => {
+          await (db as any).transaction('rw', db.users, db.accounts, db.buckets, db.settings, db.transactions, db.importRules, db.mainCategories, db.subCategories, async () => {
              await db.users.clear();
              await db.accounts.clear();
              await db.buckets.clear();
              await db.settings.clear();
              await db.transactions.clear();
              await db.importRules.clear();
+             await db.mainCategories.clear();
+             await db.subCategories.clear();
 
              await db.users.bulkAdd(data.users);
              await db.accounts.bulkAdd(data.accounts);
@@ -412,6 +532,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
              if (data.settings) await db.settings.put({ ...data.settings, id: 1 });
              if (data.transactions) await db.transactions.bulkAdd(data.transactions);
              if (data.importRules) await db.importRules.bulkAdd(data.importRules);
+             if (data.mainCategories) await db.mainCategories.bulkAdd(data.mainCategories);
+             if (data.subCategories) await db.subCategories.bulkAdd(data.subCategories);
           });
           
           setUsers(data.users);
@@ -420,6 +542,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           if (data.settings) setSettings(data.settings);
           setTransactions(data.transactions || []);
           setImportRules(data.importRules || []);
+          setMainCategories(data.mainCategories || []);
+          setSubCategories(data.subCategories || []);
           
           return true;
       } catch (e) {
@@ -433,9 +557,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   return (
     <AppContext.Provider value={{
-      users, accounts, buckets, settings, selectedMonth, transactions, importRules,
+      users, accounts, buckets, settings, selectedMonth, transactions, importRules, mainCategories, subCategories,
       addUser, updateUserIncome, updateUserName, addAccount, addBucket, updateBucket, deleteBucket, archiveBucket, confirmBucketAmount, setMonth: setSelectedMonth, setPayday,
-      addTransactions, updateTransaction, addImportRule, deleteTransaction,
+      addTransactions, updateTransaction, addImportRule, deleteTransaction, 
+      addMainCategory, deleteMainCategory, addSubCategory, deleteSubCategory, resetCategoriesToDefault,
       getExportData, importData
     }}>
       {children}

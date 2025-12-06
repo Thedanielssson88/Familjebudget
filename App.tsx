@@ -1,5 +1,3 @@
-
-
 import React, { useState, useEffect } from 'react';
 import { AppProvider, useApp } from './store';
 import { IncomeView } from './views/IncomeView';
@@ -8,7 +6,8 @@ import { DashboardView } from './views/DashboardView';
 import { StatsView } from './views/StatsView';
 import { DreamsView } from './views/DreamsView';
 import { TransactionsView } from './views/TransactionsView';
-import { LayoutGrid, Wallet, PieChart, ArrowLeftRight, Calendar, Settings, Sparkles, Cloud, RefreshCw, Trash2, Download, Receipt } from 'lucide-react';
+import { SettingsCategories } from './views/SettingsCategories';
+import { LayoutGrid, Wallet, PieChart, ArrowLeftRight, Calendar, Settings, Sparkles, Cloud, RefreshCw, Trash2, Download, Receipt, Database } from 'lucide-react';
 import { cn, Button } from './components/components';
 import { format, subMonths, addMonths } from 'date-fns';
 import { sv } from 'date-fns/locale';
@@ -126,7 +125,7 @@ const MainApp = () => {
           setBackupStatus('Fel vid rensning');
       }
   };
-
+  
   const renderView = () => {
     switch (currentView) {
       case 'income': return <IncomeView />;
@@ -163,20 +162,27 @@ const MainApp = () => {
 
       {/* SETTINGS DRAWER */}
       {showSettings && (
-          <div className="bg-slate-900 border-b border-slate-800 p-4 animate-in slide-in-from-top-2 space-y-6">
+          <div className="bg-slate-900 border-b border-slate-800 p-4 animate-in slide-in-from-top-2 space-y-6 max-h-[85vh] overflow-y-auto shadow-2xl">
               
               {/* General Settings */}
               <div>
                 <h3 className="font-bold text-sm text-slate-400 uppercase mb-2">Inställningar</h3>
-                <div className="flex items-center justify-between bg-slate-800 p-3 rounded-lg">
-                    <span>Lönedag (brytdatum)</span>
-                    <input 
-                        type="number" 
-                        min="1" max="28" 
-                        value={settings.payday} 
-                        onChange={(e) => setPayday(Number(e.target.value))}
-                        className="bg-slate-900 w-16 text-center py-1 rounded border border-slate-700"
-                    />
+                <div className="space-y-4">
+                    <div className="flex items-center justify-between bg-slate-800 p-3 rounded-lg">
+                        <span>Lönedag (brytdatum)</span>
+                        <input 
+                            type="number" 
+                            min="1" max="28" 
+                            value={settings.payday} 
+                            onChange={(e) => setPayday(Number(e.target.value))}
+                            className="bg-slate-900 w-16 text-center py-1 rounded border border-slate-700"
+                        />
+                    </div>
+                    
+                    {/* Category Management */}
+                    <div className="bg-slate-800/50 p-4 rounded-xl border border-slate-700/50">
+                        <SettingsCategories />
+                    </div>
                 </div>
               </div>
 

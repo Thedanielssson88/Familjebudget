@@ -52,26 +52,54 @@ export interface Account {
   startBalances: Record<MonthKey, number>; // Manual override or carried over
 }
 
+// --- NEW CATEGORY INTERFACES ---
+export interface MainCategory {
+  id: string;
+  name: string;
+  description?: string;
+}
+
+export interface SubCategory {
+  id: string;
+  name: string;
+  mainCategoryId: string;
+  description?: string;
+}
+
 export interface Transaction {
   id: string;
   accountId: string;
   date: string; // YYYY-MM-DD
   amount: number;
   description: string;
-  categoryId?: string; // Bucket ID
+  
+  // Funding / Budgeting
+  bucketId?: string; // Where the money comes from (Budget Post). Previously 'categoryId'.
+  
+  // Statistics / Categorization
+  categoryMainId?: string; // What kind of expense is this? (e.g. "Food")
+  categorySubId?: string;  // Specifics (e.g. "Groceries")
+
   isVerified: boolean; // If the user has approved/reviewed it
   source: 'manual' | 'import';
   originalText?: string;
   rowId?: string; // Helper to track CSV rows
-  aiSuggested?: boolean; // Flag for UI
-  ruleMatch?: boolean; // Flag for UI
+  
+  // UI Helpers for Import Review
+  matchType?: 'rule' | 'history' | 'ai'; // How was this categorized?
+  aiSuggested?: boolean; // Deprecated, use matchType
+  ruleMatch?: boolean; // Deprecated, use matchType
 }
 
 export interface ImportRule {
   id: string;
   keyword: string;
-  targetBucketId: string;
   matchType: 'contains' | 'exact' | 'starts_with';
+  
+  // A rule can apply any combination of these
+  targetBucketId?: string;
+  targetCategoryMainId?: string;
+  targetCategorySubId?: string;
 }
 
 export interface AppSettings {
@@ -82,6 +110,11 @@ export interface GlobalState {
   users: User[];
   accounts: Account[];
   buckets: Bucket[];
+  
+  // Categories
+  mainCategories: MainCategory[];
+  subCategories: SubCategory[];
+
   settings: AppSettings;
   selectedMonth: string; // YYYY-MM
   transactions: Transaction[];

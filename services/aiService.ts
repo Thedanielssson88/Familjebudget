@@ -1,49 +1,73 @@
-import { GoogleGenAI } from "@google/genai";
-import { Bucket, Transaction } from "../types";
+import { Bucket, Transaction, MainCategory, SubCategory } from "../types";
 
 // This service handles the "Smart" part of the import pipeline
 export const categorizeTransactionsWithAi = async (
   transactions: Transaction[], 
-  buckets: Bucket[]
-): Promise<Record<string, string>> => {
+  buckets: Bucket[],
+  mainCategories: MainCategory[],
+  subCategories: SubCategory[]
+): Promise<Record<string, { bucketId?: string, mainCatId?: string, subCatId?: string }>> => {
   
-  // Filter out transactions that already have a category (from rules)
-  const unknown = transactions.filter(t => !t.categoryId);
+  // Filter out transactions that already have assignments
+  const unknown = transactions.filter(t => !t.bucketId && !t.categoryMainId);
   if (unknown.length === 0) return {};
 
-  const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
-  
-  // Prepare a lean list of categories to send to AI
-  const categoriesList = buckets.map(b => `ID: "${b.id}", Namn: "${b.name}"`).join("\n");
-  
-  // Prepare the transaction list (limit to 50 at a time to avoid token limits if necessary, 
-  // but usually a CSV import is small enough for one batch or we can loop outside)
-  const transactionList = unknown.map(t => `- ID: "${t.id}", Text: "${t.description}", Belopp: ${t.amount}`).join("\n");
-
-  const prompt = `
-    Jag har en lista med banktransaktioner och en lista med budgetkategorier.
-    Din uppgift är att para ihop varje transaktion med den mest logiska kategorin baserat på transaktionstexten.
-
-    KATEGORIER:
-    ${categoriesList}
-
-    TRANSAKTIONER:
-    ${transactionList}
-
-    INSTRUKTIONER:
-    1. Analysera texten i varje transaktion (t.ex. "ICA", "Netflix", "Hyresvärd").
-    2. Välj det Kategori-ID som passar bäst.
-    3. Om du är osäker, gissa den mest sannolika. Om det är omöjligt att gissa, svara med null för den transaktionen.
-    4. Svara ENDAST med ett JSON-objekt där nyckeln är Transaktions-ID och värdet är Kategori-ID (eller null).
-    
-    Exempelformat på svar:
-    {
-      "transaktion_id_1": "kategori_id_A",
-      "transaktion_id_2": null
-    }
-  `;
-
   try {
+      // Dynamically import the SDK only when needed to prevent load errors if network fails
+      // Handle both named export and default export scenarios depending on CDN
+      const module = await import("@google/genai");
+      const GoogleGenAI = module.GoogleGenAI || (module.default && module.default.GoogleGenAI);
+
+      if (!GoogleGenAI) {
+        throw new Error("Could not find GoogleGenAI class in imported module");
+      }
+      
+      const apiKey = process.env.API_KEY;
+      if (!apiKey) {
+          console.error("API Key not found in environment");
+          return {};
+      }
+
+      const ai = new GoogleGenAI({ apiKey });
+      
+      // Prepare lists for AI
+      const bucketsList = buckets.map(b => `ID: "${b.id}", Namn: "${b.name}"`).join("\n");
+      const mainCatsList = mainCategories.map(c => `ID: "${c.id}", Namn: "${c.name}"`).join("\n");
+      const subCatsList = subCategories.map(c => `ID: "${c.id}", ParentID: "${c.mainCategoryId}", Namn: "${c.name}"`).join("\n");
+      
+      const transactionList = unknown.map(t => `- ID: "${t.id}", Text: "${t.description}", Belopp: ${t.amount}`).join("\n");
+
+      const prompt = `
+        Jag har en lista med banktransaktioner. Jag vill att du mappar varje transaktion till:
+        1. En Budgetpost (Bucket) - Varifrån pengarna tas.
+        2. En Huvudkategori (MainCategory) - Vad det är för typ av utgift.
+        3. En Underkategori (SubCategory) - Specifikt vad det är.
+
+        BUDGETPOSTER (Buckets):
+        ${bucketsList}
+        
+        HUVUDKATEGORIER:
+        ${mainCatsList}
+        
+        UNDERKATEGORIER:
+        ${subCatsList}
+
+        TRANSAKTIONER:
+        ${transactionList}
+
+        INSTRUKTIONER:
+        1. Analysera texten i varje transaktion.
+        2. Välj bäst passande IDn.
+        3. Om du är osäker, svara med null för det fältet.
+        4. Svara ENDAST med ett JSON-objekt där nyckeln är Transaktions-ID och värdet är ett objekt { bucketId, mainCatId, subCatId }.
+        
+        Exempel:
+        {
+          "tx_1": { "bucketId": "b1", "mainCatId": "mc1", "subCatId": "sc1" },
+          "tx_2": { "bucketId": null, "mainCatId": "mc2", "subCatId": null }
+        }
+      `;
+
     const response = await ai.models.generateContent({
       model: 'gemini-2.5-flash',
       contents: prompt,
@@ -58,6 +82,6 @@ export const categorizeTransactionsWithAi = async (
 
   } catch (error) {
     console.error("AI Categorization failed:", error);
-    return {}; // Fail silently/gracefully by returning no matches
+    return {};
   }
 };

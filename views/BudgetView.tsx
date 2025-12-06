@@ -1,4 +1,3 @@
-
 import React, { useState, useEffect } from 'react';
 import { useApp } from '../store';
 import { Bucket, BucketData } from '../types';
@@ -7,6 +6,9 @@ import { Card, Button, Input, Modal, cn } from '../components/components';
 import { Plus, Trash2, Calendar, Target, Repeat, Wallet, PiggyBank, CreditCard, Image as ImageIcon, X, Check, ChevronDown, ChevronUp, Settings } from 'lucide-react';
 import { format, addMonths, parseISO, differenceInMonths } from 'date-fns';
 import { sv } from 'date-fns/locale';
+import { useBudgetActuals } from '../hooks/useBudgetActuals';
+import { BudgetProgressBar } from '../components/BudgetProgressBar';
+import { TransactionDrillDown } from '../components/TransactionDrillDown';
 
 const DREAM_IMAGES = [
   "https://images.unsplash.com/photo-1507525428034-b723cf961d3e?q=80&w=2073&auto=format&fit=crop", // Beach
@@ -20,6 +22,11 @@ const DREAM_IMAGES = [
 
 export const BudgetView: React.FC = () => {
   const { accounts, buckets, addBucket, updateBucket, deleteBucket, confirmBucketAmount, selectedMonth, settings, addAccount } = useApp();
+  
+  // REAL-TIME ACTUALS HOOK
+  const actuals = useBudgetActuals(selectedMonth, settings.payday);
+  const [drillDownBucketId, setDrillDownBucketId] = useState<string | null>(null);
+
   // We use a partial Bucket for editing state to handle the UI form
   const [editingBucket, setEditingBucket] = useState<Bucket | null>(null);
   // We explicitly track the editing month data separately for the form, then merge on save
@@ -125,29 +132,15 @@ export const BudgetView: React.FC = () => {
             }
         };
 
-        // If we split a goal, we might need to handle linked IDs, but typically users don't change Goal types this way.
-        // Assuming standard behavior for Fixed/Daily.
-
         addBucket(newBucket);
-
-        // Close and exit, we are done.
         setIsModalOpen(false);
         return;
     }
 
     // --- STANDARD UPDATE LOGIC (No History Split) ---
-    // Used for: New buckets, Name changes, Amount changes, or Goal adjustments without type change.
 
     let finalBucket = editingBucket;
     
-    // If it's a new bucket (not in list), check for name collision in this account to potentially merge/reuse logic (optional)
-    // But since we handle splits above, standard reuse applies if ID matches.
-    if (!isExistingBucket) {
-        // Optional: Check if a bucket with this name exists and was deleted? 
-        // For simplicity, we create new.
-    }
-
-    // Merge the editingMonthData into the bucket's monthlyData
     const updatedMonthlyData = {
         ...finalBucket.monthlyData,
         [selectedMonth]: editingMonthData
@@ -165,7 +158,6 @@ export const BudgetView: React.FC = () => {
     }
 
     // SPECIAL LOGIC FOR GOALS
-    // If it's a GOAL, check if we need to create/update the "Spending" bucket for the target date
     if (bucketToSave.type === 'GOAL' && bucketToSave.targetDate && bucketToSave.targetAmount > 0) {
         handleGoalSpendingBucket(bucketToSave);
     }
@@ -174,39 +166,31 @@ export const BudgetView: React.FC = () => {
   };
 
   const handleGoalSpendingBucket = (goalBucket: Bucket) => {
-      // 1. Try to find an existing linked spending bucket
-      // We search in the current `buckets` state.
-      // NOTE: If we JUST added the goal, it might not be in `buckets` yet, but that's okay, 
-      // because we only need the linked bucket if it existed before.
       let spendingBucket = buckets.find(b => b.linkedGoalId === goalBucket.id);
+      const spendingMonth = goalBucket.targetDate;
       
-      const spendingMonth = goalBucket.targetDate; // e.g. "2026-07"
-      
-      // We want to replace the monthly data entirely so it ONLY appears on the spending month
       const newData = {
          [spendingMonth]: { amount: goalBucket.targetAmount, dailyAmount: 0, activeDays: [] }
       };
 
       if (spendingBucket) {
-          // Update existing
           updateBucket({
               ...spendingBucket,
               name: `Utbetalning: ${goalBucket.name}`,
-              monthlyData: newData, // Overwrite with new month to move it if date changed
-              paymentSource: 'BALANCE', // Ensure it pulls from Balance
+              monthlyData: newData,
+              paymentSource: 'BALANCE',
               targetAmount: 0, 
               isSavings: false,
           });
       } else {
-          // Create new
           const newId = generateId();
           addBucket({
               id: newId,
               accountId: goalBucket.accountId,
               name: `Utbetalning: ${goalBucket.name}`,
               type: 'FIXED',
-              isSavings: false, // It's spending!
-              paymentSource: 'BALANCE', // Spend from savings, don't double-hit income
+              isSavings: false,
+              paymentSource: 'BALANCE',
               monthlyData: newData,
               targetAmount: 0,
               targetDate: '',
@@ -230,7 +214,6 @@ export const BudgetView: React.FC = () => {
     return 0;
   };
 
-  // Helper to determine semantic style classes
   const getBucketStyles = (bucket: Bucket) => {
     if (bucket.isSavings) {
         return {
@@ -257,32 +240,26 @@ export const BudgetView: React.FC = () => {
     };
   };
 
-  // When changing type to GOAL, set reasonable defaults if missing
   const setType = (type: Bucket['type']) => {
       if (!editingBucket) return;
       let updates: Partial<Bucket> = { type };
       
       if (type === 'GOAL') {
           updates.isSavings = true;
-          updates.paymentSource = 'INCOME'; // Savings usually come from income
+          updates.paymentSource = 'INCOME';
           if (!editingBucket.startSavingDate) updates.startSavingDate = selectedMonth;
           if (!editingBucket.targetDate) updates.targetDate = format(addMonths(parseISO(`${selectedMonth}-01`), 12), 'yyyy-MM');
-      } else {
-          // If switching back from Goal, maybe reset isSavings?
-          // updates.isSavings = false; 
       }
       setEditingBucket({ ...editingBucket, ...updates });
   };
 
-  // Calculate recommended rate for goal to show "Reset" option
   const getRecommendedGoalAmount = () => {
      if (!editingBucket || editingBucket.type !== 'GOAL') return 0;
-     // Create a temporary bucket WITHOUT the current month's override to see what the calculator suggests
      const tempBucket = {
          ...editingBucket,
          monthlyData: {
              ...editingBucket.monthlyData,
-             [selectedMonth]: { amount: 0, dailyAmount: 0, activeDays: [] } // Clear current
+             [selectedMonth]: { amount: 0, dailyAmount: 0, activeDays: [] }
          }
      };
      return Math.round(calculateGoalBucketCost(tempBucket, selectedMonth));
@@ -291,73 +268,112 @@ export const BudgetView: React.FC = () => {
   const isOverride = editingMonthData.amount !== recommendedAmount;
 
   return (
-    <div className="space-y-6 pb-24 animate-in slide-in-from-right duration-300">
+    <div className="space-y-8 pb-24 animate-in slide-in-from-right duration-300">
       <header>
         <h1 className="text-3xl font-bold text-transparent bg-clip-text bg-gradient-to-r from-rose-400 to-orange-400">Budget & Utgifter</h1>
         <p className="text-slate-400">Planera utgifterna för {format(new Date(selectedMonth), 'MMMM', {locale: sv})}.</p>
       </header>
 
       {accounts.map(account => {
-        // Filter buckets: Only show those active in the selected month
         const accountBuckets = buckets.filter(b => b.accountId === account.id && isBucketActiveInMonth(b, selectedMonth));
         const accountTotal = accountBuckets.reduce((sum, b) => sum + calculateCost(b), 0);
+        
+        // Calculate Actuals per Account (Aggregated)
+        const accountSpent = actuals?.spentByAccount[account.id] || 0;
+        const accountRemaining = Math.max(0, accountTotal - accountSpent);
 
         return (
-          <div key={account.id} className="space-y-2">
-            <div className="flex items-center justify-between px-2">
-              <h2 className="text-xl font-semibold flex items-center gap-2">
-                <span>{account.icon}</span> {account.name}
-              </h2>
-              <span className="text-slate-400 text-sm font-mono">{formatMoney(accountTotal)}</span>
+          <div key={account.id} className="space-y-4 mb-8">
+            <div className="bg-slate-800/50 p-4 rounded-2xl border border-slate-700 shadow-lg">
+                <div className="flex items-center justify-between mb-3">
+                    <h2 className="text-xl font-bold flex items-center gap-2 text-white">
+                        <span>{account.icon}</span> {account.name}
+                    </h2>
+                    <div className="text-right">
+                        <div className="text-[10px] uppercase font-bold text-slate-500 tracking-wider">Planerat</div>
+                        <div className="text-lg font-mono font-bold text-white leading-none">{formatMoney(accountTotal)}</div>
+                    </div>
+                </div>
+
+                {/* Account Level Progress Bar */}
+                <BudgetProgressBar 
+                    spent={accountSpent} 
+                    total={accountTotal} 
+                    label={`Kvar: ${formatMoney(accountRemaining)}`}
+                    className="mt-1"
+                />
             </div>
             
             <div className="grid gap-3">
               {accountBuckets.map(bucket => {
                 const cost = calculateCost(bucket);
-                // Check if this cost is inherited (i.e. not confirmed for this month yet)
                 const { isInherited } = getEffectiveBucketData(bucket, selectedMonth);
-                // Goals don't use inheritance flag for confirmation usually, but standard buckets do
                 const showConfirmButton = isInherited && bucket.type !== 'GOAL';
                 const styles = getBucketStyles(bucket);
+                
+                // Actuals per Bucket
+                const spent = actuals?.spentByBucket[bucket.id] || 0;
+                // Determine if we should show the drill-down button/visuals
+                const hasTransactions = spent > 0;
 
                 return (
                   <Card 
                     key={bucket.id} 
                     onClick={() => openModal(bucket)} 
                     className={cn(
-                        "flex items-center justify-between py-3 px-4 border-l-4 cursor-pointer active:scale-[0.98] transition-all group", 
+                        "flex items-stretch justify-between py-3 px-4 border-l-4 cursor-pointer active:scale-[0.98] transition-all group relative overflow-hidden", 
                         styles.container
                     )}
                   >
-                    <div className="flex-1">
+                    <div className="flex-1 flex flex-col justify-center">
                       <div className="flex items-center gap-2">
                          <span className="font-medium text-white">{bucket.name}</span>
                          {bucket.isSavings && <span className={cn("text-[10px] px-1.5 py-0.5 rounded uppercase tracking-wider", styles.badge)}>Spar</span>}
                          {bucket.paymentSource === 'BALANCE' && <span className={cn("text-[10px] px-1.5 py-0.5 rounded uppercase tracking-wider", styles.badge)}>Saldo</span>}
                       </div>
                       <div className={cn("text-xs mt-1 flex gap-2 opacity-80 transition-colors", styles.text)}>
-                        {bucket.type === 'FIXED' && <span className="flex items-center gap-1"><Repeat className="w-3 h-3"/> Fast belopp</span>}
-                        {bucket.type === 'DAILY' && <span className="flex items-center gap-1"><Calendar className="w-3 h-3"/> Rörligt (Dagligt)</span>}
-                        {bucket.type === 'GOAL' && <span className="flex items-center gap-1"><Target className="w-3 h-3"/> Målsparande</span>}
+                        {bucket.type === 'FIXED' && <span className="flex items-center gap-1"><Repeat className="w-3 h-3"/> Fast</span>}
+                        {bucket.type === 'DAILY' && <span className="flex items-center gap-1"><Calendar className="w-3 h-3"/> Rörligt</span>}
+                        {bucket.type === 'GOAL' && <span className="flex items-center gap-1"><Target className="w-3 h-3"/> Mål</span>}
                       </div>
                     </div>
                     
-                    <div className="flex items-center gap-3">
+                    {/* Right Side: Budget vs Actuals */}
+                    <div className="flex items-center gap-4">
+                        {/* Actuals Bar (Clickable) */}
+                        <div 
+                            className="w-24 flex flex-col items-end justify-center group/bar"
+                            onClick={(e) => {
+                                e.stopPropagation();
+                                setDrillDownBucketId(bucket.id);
+                            }}
+                        >
+                            <div className="text-right mb-1">
+                                <span className={cn("font-mono font-bold text-sm", spent > cost ? "text-rose-400" : "text-white")}>
+                                    {formatMoney(spent)}
+                                </span>
+                                <span className="text-[10px] text-slate-500 mx-1">/</span>
+                                <span className="text-[10px] text-slate-400">{formatMoney(cost)}</span>
+                            </div>
+                            <BudgetProgressBar 
+                                spent={spent} 
+                                total={cost} 
+                                compact
+                            />
+                        </div>
+
                         {showConfirmButton && (
                             <button 
                                 onClick={(e) => {
                                     e.stopPropagation();
                                     confirmBucketAmount(bucket.id, selectedMonth);
                                 }}
-                                title="Bekräfta beloppet för denna månad"
-                                className="w-8 h-8 rounded-full bg-emerald-500/20 hover:bg-emerald-500 text-emerald-500 hover:text-white flex items-center justify-center transition-all animate-in zoom-in"
+                                title="Bekräfta beloppet"
+                                className="w-8 h-8 rounded-full bg-emerald-500/20 hover:bg-emerald-500 text-emerald-500 hover:text-white flex items-center justify-center transition-all animate-in zoom-in ml-2"
                             >
                                 <Check className="w-4 h-4" />
                             </button>
                         )}
-                        <div className={cn("text-right font-mono font-medium", showConfirmButton ? "text-slate-400 italic" : styles.text)}>
-                        -{formatMoney(cost)}
-                        </div>
                     </div>
                   </Card>
                 );
@@ -657,6 +673,17 @@ export const BudgetView: React.FC = () => {
           </div>
         )}
       </Modal>
+
+      {/* TRANSACTION DRILL DOWN MODAL */}
+      {drillDownBucketId && (
+         <TransactionDrillDown 
+            bucketId={drillDownBucketId} 
+            bucketName={buckets.find(b => b.id === drillDownBucketId)?.name || ''}
+            month={selectedMonth}
+            payday={settings.payday}
+            onClose={() => setDrillDownBucketId(null)}
+         />
+      )}
     </div>
   );
 };

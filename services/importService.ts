@@ -1,6 +1,8 @@
 import { format } from 'date-fns';
-import { Transaction, ImportRule, Bucket } from '../types';
+import { Transaction, ImportRule, Bucket, MainCategory, SubCategory } from '../types';
 import { generateId } from '../utils';
+import { db } from '../db';
+import { categorizeTransactionsWithAi } from './aiService';
 
 // --- PARSING ---
 
@@ -125,11 +127,50 @@ export const parseBankFile = async (file: File, accountId: string): Promise<Tran
 
 // --- PIPELINE LOGIC ---
 
+/**
+ * Attempts to find previous transactions with same description and account
+ * to re-use their categorization.
+ */
+const applyHistoricalCategories = async (transactions: Transaction[]): Promise<Transaction[]> => {
+    // Process in parallel
+    const enriched = await Promise.all(transactions.map(async (t) => {
+        // If already categorized by a Rule, skip history check
+        if (t.bucketId || t.categoryMainId) return t;
+
+        try {
+            // Find most recent transaction with same description on same account that has categorization
+            const lastMatch = await db.transactions
+                .where({ accountId: t.accountId, description: t.description })
+                .filter(old => !!old.bucketId || !!old.categoryMainId)
+                .reverse()
+                .first();
+
+            if (lastMatch) {
+                return {
+                    ...t,
+                    bucketId: lastMatch.bucketId,
+                    categoryMainId: lastMatch.categoryMainId,
+                    categorySubId: lastMatch.categorySubId,
+                    matchType: 'history' as const
+                };
+            }
+        } catch (e) {
+            // Fail silently and continue
+            console.warn("History lookup failed for", t.description, e);
+        }
+
+        return t;
+    }));
+    return enriched;
+};
+
 export const runImportPipeline = async (
     rawTransactions: Transaction[],
     existingTransactions: Transaction[],
     rules: ImportRule[],
-    buckets: Bucket[]
+    buckets: Bucket[],
+    mainCategories: MainCategory[],
+    subCategories: SubCategory[]
 ): Promise<Transaction[]> => {
     
     // 1. DUPLICATE CHECK
@@ -141,7 +182,7 @@ export const runImportPipeline = async (
         return !existingHashes.has(hash);
     });
 
-    // 2. APPLY RULES
+    // 2. APPLY RULES (Highest Priority)
     processed = processed.map(t => {
         const lowerDesc = t.description.toLowerCase();
         const matchedRule = rules.find(r => {
@@ -152,30 +193,49 @@ export const runImportPipeline = async (
         });
 
         if (matchedRule) {
-            return { ...t, categoryId: matchedRule.targetBucketId, ruleMatch: true };
+            return { 
+                ...t, 
+                bucketId: matchedRule.targetBucketId || t.bucketId,
+                categoryMainId: matchedRule.targetCategoryMainId || t.categoryMainId,
+                categorySubId: matchedRule.targetCategorySubId || t.categorySubId,
+                matchType: 'rule' as const,
+                ruleMatch: true 
+            };
         }
         return t;
     });
 
-    // 3. APPLY AI (Only for those without category)
+    // 3. APPLY HISTORY (Smart Matching)
+    // Only applied to those not yet matched by rules
+    processed = await applyHistoricalCategories(processed);
+
+    // 4. APPLY AI (Lowest Priority, only for completely unassigned)
     try {
-        // Dynamic import to avoid static dependency on Google GenAI SDK which might cause load issues
-        const { categorizeTransactionsWithAi } = await import('./aiService');
-        const aiMapping = await categorizeTransactionsWithAi(processed, buckets);
+        // Filter list sent to AI to save tokens/time
+        // We only send items that have NO categorization yet.
+        const unassigned = processed.filter(t => !t.bucketId && !t.categoryMainId);
         
-        processed = processed.map(t => {
-            if (t.categoryId) return t; // Already ruled
+        if (unassigned.length > 0) {
+            // Using static import now that aiService is safe
+            const aiMapping = await categorizeTransactionsWithAi(unassigned, buckets, mainCategories, subCategories);
             
-            const aiCatId = aiMapping[t.id];
-            if (aiCatId) {
-                // Verify bucket exists
-                const bucketExists = buckets.find(b => b.id === aiCatId);
-                if (bucketExists) {
-                    return { ...t, categoryId: aiCatId, aiSuggested: true };
+            processed = processed.map(t => {
+                if (t.bucketId || t.categoryMainId) return t; // Already ruled or history matched
+                
+                const suggestion = aiMapping[t.id];
+                if (suggestion) {
+                    return { 
+                        ...t, 
+                        bucketId: suggestion.bucketId, 
+                        categoryMainId: suggestion.mainCatId,
+                        categorySubId: suggestion.subCatId,
+                        matchType: 'ai' as const,
+                        aiSuggested: true 
+                    };
                 }
-            }
-            return t;
-        });
+                return t;
+            });
+        }
     } catch (e) {
         console.error("AI Step skipped due to error", e);
     }
