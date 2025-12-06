@@ -52,6 +52,28 @@ export interface Account {
   startBalances: Record<MonthKey, number>; // Manual override or carried over
 }
 
+export interface Transaction {
+  id: string;
+  accountId: string;
+  date: string; // YYYY-MM-DD
+  amount: number;
+  description: string;
+  categoryId?: string; // Bucket ID
+  isVerified: boolean; // If the user has approved/reviewed it
+  source: 'manual' | 'import';
+  originalText?: string;
+  rowId?: string; // Helper to track CSV rows
+  aiSuggested?: boolean; // Flag for UI
+  ruleMatch?: boolean; // Flag for UI
+}
+
+export interface ImportRule {
+  id: string;
+  keyword: string;
+  targetBucketId: string;
+  matchType: 'contains' | 'exact' | 'starts_with';
+}
+
 export interface AppSettings {
   payday: number; // Day of month (e.g., 25)
 }
@@ -62,4 +84,6 @@ export interface GlobalState {
   buckets: Bucket[];
   settings: AppSettings;
   selectedMonth: string; // YYYY-MM
+  transactions: Transaction[];
+  importRules: ImportRule[];
 }

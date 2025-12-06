@@ -21,7 +21,10 @@
     "vite-plugin-pwa": "^1.2.0",
     "zod": "^3.23.8",
     "dexie": "^4.0.1",
-    "dexie-react-hooks": "^1.1.7"
+    "dexie-react-hooks": "^1.1.7",
+    "papaparse": "^5.5.1",
+    "xlsx": "^0.18.5",
+    "@google/genai": "^0.2.1"
   },
   "devDependencies": {
     "@types/node": "^22.14.0",

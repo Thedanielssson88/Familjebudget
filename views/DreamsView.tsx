@@ -5,7 +5,7 @@ import { calculateSavedAmount, calculateGoalBucketCost, formatMoney } from '../u
 import { PieChart, Pie, Cell, ResponsiveContainer } from 'recharts';
 import { format, parseISO, isValid, addMonths, differenceInMonths } from 'date-fns';
 import { sv } from 'date-fns/locale';
-import { Archive, CheckCircle, Pause, Play, Rocket, TrendingUp, Calendar } from 'lucide-react';
+import { Archive, CheckCircle, Pause, Play, Rocket, TrendingUp, Calendar, Trash2 } from 'lucide-react';
 import { cn, Button } from '../components/components';
 import { Bucket } from '../types';
 
@@ -42,10 +42,11 @@ interface DreamCardProps {
     isArchived: boolean;
     selectedMonth: string;
     onArchive: (id: string, name: string) => void;
+    onDelete: (id: string, name: string) => void;
 }
 
 // Sub-component for individual dream card to handle simulation/pause state
-const DreamCard: React.FC<DreamCardProps> = ({ goal, isArchived, selectedMonth, onArchive }) => {
+const DreamCard: React.FC<DreamCardProps> = ({ goal, isArchived, selectedMonth, onArchive, onDelete }) => {
     const { updateBucket } = useApp();
     const [isSimulating, setIsSimulating] = useState(false);
     const [simulatedExtra, setSimulatedExtra] = useState(0);
@@ -115,7 +116,7 @@ const DreamCard: React.FC<DreamCardProps> = ({ goal, isArchived, selectedMonth, 
 
             {/* Top Controls */}
             <div className="absolute top-0 left-0 right-0 p-4 flex justify-between items-start z-20">
-                {!isArchived && (
+                {!isArchived ? (
                     <button 
                         onClick={handlePauseToggle}
                         className={cn(
@@ -135,9 +136,9 @@ const DreamCard: React.FC<DreamCardProps> = ({ goal, isArchived, selectedMonth, 
                             </>
                         )}
                     </button>
-                )}
+                ) : <div></div> /* Spacer */}
 
-                {!isArchived && (
+                {!isArchived ? (
                     <button 
                         onClick={(e) => { 
                             e.preventDefault();
@@ -148,6 +149,18 @@ const DreamCard: React.FC<DreamCardProps> = ({ goal, isArchived, selectedMonth, 
                         title="Arkivera / Avsluta sparande"
                     >
                         <Archive className="w-4 h-4" />
+                    </button>
+                ) : (
+                    <button 
+                        onClick={(e) => { 
+                            e.preventDefault();
+                            e.stopPropagation(); 
+                            onDelete(goal.id, goal.name); 
+                        }}
+                        className="bg-red-500/20 hover:bg-red-500/40 text-red-300 hover:text-white p-2 rounded-full transition-all backdrop-blur-md border border-red-500/10 z-50"
+                        title="Ta bort permanent"
+                    >
+                        <Trash2 className="w-4 h-4" />
                     </button>
                 )}
             </div>
@@ -260,7 +273,7 @@ const DreamCard: React.FC<DreamCardProps> = ({ goal, isArchived, selectedMonth, 
 };
 
 export const DreamsView: React.FC = () => {
-    const { buckets, selectedMonth, archiveBucket } = useApp();
+    const { buckets, selectedMonth, archiveBucket, deleteBucket } = useApp();
     const [activeTab, setActiveTab] = useState<'active' | 'archived'>('active');
 
     const allGoals = buckets.filter(b => b.type === 'GOAL');
@@ -272,6 +285,12 @@ export const DreamsView: React.FC = () => {
     const handleArchive = (id: string, name: string) => {
         if (confirm(`Vill du arkivera "${name}"? Detta avslutar sparandet från och med denna månad, men sparar historiken.`)) {
             archiveBucket(id, selectedMonth);
+        }
+    };
+
+    const handleDelete = (id: string, name: string) => {
+        if (confirm(`VARNING: Vill du ta bort "${name}" permanent? Detta går inte att ångra och all historik för detta mål försvinner.`)) {
+            deleteBucket(id, selectedMonth, 'ALL');
         }
     };
 
@@ -325,6 +344,7 @@ export const DreamsView: React.FC = () => {
                         isArchived={activeTab === 'archived'} 
                         selectedMonth={selectedMonth} 
                         onArchive={handleArchive} 
+                        onDelete={handleDelete}
                     />
                 ))}
             </div>

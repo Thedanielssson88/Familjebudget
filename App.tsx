@@ -1,4 +1,5 @@
 
+
 import React, { useState, useEffect } from 'react';
 import { AppProvider, useApp } from './store';
 import { IncomeView } from './views/IncomeView';
@@ -6,13 +7,14 @@ import { BudgetView } from './views/BudgetView';
 import { DashboardView } from './views/DashboardView';
 import { StatsView } from './views/StatsView';
 import { DreamsView } from './views/DreamsView';
-import { LayoutGrid, Wallet, PieChart, ArrowLeftRight, Calendar, Settings, Sparkles, Cloud, RefreshCw, Trash2, Download } from 'lucide-react';
+import { TransactionsView } from './views/TransactionsView';
+import { LayoutGrid, Wallet, PieChart, ArrowLeftRight, Calendar, Settings, Sparkles, Cloud, RefreshCw, Trash2, Download, Receipt } from 'lucide-react';
 import { cn, Button } from './components/components';
 import { format, subMonths, addMonths } from 'date-fns';
 import { sv } from 'date-fns/locale';
 import { initGoogleDrive, loginToGoogle, listBackups, createBackupFile, loadBackupFile, deleteBackupFile, DriveFile } from './services/googleDrive';
 
-type View = 'income' | 'budget' | 'dashboard' | 'stats' | 'dreams';
+type View = 'income' | 'budget' | 'dashboard' | 'stats' | 'dreams' | 'transactions';
 
 const MainApp = () => {
   const [currentView, setCurrentView] = useState<View>('dashboard');
@@ -132,6 +134,7 @@ const MainApp = () => {
       case 'dashboard': return <DashboardView />;
       case 'stats': return <StatsView />;
       case 'dreams': return <DreamsView />;
+      case 'transactions': return <TransactionsView />;
       default: return <DashboardView />;
     }
   };
@@ -253,8 +256,8 @@ const MainApp = () => {
             <NavButton active={currentView === 'income'} onClick={() => setCurrentView('income')} icon={<Wallet />} label="Inkomst" />
             <NavButton active={currentView === 'budget'} onClick={() => setCurrentView('budget')} icon={<ArrowLeftRight />} label="Budget" />
             <NavButton active={currentView === 'dashboard'} onClick={() => setCurrentView('dashboard')} icon={<LayoutGrid />} label="Översikt" />
+            <NavButton active={currentView === 'transactions'} onClick={() => setCurrentView('transactions')} icon={<Receipt />} label="Import" />
             <NavButton active={currentView === 'dreams'} onClick={() => setCurrentView('dreams')} icon={<Sparkles />} label="Drömmar" />
-            <NavButton active={currentView === 'stats'} onClick={() => setCurrentView('stats')} icon={<PieChart />} label="Statistik" />
         </div>
       </nav>
     </div>

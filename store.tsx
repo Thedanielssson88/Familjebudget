@@ -1,5 +1,5 @@
 import React, { createContext, useContext, useEffect, useState } from 'react';
-import { Account, AppSettings, Bucket, GlobalState, User, MonthKey } from './types';
+import { Account, AppSettings, Bucket, GlobalState, User, MonthKey, Transaction, ImportRule } from './types';
 import { format, addMonths, parseISO } from 'date-fns';
 import { getEffectiveBucketData, generateId } from './utils';
 import { z } from 'zod';
@@ -60,11 +60,31 @@ const AppSettingsSchema = z.object({
   payday: z.number()
 });
 
+const TransactionSchema = z.object({
+    id: z.string(),
+    accountId: z.string(),
+    date: z.string(),
+    amount: z.number(),
+    description: z.string(),
+    categoryId: z.string().optional(),
+    isVerified: z.boolean(),
+    source: z.enum(['manual', 'import'])
+});
+
+const ImportRuleSchema = z.object({
+    id: z.string(),
+    keyword: z.string(),
+    targetBucketId: z.string(),
+    matchType: z.enum(['contains', 'exact', 'starts_with'])
+});
+
 const GlobalStateSchema = z.object({
   users: z.array(UserSchema).optional().default([]),
   accounts: z.array(AccountSchema).optional().default([]),
   buckets: z.array(BucketSchema).optional().default([]),
-  settings: AppSettingsSchema.optional().default({ payday: 25 })
+  settings: AppSettingsSchema.optional().default({ payday: 25 }),
+  transactions: z.array(TransactionSchema).optional().default([]),
+  importRules: z.array(ImportRuleSchema).optional().default([])
 });
 
 // --- END SCHEMAS ---
@@ -81,9 +101,14 @@ interface AppContextType extends GlobalState {
   confirmBucketAmount: (id: string, month: MonthKey) => void;
   setMonth: (month: MonthKey) => void;
   setPayday: (day: number) => void;
+  // Transaction & Rule Methods
+  addTransactions: (txs: Transaction[]) => Promise<void>;
+  updateTransaction: (tx: Transaction) => Promise<void>;
+  addImportRule: (rule: ImportRule) => Promise<void>;
+  deleteTransaction: (id: string) => Promise<void>;
   // Backup features
-  getExportData: () => Promise<string>; // Changed to Promise due to DB
-  importData: (json: string) => Promise<boolean>; // Changed to Promise
+  getExportData: () => Promise<string>; 
+  importData: (json: string) => Promise<boolean>; 
 }
 
 const AppContext = createContext<AppContextType | undefined>(undefined);
@@ -98,6 +123,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const [buckets, setBuckets] = useState<Bucket[]>([]);
   const [settings, setSettings] = useState<AppSettings>(defaultSettings);
   const [selectedMonth, setSelectedMonth] = useState<string>(format(new Date(), 'yyyy-MM'));
+  const [transactions, setTransactions] = useState<Transaction[]>([]);
+  const [importRules, setImportRules] = useState<ImportRule[]>([]);
 
   // Initial Load & Migration Logic
   useEffect(() => {
@@ -115,11 +142,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
                 if (result.success) {
                     const data = result.data;
-                    await (db as any).transaction('rw', db.users, db.accounts, db.buckets, db.settings, async () => {
+                    await (db as any).transaction('rw', db.users, db.accounts, db.buckets, db.settings, db.transactions, db.importRules, async () => {
                         await db.users.bulkAdd(data.users);
                         await db.accounts.bulkAdd(data.accounts);
                         await db.buckets.bulkAdd(data.buckets);
                         await db.settings.put({ ...data.settings, id: 1 });
+                        if (data.transactions) await db.transactions.bulkAdd(data.transactions);
+                        if (data.importRules) await db.importRules.bulkAdd(data.importRules);
                     });
                 }
             } else {
@@ -167,10 +196,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         const dbAccounts = await db.accounts.toArray();
         const dbBuckets = await db.buckets.toArray();
         const dbSettings = await db.settings.get(1);
+        const dbTransactions = await db.transactions.toArray();
+        const dbRules = await db.importRules.toArray();
 
         setUsers(dbUsers);
         setAccounts(dbAccounts);
         setBuckets(dbBuckets);
+        setTransactions(dbTransactions);
+        setImportRules(dbRules);
+
         if (dbSettings) {
             const { id, ...cleanSettings } = dbSettings;
             setSettings(cleanSettings);
@@ -229,7 +263,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   const addBucket = async (bucket: Bucket) => {
-      // Prevent duplicates
       if (buckets.find(b => b.id === bucket.id)) return;
       await db.buckets.add(bucket);
       setBuckets(prev => [...prev, bucket]);
@@ -307,12 +340,37 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       setSettings(newSettings);
   };
 
-  // BACKUP FUNCTIONS
+  // --- TRANSACTION ACTIONS ---
+  
+  const addTransactions = async (txs: Transaction[]) => {
+      await db.transactions.bulkAdd(txs);
+      setTransactions(prev => [...prev, ...txs]);
+  };
+
+  const updateTransaction = async (tx: Transaction) => {
+      await db.transactions.put(tx);
+      setTransactions(prev => prev.map(t => t.id === tx.id ? tx : t));
+  };
+
+  const deleteTransaction = async (id: string) => {
+      await db.transactions.delete(id);
+      setTransactions(prev => prev.filter(t => t.id !== id));
+  };
+
+  const addImportRule = async (rule: ImportRule) => {
+      await db.importRules.add(rule);
+      setImportRules(prev => [...prev, rule]);
+  };
+
+
+  // --- BACKUP FUNCTIONS ---
   const getExportData = async () => {
       const dbUsers = await db.users.toArray();
       const dbAccounts = await db.accounts.toArray();
       const dbBuckets = await db.buckets.toArray();
       const dbSettings = await db.settings.get(1);
+      const dbTxs = await db.transactions.toArray();
+      const dbRules = await db.importRules.toArray();
       
       const { id, ...cleanSettings } = dbSettings || defaultSettings;
 
@@ -320,7 +378,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           users: dbUsers, 
           accounts: dbAccounts, 
           buckets: dbBuckets, 
-          settings: cleanSettings 
+          settings: cleanSettings,
+          transactions: dbTxs,
+          importRules: dbRules
       };
       return JSON.stringify(state);
   };
@@ -338,22 +398,28 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           
           const data = result.data;
           
-          await (db as any).transaction('rw', db.users, db.accounts, db.buckets, db.settings, async () => {
+          await (db as any).transaction('rw', db.users, db.accounts, db.buckets, db.settings, db.transactions, db.importRules, async () => {
              await db.users.clear();
              await db.accounts.clear();
              await db.buckets.clear();
              await db.settings.clear();
+             await db.transactions.clear();
+             await db.importRules.clear();
 
              await db.users.bulkAdd(data.users);
              await db.accounts.bulkAdd(data.accounts);
              await db.buckets.bulkAdd(data.buckets);
              if (data.settings) await db.settings.put({ ...data.settings, id: 1 });
+             if (data.transactions) await db.transactions.bulkAdd(data.transactions);
+             if (data.importRules) await db.importRules.bulkAdd(data.importRules);
           });
           
           setUsers(data.users);
           setAccounts(data.accounts);
           setBuckets(data.buckets);
           if (data.settings) setSettings(data.settings);
+          setTransactions(data.transactions || []);
+          setImportRules(data.importRules || []);
           
           return true;
       } catch (e) {
@@ -367,8 +433,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   return (
     <AppContext.Provider value={{
-      users, accounts, buckets, settings, selectedMonth,
+      users, accounts, buckets, settings, selectedMonth, transactions, importRules,
       addUser, updateUserIncome, updateUserName, addAccount, addBucket, updateBucket, deleteBucket, archiveBucket, confirmBucketAmount, setMonth: setSelectedMonth, setPayday,
+      addTransactions, updateTransaction, addImportRule, deleteTransaction,
       getExportData, importData
     }}>
       {children}
