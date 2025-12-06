@@ -1,9 +1,10 @@
-import React, { useState, useEffect } from 'react';
+
+import React, { useState, useEffect, useMemo } from 'react';
 import { useApp } from '../store';
 import { Bucket, BucketData } from '../types';
 import { calculateDailyBucketCost, calculateFixedBucketCost, calculateGoalBucketCost, formatMoney, generateId, getBudgetInterval, isBucketActiveInMonth, getEffectiveBucketData } from '../utils';
 import { Card, Button, Input, Modal, cn } from '../components/components';
-import { Plus, Trash2, Calendar, Target, Repeat, Wallet, PiggyBank, CreditCard, Image as ImageIcon, X, Check, ChevronDown, ChevronUp, Settings } from 'lucide-react';
+import { Plus, Trash2, Calendar, Target, Repeat, Wallet, PiggyBank, CreditCard, Image as ImageIcon, X, Check, ChevronDown, ChevronUp, Settings, Copy } from 'lucide-react';
 import { format, addMonths, parseISO, differenceInMonths } from 'date-fns';
 import { sv } from 'date-fns/locale';
 import { useBudgetActuals } from '../hooks/useBudgetActuals';
@@ -21,7 +22,7 @@ const DREAM_IMAGES = [
 ];
 
 export const BudgetView: React.FC = () => {
-  const { accounts, buckets, addBucket, updateBucket, deleteBucket, confirmBucketAmount, selectedMonth, settings, addAccount } = useApp();
+  const { accounts, buckets, addBucket, updateBucket, deleteBucket, confirmBucketAmount, selectedMonth, settings, addAccount, copyFromNextMonth } = useApp();
   
   // REAL-TIME ACTUALS HOOK
   const actuals = useBudgetActuals(selectedMonth, settings.payday);
@@ -50,6 +51,31 @@ export const BudgetView: React.FC = () => {
     setNewAccountIcon('🏠');
     setIsAccountModalOpen(false);
   };
+  
+  const calculateCost = (bucket: Bucket, month: string = selectedMonth) => {
+    if (bucket.type === 'FIXED') return calculateFixedBucketCost(bucket, month);
+    if (bucket.type === 'DAILY') return calculateDailyBucketCost(bucket, month, settings.payday);
+    if (bucket.type === 'GOAL') return calculateGoalBucketCost(bucket, month);
+    return 0;
+  };
+
+  // CHECK IF MONTH IS EMPTY BUT NEXT MONTH HAS DATA
+  const { isCurrentMonthEmpty, nextMonthHasData, nextMonthLabel } = useMemo(() => {
+     // Check current month
+     const activeBuckets = buckets.filter(b => isBucketActiveInMonth(b, selectedMonth) && b.type !== 'GOAL' && b.paymentSource !== 'BALANCE');
+     const totalBudgeted = activeBuckets.reduce((sum, b) => sum + calculateCost(b), 0);
+     
+     // Check next month
+     const nextMonth = format(addMonths(parseISO(`${selectedMonth}-01`), 1), 'yyyy-MM');
+     const activeNext = buckets.filter(b => isBucketActiveInMonth(b, nextMonth) && b.type !== 'GOAL' && b.paymentSource !== 'BALANCE');
+     const totalNext = activeNext.reduce((sum, b) => sum + calculateCost(b, nextMonth), 0);
+     
+     return {
+         isCurrentMonthEmpty: activeBuckets.length === 0 || totalBudgeted === 0,
+         nextMonthHasData: totalNext > 0,
+         nextMonthLabel: format(parseISO(`${nextMonth}-01`), 'MMMM', { locale: sv })
+     };
+  }, [buckets, selectedMonth, settings.payday]);
 
   // Helper to open modal for new or edit
   const openModal = (bucket?: Bucket, accountId?: string) => {
@@ -207,13 +233,6 @@ export const BudgetView: React.FC = () => {
       }
   };
 
-  const calculateCost = (bucket: Bucket) => {
-    if (bucket.type === 'FIXED') return calculateFixedBucketCost(bucket, selectedMonth);
-    if (bucket.type === 'DAILY') return calculateDailyBucketCost(bucket, selectedMonth, settings.payday);
-    if (bucket.type === 'GOAL') return calculateGoalBucketCost(bucket, selectedMonth);
-    return 0;
-  };
-
   const getBucketStyles = (bucket: Bucket) => {
     if (bucket.isSavings) {
         return {
@@ -272,6 +291,23 @@ export const BudgetView: React.FC = () => {
       <header>
         <h1 className="text-3xl font-bold text-transparent bg-clip-text bg-gradient-to-r from-rose-400 to-orange-400">Budget & Utgifter</h1>
         <p className="text-slate-400">Planera utgifterna för {format(new Date(selectedMonth), 'MMMM', {locale: sv})}.</p>
+        
+        {/* COPY BUDGET BUTTON (If current is empty but next has data) */}
+        {isCurrentMonthEmpty && nextMonthHasData && (
+             <div className="mt-4 p-4 bg-indigo-900/30 border border-indigo-500/30 rounded-xl flex items-center justify-between animate-in slide-in-from-top-2">
+                 <div className="text-sm">
+                     <div className="text-indigo-300 font-bold mb-1">Tom månad?</div>
+                     <div className="text-slate-400">Det finns en budget för <span className="text-white font-medium">{nextMonthLabel}</span>. Vill du använda den här också?</div>
+                 </div>
+                 <Button 
+                    onClick={() => copyFromNextMonth(selectedMonth)} 
+                    className="bg-indigo-600 hover:bg-indigo-500 text-white shadow-lg shadow-indigo-900/20"
+                 >
+                     <Copy className="w-4 h-4 mr-2" />
+                     Hämta från {nextMonthLabel}
+                 </Button>
+             </div>
+        )}
       </header>
 
       {accounts.map(account => {
@@ -496,6 +532,22 @@ export const BudgetView: React.FC = () => {
                             <div className="space-y-4 pt-4 animate-in slide-in-from-top-2">
                                 <Input label="Namn" value={editingBucket.name} onChange={e => setEditingBucket({...editingBucket, name: e.target.value})} />
                                 
+                                {/* ACCOUNT SELECTOR */}
+                                <div>
+                                    <label className="text-xs font-medium text-slate-400 uppercase tracking-wider block mb-1">Konto</label>
+                                    <select 
+                                        value={editingBucket.accountId}
+                                        onChange={(e) => setEditingBucket({...editingBucket, accountId: e.target.value})}
+                                        className="w-full bg-slate-900/50 border border-slate-700 rounded-xl px-4 py-3 text-white focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                                    >
+                                        {accounts.map(acc => (
+                                            <option key={acc.id} value={acc.id}>
+                                                {acc.icon} {acc.name}
+                                            </option>
+                                        ))}
+                                    </select>
+                                </div>
+                                
                                 {/* TYPE SELECTOR */}
                                 <div className="grid grid-cols-2 gap-2">
                                     <div className="col-span-2 text-xs font-medium text-slate-400 uppercase">Typ av post</div>
@@ -615,6 +667,23 @@ export const BudgetView: React.FC = () => {
                      {showGoalDetails && (
                          <div className="space-y-4 pt-4 animate-in slide-in-from-top-2">
                              <Input label="Namn" value={editingBucket.name} onChange={e => setEditingBucket({...editingBucket, name: e.target.value})} />
+                             
+                             {/* ACCOUNT SELECTOR (GOALS) */}
+                             <div>
+                                <label className="text-xs font-medium text-slate-400 uppercase tracking-wider block mb-1">Konto</label>
+                                <select 
+                                    value={editingBucket.accountId}
+                                    onChange={(e) => setEditingBucket({...editingBucket, accountId: e.target.value})}
+                                    className="w-full bg-slate-900/50 border border-slate-700 rounded-xl px-4 py-3 text-white focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                                >
+                                    {accounts.map(acc => (
+                                        <option key={acc.id} value={acc.id}>
+                                            {acc.icon} {acc.name}
+                                        </option>
+                                    ))}
+                                </select>
+                            </div>
+
                              <Input label="Totalt målbelopp" type="number" value={editingBucket.targetAmount} onChange={e => setEditingBucket({...editingBucket, targetAmount: Number(e.target.value)})} />
                              <div className="grid grid-cols-2 gap-4">
                                 <Input label="Starta sparande" type="month" value={editingBucket.startSavingDate} onChange={e => setEditingBucket({...editingBucket, startSavingDate: e.target.value})} />

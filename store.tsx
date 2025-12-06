@@ -1,7 +1,7 @@
 import React, { createContext, useContext, useEffect, useState } from 'react';
 import { Account, AppSettings, Bucket, GlobalState, User, MonthKey, Transaction, ImportRule, MainCategory, SubCategory } from './types';
 import { format, addMonths, parseISO } from 'date-fns';
-import { getEffectiveBucketData, generateId } from './utils';
+import { getEffectiveBucketData, generateId, isBucketActiveInMonth, calculateFixedBucketCost, calculateDailyBucketCost, calculateGoalBucketCost } from './utils';
 import { z } from 'zod';
 import { db } from './db';
 import { DEFAULT_MAIN_CATEGORIES, DEFAULT_SUB_CATEGORIES } from './constants/defaultCategories';
@@ -119,6 +119,7 @@ interface AppContextType extends GlobalState {
   deleteBucket: (id: string, month: MonthKey, scope: 'THIS_MONTH' | 'THIS_AND_FUTURE' | 'ALL') => void;
   archiveBucket: (id: string, month: MonthKey) => void;
   confirmBucketAmount: (id: string, month: MonthKey) => void;
+  copyFromNextMonth: (currentMonth: MonthKey) => Promise<void>;
   setMonth: (month: MonthKey) => void;
   setPayday: (day: number) => void;
   // Transaction & Rule Methods
@@ -405,6 +406,41 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setBuckets(prev => prev.map(b => b.id === id ? updatedBucket : b));
   };
 
+  const copyFromNextMonth = async (currentMonth: MonthKey) => {
+      const nextMonth = format(addMonths(parseISO(`${currentMonth}-01`), 1), 'yyyy-MM');
+      
+      const updates: Bucket[] = [];
+      const bucketsToUpdate = buckets.filter(b => 
+          b.type !== 'GOAL' && 
+          b.paymentSource !== 'BALANCE'
+      );
+
+      for (const bucket of bucketsToUpdate) {
+          // Check if bucket is active in next month
+          // Note: isBucketActiveInMonth checks for valid data (inherited or explicit)
+          if (isBucketActiveInMonth(bucket, nextMonth)) {
+              const { data } = getEffectiveBucketData(bucket, nextMonth);
+              if (data) {
+                  updates.push({
+                      ...bucket,
+                      monthlyData: {
+                          ...bucket.monthlyData,
+                          [currentMonth]: { ...data, isExplicitlyDeleted: false }
+                      }
+                  });
+              }
+          }
+      }
+
+      if (updates.length > 0) {
+          await db.buckets.bulkPut(updates);
+          setBuckets(prev => prev.map(b => {
+              const updated = updates.find(u => u.id === b.id);
+              return updated || b;
+          }));
+      }
+  };
+
   const setPayday = async (day: number) => {
       const newSettings = { ...settings, payday: day };
       await db.settings.put({ ...newSettings, id: 1 });
@@ -558,7 +594,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   return (
     <AppContext.Provider value={{
       users, accounts, buckets, settings, selectedMonth, transactions, importRules, mainCategories, subCategories,
-      addUser, updateUserIncome, updateUserName, addAccount, addBucket, updateBucket, deleteBucket, archiveBucket, confirmBucketAmount, setMonth: setSelectedMonth, setPayday,
+      addUser, updateUserIncome, updateUserName, addAccount, addBucket, updateBucket, deleteBucket, archiveBucket, confirmBucketAmount, copyFromNextMonth, setMonth: setSelectedMonth, setPayday,
       addTransactions, updateTransaction, addImportRule, deleteTransaction, 
       addMainCategory, deleteMainCategory, addSubCategory, deleteSubCategory, resetCategoriesToDefault,
       getExportData, importData

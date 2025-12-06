@@ -1,10 +1,11 @@
+
 import React, { useState, useRef, useMemo } from 'react';
 import { useApp } from '../store';
 import { Transaction, ImportRule, Bucket, MainCategory, SubCategory } from '../types';
 import { parseBankFile, runImportPipeline } from '../services/importService';
 import { categorizeTransactionsWithAi } from '../services/aiService';
 import { cn, Button, Card, Modal, Input } from '../components/components';
-import { Upload, Check, Wand2, Save, Trash2, ArrowRight, Clock, Zap, Sparkles, Loader2 } from 'lucide-react';
+import { Upload, Check, Wand2, Save, Trash2, ArrowRight, Clock, Zap, Sparkles, Loader2, AlertTriangle, XCircle } from 'lucide-react';
 import { formatMoney, generateId } from '../utils';
 
 // --- SUB-COMPONENT: STAGING ROW ---
@@ -22,6 +23,8 @@ const TransactionRow: React.FC<{
     
     // Check completeness
     const isComplete = !!(tx.bucketId && tx.categoryMainId && tx.categorySubId);
+    // Budget is mandatory for commit
+    const hasBudget = !!tx.bucketId;
 
     // Determine status color & icon based on matchType or completeness
     let statusColor = "bg-slate-800 border-slate-700"; 
@@ -34,6 +37,11 @@ const TransactionRow: React.FC<{
         statusColor = "bg-emerald-900/30 border-emerald-500/50 shadow-[inset_0_0_20px_-10px_rgba(16,185,129,0.3)]";
         icon = <div className="w-5 h-5 rounded-full bg-emerald-500 flex items-center justify-center shadow-lg shadow-emerald-500/20"><Check className="w-3 h-3 text-white stroke-[3]" /></div>;
         title = "Klar";
+    } else if (hasBudget) {
+        // Has budget but missing categories - Valid for commit but technically incomplete categorization
+        statusColor = "bg-emerald-900/20 border-emerald-500/30";
+        icon = <div className="w-4 h-4 rounded-full border-2 border-emerald-500"></div>;
+        title = "Redo att bokföras (saknar kategori)";
     } else if (matchType === 'rule') {
         statusColor = "bg-emerald-950/30 border-emerald-500/30";
         icon = <Zap className="w-4 h-4 text-emerald-500" />;
@@ -68,12 +76,15 @@ const TransactionRow: React.FC<{
             <div className="col-span-4 flex flex-col gap-1">
                 {/* Budget Source */}
                 <select 
-                    className="w-full bg-slate-900 border border-slate-600 rounded px-2 py-1 text-xs text-blue-200 focus:border-blue-500 outline-none"
+                    className={cn(
+                        "w-full bg-slate-900 border rounded px-2 py-1 text-xs focus:border-blue-500 outline-none transition-colors",
+                        !tx.bucketId ? "border-rose-500/50 text-rose-200" : "border-slate-600 text-blue-200"
+                    )}
                     value={tx.bucketId || ""}
                     onChange={(e) => onChange(tx.id, 'bucketId', e.target.value)}
-                    title="Budgetpost (Varifrån tas pengarna?)"
+                    title="Budgetpost (Varifrån tas pengarna?) - OBLIGATORISK"
                 >
-                    <option value="">-- Välj Budget --</option>
+                    <option value="">-- Välj Budget (Krävs) --</option>
                     {buckets.map(b => (
                         <option key={b.id} value={b.id}>{b.name}</option>
                     ))}
@@ -143,8 +154,12 @@ export const TransactionsView: React.FC = () => {
     const [viewMode, setViewMode] = useState<'import' | 'history'>('import');
     const [stagingTransactions, setStagingTransactions] = useState<Transaction[]>([]);
     const [isProcessing, setIsProcessing] = useState(false);
+    const [isAiAnalysisRunning, setIsAiAnalysisRunning] = useState(false);
     const [loadingAiId, setLoadingAiId] = useState<string | null>(null);
     const [selectedAccountId, setSelectedAccountId] = useState(accounts[0]?.id || '');
+    
+    // Error Logging State
+    const [errorLog, setErrorLog] = useState<string | null>(null);
     
     // Rule Creation Modal
     const [ruleModalOpen, setRuleModalOpen] = useState(false);
@@ -158,17 +173,26 @@ export const TransactionsView: React.FC = () => {
         if (!file || !selectedAccountId) return;
 
         setIsProcessing(true);
+        setErrorLog(null); // Clear previous errors
+
         try {
             // 1. Parse
             const raw = await parseBankFile(file, selectedAccountId);
             
-            // 2. Run Pipeline (Duplicates, Rules, History, AI)
-            const processed = await runImportPipeline(raw, transactions, importRules, buckets, mainCategories, subCategories);
+            if (raw.length === 0) {
+                throw new Error("Inga giltiga transaktioner hittades i filen. Kontrollera filformatet och rubrikerna.");
+            }
+
+            // 2. Run Pipeline (Fast: Duplicates, Rules, History only)
+            const processed = await runImportPipeline(raw, transactions, importRules);
             
             setStagingTransactions(processed);
-        } catch (err) {
-            console.error(err);
-            alert("Något gick fel vid importen. Kontrollera filen.");
+        } catch (err: any) {
+            console.error("Import Error:", err);
+            // Capture detailed error info
+            const message = err instanceof Error ? err.message : String(err);
+            const stack = err instanceof Error ? err.stack : '';
+            setErrorLog(`${message}\n\nTechnical Details:\n${stack}`);
         } finally {
             setIsProcessing(false);
             if (fileInputRef.current) fileInputRef.current.value = '';
@@ -217,9 +241,39 @@ export const TransactionsView: React.FC = () => {
         }
     };
 
+    const handleRunAiAnalysis = async () => {
+        const unassigned = stagingTransactions.filter(t => !t.bucketId && !t.categoryMainId);
+        if (unassigned.length === 0) return;
+
+        setIsAiAnalysisRunning(true);
+        try {
+            const aiMapping = await categorizeTransactionsWithAi(unassigned, buckets, mainCategories, subCategories);
+            
+            setStagingTransactions(prev => prev.map(t => {
+                const suggestion = aiMapping[t.id];
+                if (suggestion && !t.bucketId && !t.categoryMainId) {
+                    return {
+                        ...t,
+                        bucketId: suggestion.bucketId,
+                        categoryMainId: suggestion.mainCatId,
+                        categorySubId: suggestion.subCatId,
+                        matchType: 'ai' as const,
+                        aiSuggested: true
+                    };
+                }
+                return t;
+            }));
+        } catch (e) {
+            console.error("Bulk AI Analysis failed", e);
+            setErrorLog(`AI Analysis Failed: ${e}`);
+        } finally {
+            setIsAiAnalysisRunning(false);
+        }
+    };
+
     const handleCommit = async () => {
-        // Allow committing even if only one field is set, but preferably at least one classification
-        const toCommit = stagingTransactions.filter(t => t.bucketId || t.categoryMainId);
+        // STRICT REQUIREMENT: Only commit transactions that have a Budget (Bucket) assigned
+        const toCommit = stagingTransactions.filter(t => t.bucketId);
         const count = toCommit.length;
         if (count === 0) return;
 
@@ -227,8 +281,15 @@ export const TransactionsView: React.FC = () => {
         const verified = toCommit.map(t => ({ ...t, isVerified: true }));
         
         await addTransactions(verified);
-        setStagingTransactions([]);
-        setViewMode('history');
+        
+        // Remove only the committed ones from staging
+        const remaining = stagingTransactions.filter(t => !t.bucketId);
+        setStagingTransactions(remaining);
+        
+        // If everything is done, switch view. Otherwise stay to let user fix the rest.
+        if (remaining.length === 0) {
+            setViewMode('history');
+        }
     };
 
     const openRuleModal = (tx: Transaction) => {
@@ -277,6 +338,9 @@ export const TransactionsView: React.FC = () => {
     // Filter subcategories for Rule Modal
     const validRuleSubCats = subCategories.filter(sc => sc.mainCategoryId === ruleDraft.targetCategoryMainId);
 
+    // Count valid transactions for commit
+    const validForCommitCount = stagingTransactions.filter(t => t.bucketId).length;
+
     return (
         <div className="space-y-6 pb-24 animate-in slide-in-from-right duration-300">
             <header className="flex justify-between items-end">
@@ -307,7 +371,7 @@ export const TransactionsView: React.FC = () => {
                     {stagingTransactions.length === 0 ? (
                         <Card className="p-8 border-dashed border-2 border-slate-700 bg-slate-800/20 flex flex-col items-center justify-center text-center space-y-4">
                             <div className="w-16 h-16 bg-blue-500/10 rounded-full flex items-center justify-center text-blue-400 mb-2">
-                                <Upload className="w-8 h-8" />
+                                {isProcessing ? <Loader2 className="w-8 h-8 animate-spin" /> : <Upload className="w-8 h-8" />}
                             </div>
                             <div>
                                 <h3 className="text-lg font-bold text-white">Ladda upp Bankfil</h3>
@@ -357,12 +421,25 @@ export const TransactionsView: React.FC = () => {
                                     </div>
                                 </div>
                                 <div className="flex gap-2">
+                                    {/* BULK AI BUTTON */}
+                                    {stagingTransactions.some(t => !t.bucketId && !t.categoryMainId) && (
+                                        <Button 
+                                            variant="secondary" 
+                                            onClick={handleRunAiAnalysis} 
+                                            disabled={isAiAnalysisRunning}
+                                            className="bg-purple-600/20 text-purple-300 hover:bg-purple-600/40 border-purple-500/30"
+                                        >
+                                            {isAiAnalysisRunning ? <Loader2 className="w-4 h-4 animate-spin mr-2"/> : <Wand2 className="w-4 h-4 mr-2" />}
+                                            {isAiAnalysisRunning ? "Analyserar..." : "AI-gissa tomma"}
+                                        </Button>
+                                    )}
+
                                     <Button variant="secondary" onClick={() => setStagingTransactions([])}>
                                         Avbryt
                                     </Button>
-                                    <Button onClick={handleCommit} disabled={stagingTransactions.filter(t => t.bucketId || t.categoryMainId).length === 0}>
+                                    <Button onClick={handleCommit} disabled={validForCommitCount === 0}>
                                         <Check className="w-4 h-4 mr-2" />
-                                        Bokför ({stagingTransactions.filter(t => t.bucketId || t.categoryMainId).length})
+                                        Bokför ({validForCommitCount})
                                     </Button>
                                 </div>
                             </div>
@@ -456,6 +533,27 @@ export const TransactionsView: React.FC = () => {
                      )}
                 </div>
             )}
+            
+            {/* ERROR MODAL */}
+            <Modal isOpen={!!errorLog} onClose={() => setErrorLog(null)} title="Import misslyckades">
+                <div className="space-y-4">
+                    <div className="flex items-center gap-3 text-red-400 mb-2">
+                        <AlertTriangle className="w-6 h-6" />
+                        <h3 className="font-bold">Ett fel uppstod vid analys av filen</h3>
+                    </div>
+                    <p className="text-sm text-slate-300">
+                        Nedan visas den tekniska felrapporten. Detta beror oftast på att filen inte följer förväntat format eller är lösenordsskyddad.
+                    </p>
+                    <div className="bg-red-950/30 p-4 rounded-lg border border-red-500/30 text-red-200 font-mono text-xs whitespace-pre-wrap overflow-auto max-h-60 shadow-inner">
+                        {errorLog}
+                    </div>
+                    <div className="flex justify-end pt-2">
+                        <Button variant="secondary" onClick={() => setErrorLog(null)}>
+                            Stäng
+                        </Button>
+                    </div>
+                </div>
+            </Modal>
 
             {/* RULE MODAL */}
             <Modal isOpen={ruleModalOpen} onClose={() => setRuleModalOpen(false)} title="Skapa Importregel">
