@@ -3,6 +3,7 @@ import { Transaction, ImportRule, Bucket, MainCategory, SubCategory } from '../t
 import { generateId } from '../utils';
 import { db } from '../db';
 import { categorizeTransactionsWithAi } from './aiService';
+import * as XLSX from 'xlsx'; // Statisk import är säkrare med Vite
 
 // --- PARSING ---
 
@@ -14,19 +15,36 @@ const parseAmount = (val: any): number => {
     let str = val.toString();
     str = str.replace(/\./g, ''); 
     str = str.replace(',', '.');
+    // Remove non-breaking spaces often found in bank exports
+    str = str.replace(/\s/g, '');
     return parseFloat(str) || 0;
 };
 
 const parseDate = (val: any): string => {
-    // Return YYYY-MM-DD
     if (!val) return format(new Date(), 'yyyy-MM-dd');
-    // If it's a JS date object (from XLSX)
+    
+    // If it's a JS date object
     if (val instanceof Date) {
         return format(val, 'yyyy-MM-dd');
     }
-    // Simple parsing for "2025-01-01"
+    
+    // Check if it's an Excel serial date number (e.g. 45000)
+    if (typeof val === 'number' && val > 20000) {
+        // Excel base date is usually 1900-01-01
+        // new Date(Math.round((val - 25569)*86400*1000)) converts Excel serial to JS timestamp
+        // However, XLSX library usually handles this if cell dates are typed.
+        // If we get a raw number here, let's try to convert it.
+        const date = new Date((val - (25567 + 2))*86400*1000); // 25569 adjustment
+        return format(date, 'yyyy-MM-dd');
+    }
+
     const str = val.toString().trim();
+    // Match YYYY-MM-DD
     if (str.match(/^\d{4}-\d{2}-\d{2}$/)) return str;
+    // Match YYYYMMDD
+    if (str.match(/^\d{8}$/)) {
+        return `${str.substring(0,4)}-${str.substring(4,6)}-${str.substring(6,8)}`;
+    }
     return str; // Fallback
 };
 
@@ -35,42 +53,49 @@ export const parseBankFile = async (file: File, accountId: string): Promise<Tran
     
     if (isCsv) {
         try {
-            // Dynamic import for PapaParse
             const PapaModule = await import('papaparse');
-            // Handle ESM/CommonJS default export differences
             const Papa = PapaModule.default || PapaModule;
 
             return new Promise((resolve, reject) => {
                 Papa.parse(file, {
-                    encoding: "ISO-8859-1", // Standard for Swedish banks
+                    encoding: "ISO-8859-1",
                     skipEmptyLines: true,
                     complete: (results: any) => {
-                        // Search for the header row containing "Datum"
-                        const headerRowIndex = results.data.findIndex((row: any) => 
-                            Array.isArray(row) && row.some((cell: any) => typeof cell === 'string' && cell.toLowerCase().includes('datum'))
-                        );
+                        try {
+                            const headerRowIndex = results.data.findIndex((row: any) => 
+                                Array.isArray(row) && row.some((cell: any) => typeof cell === 'string' && cell.toLowerCase().includes('datum'))
+                            );
 
-                        if (headerRowIndex === -1) {
-                            console.warn("Could not find 'Datum' header row.");
-                            return resolve([]);
+                            if (headerRowIndex === -1) {
+                                console.warn("Could not find 'Datum' header row.");
+                                // Fallback: Assume first row is header or data if simple CSV
+                                // return resolve([]); 
+                            }
+
+                            const startRow = headerRowIndex !== -1 ? headerRowIndex + 1 : 0;
+                            const dataRows = results.data.slice(startRow);
+                            
+                            const transactions: Transaction[] = dataRows.map((row: any) => {
+                                // Safe access to columns
+                                const dateCol = row[0];
+                                const textCol = row[3] || row[1] || 'Okänd'; // Try col 3, fallback to 1
+                                const amountCol = row[4] || row[2] || 0;     // Try col 4, fallback to 2
+
+                                return {
+                                    id: generateId(),
+                                    accountId,
+                                    date: parseDate(dateCol),
+                                    description: (textCol || 'Okänd transaktion').toString(),
+                                    amount: parseAmount(amountCol),
+                                    isVerified: false,
+                                    source: 'import' as const
+                                };
+                            }).filter((t: Transaction) => t.amount !== 0 && t.date.length === 10);
+
+                            resolve(transactions);
+                        } catch (e) {
+                            reject(e);
                         }
-
-                        const dataRows = results.data.slice(headerRowIndex + 1);
-                        const transactions: Transaction[] = dataRows.map((row: any) => {
-                            // Assuming standard layout based on description: 0: Date, 3: Text, 4: Amount
-                            // Adjust indices if needed or make dynamic based on header
-                            return {
-                                id: generateId(),
-                                accountId,
-                                date: parseDate(row[0]),
-                                description: row[3] || 'Okänd transaktion',
-                                amount: parseAmount(row[4]),
-                                isVerified: false,
-                                source: 'import' as const
-                            };
-                        }).filter((t: Transaction) => t.amount !== 0); // Filter out empty lines or zero transactions
-
-                        resolve(transactions);
                     },
                     error: (err: any) => reject(err)
                 });
@@ -80,28 +105,41 @@ export const parseBankFile = async (file: File, accountId: string): Promise<Tran
             throw new Error("Kunde inte ladda CSV-tolkaren.");
         }
     } else {
-        try {
-            // Dynamic import for XLSX
-            const XLSXModule = await import('xlsx');
-            const XLSX = XLSXModule.default || XLSXModule;
+        // XLSX Handling
+        return new Promise((resolve, reject) => {
+            const reader = new FileReader();
+            
+            reader.onload = (e) => {
+                try {
+                    const data = new Uint8Array(e.target?.result as ArrayBuffer);
+                    const workbook = XLSX.read(data, { type: 'array', cellDates: true }); // cellDates: true is crucial for Excel dates
+                    
+                    const firstSheetName = workbook.SheetNames[0];
+                    const firstSheet = workbook.Sheets[firstSheetName];
+                    
+                    // Get data as array of arrays
+                    const jsonData = XLSX.utils.sheet_to_json(firstSheet, { header: 1, defval: '' }) as any[][];
+                    
+                    // Find header row safely
+                    const headerRowIndex = jsonData.findIndex((row) => 
+                        Array.isArray(row) && row.some(cell => typeof cell === 'string' && cell.toLowerCase().includes('datum'))
+                    );
+                    
+                    if (headerRowIndex === -1) {
+                        console.warn("Could not find 'Datum' header in XLSX.");
+                        // Fallback logic or reject? Let's resolve empty for now to avoid crash
+                        return resolve([]); 
+                    }
 
-            return new Promise((resolve, reject) => {
-                const reader = new FileReader();
-                reader.onload = (e) => {
-                    try {
-                        const data = new Uint8Array(e.target?.result as ArrayBuffer);
-                        const workbook = XLSX.read(data, { type: 'array' });
-                        const firstSheet = workbook.Sheets[workbook.SheetNames[0]];
-                        const jsonData = XLSX.utils.sheet_to_json(firstSheet, { header: 1 }) as any[][];
-                        
-                        const headerRowIndex = jsonData.findIndex((row) => 
-                            row.some(cell => typeof cell === 'string' && cell.toLowerCase().includes('datum'))
-                        );
-                        
-                        if (headerRowIndex === -1) return resolve([]);
+                    const dataRows = jsonData.slice(headerRowIndex + 1);
+                    
+                    const transactions: Transaction[] = dataRows.map((row): Transaction | null => {
+                         // Mapping based on your specific file structure: 
+                         // Col 0: Datum, Col 3: Text, Col 4: Belopp
+                         // Use safe checks
+                         if (!Array.isArray(row) || row.length < 5) return null;
 
-                        const dataRows = jsonData.slice(headerRowIndex + 1);
-                        const transactions: Transaction[] = dataRows.map((row) => ({
+                         return {
                              id: generateId(),
                              accountId,
                              date: parseDate(row[0]),
@@ -109,22 +147,27 @@ export const parseBankFile = async (file: File, accountId: string): Promise<Tran
                              amount: parseAmount(row[4]),
                              isVerified: false,
                              source: 'import' as const
-                        })).filter(t => t.amount !== 0);
+                        };
+                    }).filter((t): t is Transaction => t !== null && t.amount !== 0);
 
-                        resolve(transactions);
-                    } catch (err) {
-                        reject(err);
-                    }
-                };
-                reader.readAsArrayBuffer(file);
-            });
-        } catch (error) {
-            console.error("Failed to load XLSX", error);
-            throw new Error("Kunde inte ladda Excel-tolkaren.");
-        }
+                    resolve(transactions);
+                } catch (err) {
+                    console.error("XLSX Processing Error:", err);
+                    reject(new Error("Misslyckades att tolka Excel-filen."));
+                }
+            };
+            
+            reader.onerror = (err) => {
+                console.error("File Reading Error:", err);
+                reject(new Error("Kunde inte läsa filen."));
+            };
+
+            reader.readAsArrayBuffer(file);
+        });
     }
 };
 
+// ... (rest of pipeline functions remain the same)
 // --- PIPELINE LOGIC ---
 
 /**
