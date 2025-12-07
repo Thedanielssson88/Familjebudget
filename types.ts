@@ -69,6 +69,8 @@ export interface BudgetGroup {
   name: string;
   // monthlyLimit: number; // DEPRECATED: Replaced by monthlyData
   monthlyData: Record<MonthKey, BudgetGroupData>; 
+  // LINK TO CASH FLOW: Which buckets fund this group?
+  linkedBucketIds?: string[];
   isCatchAll?: boolean; // If true, this is the "Other/Unbudgeted" group
   icon?: string; 
 }
@@ -109,6 +111,7 @@ export interface Transaction {
   matchType?: 'rule' | 'history' | 'ai'; // How was this categorized?
   aiSuggested?: boolean; // Deprecated, use matchType
   ruleMatch?: boolean; // Deprecated, use matchType
+  isManuallyApproved?: boolean; // Transient state for UI during import
 }
 
 export interface ImportRule {
@@ -125,6 +128,10 @@ export interface ImportRule {
 
 export interface AppSettings {
   payday: number; // Day of month (e.g., 25)
+  // Auto-approval settings for import
+  autoApproveIncome?: boolean;
+  autoApproveTransfer?: boolean;
+  autoApproveExpense?: boolean;
 }
 
 export interface GlobalState {

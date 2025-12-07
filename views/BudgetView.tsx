@@ -1,10 +1,10 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { useApp } from '../store';
 import { OperatingBudgetView } from './OperatingBudgetView';
-import { Bucket, BucketData } from '../types';
-import { calculateDailyBucketCost, calculateFixedBucketCost, calculateGoalBucketCost, formatMoney, generateId, getBudgetInterval, isBucketActiveInMonth, getEffectiveBucketData } from '../utils';
+import { Bucket, BucketData, Account } from '../types';
+import { calculateDailyBucketCost, calculateFixedBucketCost, calculateGoalBucketCost, formatMoney, generateId, getBudgetInterval, isBucketActiveInMonth, getEffectiveBucketData, calculateSavedAmount } from '../utils';
 import { Card, Button, Input, Modal, cn } from '../components/components';
-import { Plus, Trash2, Calendar, Target, Repeat, Wallet, PiggyBank, ArrowRightLeft, Image as ImageIcon, X, Check, ChevronDown, ChevronUp, Settings, Copy, PieChart, LayoutGrid } from 'lucide-react';
+import { Plus, Trash2, Calendar, Target, Repeat, Wallet, PiggyBank, ArrowRightLeft, Image as ImageIcon, X, Check, ChevronDown, ChevronUp, Settings, Copy, PieChart, LayoutGrid, Edit2 } from 'lucide-react';
 import { format, addMonths, parseISO, differenceInMonths } from 'date-fns';
 import { sv } from 'date-fns/locale';
 import { useBudgetActuals } from '../hooks/useBudgetActuals';
@@ -71,7 +71,7 @@ export const BudgetView: React.FC = () => {
 };
 
 const TransfersViewContent: React.FC = () => {
-  const { accounts, buckets, addBucket, updateBucket, deleteBucket, confirmBucketAmount, selectedMonth, settings, addAccount, copyFromNextMonth } = useApp();
+  const { accounts, buckets, addBucket, updateBucket, deleteBucket, confirmBucketAmount, selectedMonth, settings, addAccount, updateAccount, copyFromNextMonth } = useApp();
   
   // REAL-TIME ACTUALS HOOK
   const actuals = useBudgetActuals(selectedMonth, settings.payday);
@@ -86,18 +86,37 @@ const TransfersViewContent: React.FC = () => {
   const [showGoalDetails, setShowGoalDetails] = useState(false); // Toggle for advanced goal settings
   const [showRegularDetails, setShowRegularDetails] = useState(false); // Toggle for advanced settings on regular buckets
 
-  // Account creation state
+  // Account creation/editing state
   const [isAccountModalOpen, setIsAccountModalOpen] = useState(false);
-  const [newAccountName, setNewAccountName] = useState('');
-  const [newAccountIcon, setNewAccountIcon] = useState('🏠');
+  const [editingAccount, setEditingAccount] = useState<Account | null>(null);
+  const [accountName, setAccountName] = useState('');
+  const [accountIcon, setAccountIcon] = useState('🏠');
 
   const accountIcons = ['🏠', '🚗', '💰', '🍔', '✈️', '👶', '🐶', '💊', '🎓', '🎁', '🔧', '🧥', '💳', '🏦', '📉', '🏖️', '💡', '🛒', '🚲', '🎮'];
 
-  const handleCreateAccount = () => {
-    if (!newAccountName.trim()) return;
-    addAccount(newAccountName.trim(), newAccountIcon);
-    setNewAccountName('');
-    setNewAccountIcon('🏠');
+  const openAccountModal = (account?: Account) => {
+      if (account) {
+          setEditingAccount(account);
+          setAccountName(account.name);
+          setAccountIcon(account.icon);
+      } else {
+          setEditingAccount(null);
+          setAccountName('');
+          setAccountIcon('🏠');
+      }
+      setIsAccountModalOpen(true);
+  };
+
+  const handleSaveAccount = async () => {
+    if (!accountName.trim()) return;
+    
+    if (editingAccount) {
+        await updateAccount({ ...editingAccount, name: accountName.trim(), icon: accountIcon });
+    } else {
+        await addAccount(accountName.trim(), accountIcon);
+    }
+    setAccountName('');
+    setAccountIcon('🏠');
     setIsAccountModalOpen(false);
   };
   
@@ -358,9 +377,18 @@ const TransfersViewContent: React.FC = () => {
           <div key={account.id} className="space-y-4 mb-8">
             <div className="bg-slate-800/50 p-4 rounded-2xl border border-slate-700 shadow-lg">
                 <div className="flex items-center justify-between mb-3">
-                    <h2 className="text-xl font-bold flex items-center gap-2 text-white">
-                        <span>{account.icon}</span> {account.name}
-                    </h2>
+                    <div className="flex items-center gap-2 text-white">
+                        <h2 className="text-xl font-bold flex items-center gap-2">
+                            <span>{account.icon}</span> {account.name}
+                        </h2>
+                        <button 
+                            onClick={() => openAccountModal(account)}
+                            className="text-slate-500 hover:text-blue-400 p-1.5 rounded-lg hover:bg-slate-700 transition-colors"
+                            title="Redigera konto"
+                        >
+                            <Edit2 size={14} />
+                        </button>
+                    </div>
                     <div className="text-right">
                         <div className="text-[10px] uppercase font-bold text-slate-500 tracking-wider">Planerad Överföring</div>
                         <div className="text-lg font-mono font-bold text-white leading-none">{formatMoney(accountTotal)}</div>
@@ -383,7 +411,9 @@ const TransfersViewContent: React.FC = () => {
                 const styles = getBucketStyles(bucket);
                 
                 const spent = actuals?.spentByBucket[bucket.id] || 0;
-                const hasTransactions = spent > 0;
+                
+                // --- NEW: Calculate Accumulated Balance for Goal ---
+                const accumulated = bucket.type === 'GOAL' ? calculateSavedAmount(bucket, selectedMonth) : 0;
 
                 return (
                   <Card 
@@ -400,10 +430,16 @@ const TransfersViewContent: React.FC = () => {
                          {bucket.isSavings && <span className={cn("text-[10px] px-1.5 py-0.5 rounded uppercase tracking-wider", styles.badge)}>Spar</span>}
                          {bucket.paymentSource === 'BALANCE' && <span className={cn("text-[10px] px-1.5 py-0.5 rounded uppercase tracking-wider", styles.badge)}>Saldo</span>}
                       </div>
-                      <div className={cn("text-xs mt-1 flex gap-2 opacity-80 transition-colors", styles.text)}>
+                      
+                      <div className={cn("text-xs mt-1 flex flex-wrap gap-2 opacity-80 transition-colors", styles.text)}>
                         {bucket.type === 'FIXED' && <span className="flex items-center gap-1"><Repeat className="w-3 h-3"/> Fast</span>}
                         {bucket.type === 'DAILY' && <span className="flex items-center gap-1"><Calendar className="w-3 h-3"/> Rörligt</span>}
-                        {bucket.type === 'GOAL' && <span className="flex items-center gap-1"><Target className="w-3 h-3"/> Mål</span>}
+                        {bucket.type === 'GOAL' && (
+                            <div className="flex items-center gap-3">
+                                <span className="flex items-center gap-1"><Target className="w-3 h-3"/> Mål</span>
+                                <span className="flex items-center gap-1 font-bold bg-black/20 px-1.5 rounded"><PiggyBank className="w-3 h-3"/> Saldo: {formatMoney(accumulated)}</span>
+                            </div>
+                        )}
                       </div>
                     </div>
                     
@@ -454,29 +490,29 @@ const TransfersViewContent: React.FC = () => {
         );
       })}
 
-      <Button variant="secondary" className="w-full border-dashed border-slate-700 py-4 text-slate-400 hover:text-white mt-8" onClick={() => setIsAccountModalOpen(true)}>
+      <Button variant="secondary" className="w-full border-dashed border-slate-700 py-4 text-slate-400 hover:text-white mt-8" onClick={() => openAccountModal()}>
         <Wallet className="w-5 h-5 mr-2" /> Skapa nytt konto
       </Button>
 
-      <Modal isOpen={isAccountModalOpen} onClose={() => setIsAccountModalOpen(false)} title="Skapa Nytt Konto">
+      <Modal isOpen={isAccountModalOpen} onClose={() => setIsAccountModalOpen(false)} title={editingAccount ? "Redigera Konto" : "Skapa Nytt Konto"}>
         <div className="space-y-6">
-           <Input label="Kontonamn" placeholder="t.ex. Sommarstugan" value={newAccountName} onChange={e => setNewAccountName(e.target.value)} autoFocus />
+           <Input label="Kontonamn" placeholder="t.ex. Sommarstugan" value={accountName} onChange={e => setAccountName(e.target.value)} autoFocus />
            <div>
               <label className="text-xs font-medium text-slate-400 uppercase tracking-wider mb-2 block">Välj Symbol</label>
               <div className="grid grid-cols-5 gap-2">
                 {accountIcons.map(icon => (
                    <button
                      key={icon}
-                     onClick={() => setNewAccountIcon(icon)}
-                     className={cn("aspect-square rounded-xl flex items-center justify-center text-2xl transition-all", newAccountIcon === icon ? "bg-blue-600 text-white scale-110 shadow-lg" : "bg-slate-800 text-slate-400 hover:bg-slate-700 hover:text-white")}
+                     onClick={() => setAccountIcon(icon)}
+                     className={cn("aspect-square rounded-xl flex items-center justify-center text-2xl transition-all", accountIcon === icon ? "bg-blue-600 text-white scale-110 shadow-lg" : "bg-slate-800 text-slate-400 hover:bg-slate-700 hover:text-white")}
                    >
                      {icon}
                    </button>
                 ))}
               </div>
            </div>
-           <Button onClick={handleCreateAccount} disabled={!newAccountName.trim()} className="w-full">
-             Skapa Konto
+           <Button onClick={handleSaveAccount} disabled={!accountName.trim()} className="w-full">
+             {editingAccount ? "Spara ändringar" : "Skapa Konto"}
            </Button>
         </div>
       </Modal>

@@ -14,18 +14,13 @@ export const generateProjectOrgSlide = (pres: PptxGenJS) => {
     const GREEN = "00B050";
     const WHITE = "FFFFFF";
     const DARK_GREY = "363636";
-    const BORDER_GREY = "D9D9D9"; // Fallback/Alternative
 
     // --- LAYOUT CONSTANTS ---
     const LEFT_COL_X = 0.5;
     const RIGHT_COL_X = 5.2;
-    const COL_WIDTH = 4.2;
+    const COL_WIDTH = 4.4;
     
-    const ROW_1_Y = 1.2;
-    const ROW_2_Y = 3.2; // Project Manager
-    const ROW_3_Y = 4.5; // Team / Ref Persons
-
-    const HEADER_H = 0.45;
+    const HEADER_H = 0.4;
     
     // --- HELPER TO DRAW A CARD ---
     const drawCard = (
@@ -39,18 +34,18 @@ export const generateProjectOrgSlide = (pres: PptxGenJS) => {
         slide.addShape(pres.ShapeType.rect, {
             x: x, y: y, w: w, h: HEADER_H,
             fill: { color: color },
-            rectRadius: 0.1 // Rounded top corners roughly (applied to whole rect, but looks ok)
+            rectRadius: 0
         });
         
         // 2. Header Text
         slide.addText(title, {
             x: x, y: y, w: w, h: HEADER_H,
-            align: 'center', fontSize: 12, bold: true, color: WHITE, valign: 'middle'
+            align: 'center', fontSize: 11, bold: true, color: WHITE, valign: 'middle'
         });
 
         // 3. Body Box (White with Border)
         slide.addShape(pres.ShapeType.rect, {
-            x: x, y: y + HEADER_H - 0.02, // Slight overlap to hide gap
+            x: x, y: y + HEADER_H, 
             w: w, h: h - HEADER_H,
             fill: { color: WHITE },
             line: { color: color, width: 1.5, dashType: isDashed ? 'dash' : 'solid' }
@@ -61,17 +56,22 @@ export const generateProjectOrgSlide = (pres: PptxGenJS) => {
             x: x + 0.1, y: y + HEADER_H + 0.1, 
             w: w - 0.2, h: h - HEADER_H - 0.2,
             fontSize: 10, color: DARK_GREY, 
-            bullet: content.length > 1, // Only bullet if multiple items or specifically structured
+            bullet: content.length > 1 ? { type: 'bullet', code: '2022' } : false,
             valign: 'top',
-            align: content.length === 1 && !content[0].options?.breakLine ? 'center' : 'left' // Center if single line/PM
+            align: content.length === 1 && !content[0].options?.breakLine ? 'center' : 'left'
         });
     };
 
-    // --- LEFT COLUMN: EXECUTION CHAIN ---
+    // --- Y POSITIONS ---
+    const ROW_1_Y = 1.2;
+    const ROW_2_Y = 2.8;
+    const ROW_3_Y = 4.2;
+
+    // --- LEFT COLUMN ---
 
     // 1. Styrgrupp
     drawCard(
-        LEFT_COL_X, ROW_1_Y, COL_WIDTH, 1.5,
+        LEFT_COL_X, ROW_1_Y, COL_WIDTH, 1.3,
         RED, 
         "Styrgrupp",
         [
@@ -81,31 +81,31 @@ export const generateProjectOrgSlide = (pres: PptxGenJS) => {
         ]
     );
 
-    // CONNECTOR: Styrgrupp -> PM
+    // CONNECTOR: Styrgrupp -> Projektledare
     slide.addShape(pres.ShapeType.line, { 
-        x: LEFT_COL_X + (COL_WIDTH / 2), y: ROW_1_Y + 1.5, 
-        w: 0, h: ROW_2_Y - (ROW_1_Y + 1.5), 
+        x: LEFT_COL_X + (COL_WIDTH / 2), y: ROW_1_Y + 1.3, 
+        w: 0, h: ROW_2_Y - (ROW_1_Y + 1.3), 
         line: { color: '888888', width: 2, endArrowType: 'triangle' } 
     });
 
     // 2. Projektledare
     drawCard(
-        LEFT_COL_X, ROW_2_Y, COL_WIDTH, 1.0,
+        LEFT_COL_X, ROW_2_Y, COL_WIDTH, 0.8,
         GREEN,
         "Projektledare",
-        [{ text: "Andreas Danielsson", options: { bold: true } }]
+        [{ text: "Andreas Danielsson - Projektledare" }]
     );
 
-    // CONNECTOR: PM -> Team
+    // CONNECTOR: Projektledare -> Team
     slide.addShape(pres.ShapeType.line, { 
-        x: LEFT_COL_X + (COL_WIDTH / 2), y: ROW_2_Y + 1.0, 
-        w: 0, h: ROW_3_Y - (ROW_2_Y + 1.0), 
+        x: LEFT_COL_X + (COL_WIDTH / 2), y: ROW_2_Y + 0.8, 
+        w: 0, h: ROW_3_Y - (ROW_2_Y + 0.8), 
         line: { color: '888888', width: 2, endArrowType: 'triangle' } 
     });
 
     // 3. Tvärfunktionellt Team
     drawCard(
-        LEFT_COL_X, ROW_3_Y, COL_WIDTH, 1.5,
+        LEFT_COL_X, ROW_3_Y, COL_WIDTH, 1.2,
         GREEN,
         "Tvärfunktionellt team",
         [
@@ -114,11 +114,11 @@ export const generateProjectOrgSlide = (pres: PptxGenJS) => {
         ]
     );
 
-    // --- RIGHT COLUMN: REFERENCE & SUPPORT ---
+    // --- RIGHT COLUMN ---
 
     // 4. Referensgrupp
     drawCard(
-        RIGHT_COL_X, ROW_1_Y, COL_WIDTH, 1.5,
+        RIGHT_COL_X, ROW_1_Y, COL_WIDTH, 1.3,
         RED,
         "Referensgrupp",
         [
@@ -127,10 +127,10 @@ export const generateProjectOrgSlide = (pres: PptxGenJS) => {
         ]
     );
 
-    // 5. Referenspersoner (Dashed Border)
+    // 5. Referenspersoner (Aligned lower)
     drawCard(
-        RIGHT_COL_X, ROW_2_Y + 0.5, // Start slightly lower than PM
-        COL_WIDTH, 2.3, // Taller box for many names
+        RIGHT_COL_X, ROW_2_Y + 0.5, // Start bit lower than PM
+        COL_WIDTH, 2.5, 
         RED,
         "Referenspersoner",
         [

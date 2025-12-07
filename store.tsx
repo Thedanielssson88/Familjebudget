@@ -7,6 +7,7 @@ import { db } from './db';
 import { DEFAULT_MAIN_CATEGORIES, DEFAULT_SUB_CATEGORIES } from './constants/defaultCategories';
 
 // --- ZOD SCHEMAS FOR VALIDATION (Still used for Import/Backup) ---
+// ... (keep existing schemas unchanged)
 
 const BucketDataSchema = z.object({
   amount: z.number().optional().default(0),
@@ -58,7 +59,10 @@ const AccountSchema = z.object({
 });
 
 const AppSettingsSchema = z.object({
-  payday: z.number()
+  payday: z.number(),
+  autoApproveIncome: z.boolean().optional(),
+  autoApproveTransfer: z.boolean().optional(),
+  autoApproveExpense: z.boolean().optional(),
 });
 
 const MainCategorySchema = z.object({
@@ -133,6 +137,7 @@ interface AppContextType extends GlobalState {
   updateUserIncome: (userId: string, month: MonthKey, type: 'salary'|'childBenefit'|'insurance'|'vabDays'|'dailyDeduction'|'incomeLoss', value: number) => void;
   updateUserName: (userId: string, name: string) => void;
   addAccount: (name: string, icon: string) => void;
+  updateAccount: (account: Account) => Promise<void>;
   addBucket: (bucket: Bucket) => void;
   updateBucket: (bucket: Bucket) => void;
   deleteBucket: (id: string, month: MonthKey, scope: 'THIS_MONTH' | 'THIS_AND_FUTURE' | 'ALL') => void;
@@ -141,11 +146,13 @@ interface AppContextType extends GlobalState {
   copyFromNextMonth: (currentMonth: MonthKey) => Promise<void>;
   setMonth: (month: MonthKey) => void;
   setPayday: (day: number) => void;
+  updateSettings: (settings: Partial<AppSettings>) => void;
   // Transaction & Rule Methods
   addTransactions: (txs: Transaction[]) => Promise<void>;
   updateTransaction: (tx: Transaction) => Promise<void>;
   addImportRule: (rule: ImportRule) => Promise<void>;
   deleteTransaction: (id: string) => Promise<void>;
+  deleteAllTransactions: () => Promise<void>;
   // Category Methods
   addMainCategory: (name: string) => Promise<string>;
   deleteMainCategory: (id: string) => Promise<void>;
@@ -166,7 +173,12 @@ interface AppContextType extends GlobalState {
 const AppContext = createContext<AppContextType | undefined>(undefined);
 
 const STORAGE_KEY = 'familyflow_db_v5'; 
-const defaultSettings: AppSettings = { payday: 25 };
+const defaultSettings: AppSettings = { 
+    payday: 25,
+    autoApproveIncome: false,
+    autoApproveTransfer: false,
+    autoApproveExpense: true 
+};
 
 export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [isLoaded, setIsLoaded] = useState(false);
@@ -285,17 +297,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         }
 
         // MIGRATION: Ensure at least one "Catch All" Budget Group exists
-        // MIGRATION 2: Ensure all budget groups have monthlyData structure
         let loadedGroups = dbGroups;
-        
-        // Check for old structure (monthlyLimit instead of monthlyData)
         const needsMigration = dbGroups.some((g: any) => typeof g.monthlyLimit === 'number' && !g.monthlyData);
         if (needsMigration) {
             console.log("Migrating Budget Groups to Monthly Data Structure...");
             const migratedGroups = dbGroups.map((g: any) => {
                 if (g.monthlyData) return g;
-                // Create a starting point for monthly data (using current month or a past default)
-                // We use a generic start key like "2023-01" to ensure inheritance works for now
                 return {
                     ...g,
                     monthlyData: {
@@ -319,7 +326,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         }
         setBudgetGroups(loadedGroups);
         
-        // MIGRATION: Map old categoryId to bucketId if needed
         const migratedTransactions = dbTransactions.map(t => {
             const anyT = t as any;
             if (anyT.categoryId && !t.bucketId) {
@@ -328,12 +334,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             return t;
         });
         
-        // MIGRATION: Update Rules
         const migratedRules = dbRules.map(r => {
-             const anyR = r as any;
-             if (anyR.targetBucketId && !anyR.targetBucketId) {
-                 return r;
-             }
              return r;
         });
 
@@ -342,7 +343,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
         if (dbSettings) {
             const { id, ...cleanSettings } = dbSettings;
-            setSettings(cleanSettings);
+            // Merge with defaults to ensure new fields exist
+            setSettings({ ...defaultSettings, ...cleanSettings });
         }
         
         setIsLoaded(true);
@@ -395,6 +397,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const newAccount: Account = { id: generateId(), name, icon, startBalances: {} };
     await db.accounts.add(newAccount);
     setAccounts(prev => [...prev, newAccount]);
+  };
+
+  const updateAccount = async (account: Account) => {
+      await db.accounts.put(account);
+      setAccounts(prev => prev.map(a => a.id === account.id ? account : a));
   };
 
   const addBucket = async (bucket: Bucket) => {
@@ -476,10 +483,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       const updates: Bucket[] = [];
       
       for (const bucket of newBuckets) {
-          // If current month has data, skip (safety)
           if (bucket.monthlyData[currentMonth]) continue;
-
-          // Check next month data
           const nextData = bucket.monthlyData[nextMonth];
           if (nextData && !nextData.isExplicitlyDeleted) {
               bucket.monthlyData[currentMonth] = { ...nextData };
@@ -493,6 +497,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       }
   };
 
+  const updateSettings = async (newSettings: Partial<AppSettings>) => {
+      const updated = { ...settings, ...newSettings };
+      await db.settings.put({ ...updated, id: 1 });
+      setSettings(updated);
+  };
+
   // --- CATEGORY ACTIONS ---
   const addMainCategory = async (name: string): Promise<string> => {
       const id = generateId();
@@ -504,7 +514,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   
   const deleteMainCategory = async (id: string) => {
       await db.mainCategories.delete(id);
-      // Delete subs
       const subsToDelete = subCategories.filter(s => s.mainCategoryId === id).map(s => s.id);
       if (subsToDelete.length > 0) {
           await db.subCategories.bulkDelete(subsToDelete);
@@ -547,8 +556,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           id: generateId(), 
           name, 
           icon,
-          // Set initial data for the selected month (or far past to propagate)
-          // We use a safe past date to ensure it appears in current month via inheritance if we just created it.
           monthlyData: {
              [selectedMonth]: { limit, isExplicitlyDeleted: false }
           }
@@ -566,8 +573,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       if (scope === 'ALL') {
           await db.budgetGroups.delete(id);
           setBudgetGroups(prev => prev.filter(g => g.id !== id));
-          
-          // Unlink subcategories
           const subsToUpdate = subCategories.filter(s => s.budgetGroupId === id);
           if (subsToUpdate.length > 0) {
               const updatedSubs = subsToUpdate.map(s => ({ ...s, budgetGroupId: undefined }));
@@ -621,6 +626,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       setTransactions(prev => prev.filter(t => t.id !== id));
   };
 
+  const deleteAllTransactions = async () => {
+      await db.transactions.clear();
+      setTransactions([]);
+  };
+
   const addImportRule = async (rule: ImportRule) => {
       await db.importRules.add(rule);
       setImportRules(prev => [...prev, rule]);
@@ -665,15 +675,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const providerValue: AppContextType = {
     users, addUser, updateUserIncome, updateUserName,
-    accounts, addAccount,
+    accounts, addAccount, updateAccount,
     buckets, addBucket, updateBucket, deleteBucket, confirmBucketAmount, archiveBucket, copyFromNextMonth,
-    settings, setPayday: (day) => {
-        const newSettings = { ...settings, payday: day };
-        setSettings(newSettings);
-        db.settings.put({ ...newSettings, id: 1 });
-    },
+    settings, setPayday: (day) => updateSettings({ payday: day }), updateSettings,
     selectedMonth, setMonth: setSelectedMonth,
-    transactions, addTransactions, updateTransaction, deleteTransaction,
+    transactions, addTransactions, updateTransaction, deleteTransaction, deleteAllTransactions,
     importRules, addImportRule,
     // Categories
     mainCategories, addMainCategory, deleteMainCategory,

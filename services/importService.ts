@@ -160,12 +160,16 @@ export const parseBankFile = async (file: File, accountId: string): Promise<Tran
 
 // --- PIPELINE LOGIC ---
 
+/**
+ * Looks up the most recent transaction with the same description to find how it was categorized previously.
+ */
 const applyHistoricalCategories = async (transactions: Transaction[]): Promise<Transaction[]> => {
     const enriched = await Promise.all(transactions.map(async (t): Promise<Transaction> => {
-        if (t.bucketId || t.categoryMainId || t.type) return t;
+        // If it was already matched by a RULE, do not override with history.
+        if (t.matchType === 'rule') return t;
 
         try {
-            // Find last transaction with same description that has a type
+            // Find last transaction with same description that was categorized (has verified data)
             const lastMatch = await db.transactions
                 .where({ accountId: t.accountId, description: t.description })
                 .filter(old => !!old.type && (!!old.bucketId || !!old.categoryMainId))
@@ -173,28 +177,15 @@ const applyHistoricalCategories = async (transactions: Transaction[]): Promise<T
                 .first();
 
             if (lastMatch) {
-                // If the historical match is a TRANSFER, only copy bucketId
-                if (lastMatch.type === 'TRANSFER') {
-                    return {
-                        ...t,
-                        type: 'TRANSFER',
-                        bucketId: lastMatch.bucketId,
-                        categoryMainId: undefined,
-                        categorySubId: undefined,
-                        matchType: 'history' as const
-                    };
-                }
-                // If it is an EXPENSE, only copy categories
-                if (lastMatch.type === 'EXPENSE') {
-                    return {
-                        ...t,
-                        type: 'EXPENSE',
-                        bucketId: undefined,
-                        categoryMainId: lastMatch.categoryMainId,
-                        categorySubId: lastMatch.categorySubId,
-                        matchType: 'history' as const
-                    };
-                }
+                // If the historical match exists, copy its properties exactly.
+                return {
+                    ...t,
+                    type: lastMatch.type, // Copy type (Transfer vs Expense)
+                    bucketId: lastMatch.bucketId,
+                    categoryMainId: lastMatch.categoryMainId,
+                    categorySubId: lastMatch.categorySubId,
+                    matchType: 'history' as const
+                };
             }
         } catch (e) {
             console.warn("History lookup failed for", t.description, e);
@@ -220,10 +211,9 @@ export const runImportPipeline = async (
         return !existingHashes.has(hash);
     });
 
+    // 2. APPLY RULES (Highest Priority)
     processed = processed.map(t => {
         const lowerDesc = t.description.toLowerCase();
-        
-        // A. RULE MATCH (Highest priority)
         const matchedRule = rules.find(r => {
             const kw = r.keyword.toLowerCase();
             if (r.matchType === 'exact') return lowerDesc === kw;
@@ -256,8 +246,21 @@ export const runImportPipeline = async (
                 };
             }
         }
+        return t;
+    });
 
-        // B. SMART TRANSFER DETECTION
+    // 3. APPLY HISTORY (Second Highest Priority)
+    // This MUST run before defaults are applied, so we don't accidentally ignore history.
+    processed = await applyHistoricalCategories(processed);
+
+    // 4. SMART DETECTION & DEFAULTS (Fallback)
+    processed = processed.map(t => {
+        // If already matched by Rule or History, skip.
+        if (t.matchType === 'rule' || t.matchType === 'history') return t;
+
+        const lowerDesc = t.description.toLowerCase();
+
+        // A. Smart Transfer Detection (Keywords)
         const isTransferKeywords = ['överföring', 'till konto', 'omsättning', 'sparande', 'flytt', 'insättning', 'girering'];
         const isLikelyTransfer = isTransferKeywords.some(kw => lowerDesc.includes(kw));
 
@@ -275,21 +278,18 @@ export const runImportPipeline = async (
             };
         }
 
-        // C. DEFAULT TO EXPENSE (Consumption) or INCOME
+        // B. Default to Income
         if (t.amount > 0) {
              return { ...t, type: 'INCOME', categoryMainId: '9', bucketId: undefined }; // 9 = Inkomster
         }
         
-        // Default Consumption
+        // C. Default to Consumption (Expense)
         return { 
             ...t, 
             type: 'EXPENSE', 
             bucketId: undefined 
         };
     });
-
-    // 3. APPLY HISTORY (Smart Matching)
-    processed = await applyHistoricalCategories(processed);
 
     return processed;
 };

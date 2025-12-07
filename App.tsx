@@ -8,7 +8,7 @@ import { DreamsView } from './views/DreamsView';
 import { TransactionsView } from './views/TransactionsView';
 import { SettingsCategories } from './views/SettingsCategories';
 import { OperatingBudgetView } from './views/OperatingBudgetView';
-import { LayoutGrid, Wallet, PieChart, ArrowLeftRight, Calendar, Settings, Sparkles, Cloud, RefreshCw, Trash2, Download, Receipt, Database } from 'lucide-react';
+import { LayoutGrid, Wallet, PieChart, ArrowLeftRight, Calendar, Settings, Sparkles, Cloud, RefreshCw, Trash2, Download, Receipt, Database, AlertTriangle } from 'lucide-react';
 import { cn, Button } from './components/components';
 import { format, subMonths, addMonths } from 'date-fns';
 import { sv } from 'date-fns/locale';
@@ -18,7 +18,7 @@ type View = 'income' | 'budget' | 'dashboard' | 'dreams' | 'transactions';
 
 const MainApp = () => {
   const [currentView, setCurrentView] = useState<View>('dashboard');
-  const { selectedMonth, setMonth, settings, setPayday, getExportData, importData } = useApp();
+  const { selectedMonth, setMonth, settings, setPayday, updateSettings, getExportData, importData, deleteAllTransactions } = useApp();
   const [showSettings, setShowSettings] = useState(false);
   
   // Google Drive State
@@ -126,6 +126,12 @@ const MainApp = () => {
           setBackupStatus('Fel vid rensning');
       }
   };
+
+  const handleClearAllTransactions = async () => {
+      if (confirm("VARNING: Är du säker på att du vill radera ALLA bokförda transaktioner?\n\nDetta går inte att ångra (om du inte har en backup). Alla historik och uppföljning försvinner.")) {
+          await deleteAllTransactions();
+      }
+  };
   
   const renderView = () => {
     switch (currentView) {
@@ -179,9 +185,68 @@ const MainApp = () => {
                         />
                     </div>
                     
+                    {/* Auto Approval Settings */}
+                    <div className="space-y-3 pt-2 bg-slate-800/50 p-4 rounded-xl border border-slate-700/50">
+                        <div className="mb-2">
+                            <h4 className="text-xs font-bold text-slate-400 uppercase tracking-wider">Automatiskt Godkännande (Import)</h4>
+                            <p className="text-[10px] text-slate-500">Gäller enbart om matchning finns i regler eller historik.</p>
+                        </div>
+                        
+                        <div className="flex items-center justify-between bg-slate-800 p-3 rounded-lg border border-slate-700">
+                            <span className="text-sm">Inkomster</span>
+                            <div 
+                                className={cn("w-10 h-6 rounded-full p-1 cursor-pointer transition-colors", settings.autoApproveIncome ? "bg-emerald-500" : "bg-slate-700")}
+                                onClick={() => updateSettings({ autoApproveIncome: !settings.autoApproveIncome })}
+                            >
+                                <div className={cn("w-4 h-4 bg-white rounded-full shadow-md transform transition-transform", settings.autoApproveIncome ? "translate-x-4" : "")} />
+                            </div>
+                        </div>
+
+                        <div className="flex items-center justify-between bg-slate-800 p-3 rounded-lg border border-slate-700">
+                            <span className="text-sm">Utgifter</span>
+                            <div 
+                                className={cn("w-10 h-6 rounded-full p-1 cursor-pointer transition-colors", settings.autoApproveExpense ? "bg-emerald-500" : "bg-slate-700")}
+                                onClick={() => updateSettings({ autoApproveExpense: !settings.autoApproveExpense })}
+                            >
+                                <div className={cn("w-4 h-4 bg-white rounded-full shadow-md transform transition-transform", settings.autoApproveExpense ? "translate-x-4" : "")} />
+                            </div>
+                        </div>
+
+                        <div className="flex items-center justify-between bg-slate-800 p-3 rounded-lg border border-slate-700">
+                            <span className="text-sm">Överföringar</span>
+                            <div 
+                                className={cn("w-10 h-6 rounded-full p-1 cursor-pointer transition-colors", settings.autoApproveTransfer ? "bg-emerald-500" : "bg-slate-700")}
+                                onClick={() => updateSettings({ autoApproveTransfer: !settings.autoApproveTransfer })}
+                            >
+                                <div className={cn("w-4 h-4 bg-white rounded-full shadow-md transform transition-transform", settings.autoApproveTransfer ? "translate-x-4" : "")} />
+                            </div>
+                        </div>
+                    </div>
+
                     {/* Category Management */}
                     <div className="bg-slate-800/50 p-4 rounded-xl border border-slate-700/50">
                         <SettingsCategories />
+                    </div>
+
+                    {/* Data Management - Danger Zone */}
+                    <div className="bg-red-950/10 p-4 rounded-xl border border-red-900/20 space-y-3">
+                         <h4 className="text-xs font-bold text-red-400 uppercase tracking-wider flex items-center gap-2">
+                             <AlertTriangle className="w-3 h-3" /> Datahantering (Farlig Zon)
+                         </h4>
+                         
+                         <div className="space-y-2">
+                             <p className="text-[10px] text-red-300/70">
+                                 Här kan du rensa all historik. Kategorier och regler sparas.
+                             </p>
+                             <Button
+                                variant="danger"
+                                onClick={handleClearAllTransactions}
+                                className="w-full text-xs py-3 h-auto justify-start bg-red-500/10 hover:bg-red-500 text-red-200 hover:text-white border-red-500/20"
+                             >
+                                 <Trash2 className="w-4 h-4 mr-2" />
+                                 Radera alla transaktioner
+                             </Button>
+                         </div>
                     </div>
                 </div>
               </div>
