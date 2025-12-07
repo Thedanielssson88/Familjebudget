@@ -1,4 +1,3 @@
-
 import React, { useState, useEffect } from 'react';
 import { AppProvider, useApp } from './store';
 import { IncomeView } from './views/IncomeView';
@@ -15,7 +14,7 @@ import { format, subMonths, addMonths } from 'date-fns';
 import { sv } from 'date-fns/locale';
 import { initGoogleDrive, loginToGoogle, listBackups, createBackupFile, loadBackupFile, deleteBackupFile, DriveFile } from './services/googleDrive';
 
-type View = 'income' | 'transfers' | 'budget' | 'dashboard' | 'dreams' | 'transactions';
+type View = 'income' | 'budget' | 'dashboard' | 'dreams' | 'transactions';
 
 const MainApp = () => {
   const [currentView, setCurrentView] = useState<View>('dashboard');
@@ -131,8 +130,7 @@ const MainApp = () => {
   const renderView = () => {
     switch (currentView) {
       case 'income': return <IncomeView />;
-      case 'transfers': return <BudgetView />; // Formerly BudgetView, now Transfers
-      case 'budget': return <OperatingBudgetView />; // New Operating Budget
+      case 'budget': return <BudgetView />; 
       case 'dashboard': return <DashboardView />;
       case 'dreams': return <DreamsView />;
       case 'transactions': return <TransactionsView />;
@@ -262,9 +260,9 @@ const MainApp = () => {
       <nav className="fixed bottom-0 left-0 right-0 bg-surface/90 backdrop-blur-lg border-t border-slate-800 pb-safe pt-2 px-4 pb-6 z-50">
         <div className="flex justify-between items-center max-w-lg mx-auto">
             <NavButton active={currentView === 'income'} onClick={() => setCurrentView('income')} icon={<Wallet />} label="Inkomst" />
-            <NavButton active={currentView === 'transfers'} onClick={() => setCurrentView('transfers')} icon={<ArrowLeftRight />} label="Överföringar" />
             <NavButton active={currentView === 'budget'} onClick={() => setCurrentView('budget')} icon={<PieChart />} label="Budget" />
             <NavButton active={currentView === 'dashboard'} onClick={() => setCurrentView('dashboard')} icon={<LayoutGrid />} label="Översikt" />
+            <NavButton active={currentView === 'dreams'} onClick={() => setCurrentView('dreams')} icon={<Sparkles />} label="Drömmar" />
             <NavButton active={currentView === 'transactions'} onClick={() => setCurrentView('transactions')} icon={<Receipt />} label="Import" />
         </div>
       </nav>

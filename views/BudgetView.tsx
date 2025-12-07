@@ -1,10 +1,10 @@
-
 import React, { useState, useEffect, useMemo } from 'react';
 import { useApp } from '../store';
+import { OperatingBudgetView } from './OperatingBudgetView';
 import { Bucket, BucketData } from '../types';
 import { calculateDailyBucketCost, calculateFixedBucketCost, calculateGoalBucketCost, formatMoney, generateId, getBudgetInterval, isBucketActiveInMonth, getEffectiveBucketData } from '../utils';
 import { Card, Button, Input, Modal, cn } from '../components/components';
-import { Plus, Trash2, Calendar, Target, Repeat, Wallet, PiggyBank, CreditCard, Image as ImageIcon, X, Check, ChevronDown, ChevronUp, Settings, Copy, ArrowRightLeft } from 'lucide-react';
+import { Plus, Trash2, Calendar, Target, Repeat, Wallet, PiggyBank, ArrowRightLeft, Image as ImageIcon, X, Check, ChevronDown, ChevronUp, Settings, Copy, PieChart, LayoutGrid } from 'lucide-react';
 import { format, addMonths, parseISO, differenceInMonths } from 'date-fns';
 import { sv } from 'date-fns/locale';
 import { useBudgetActuals } from '../hooks/useBudgetActuals';
@@ -22,6 +22,55 @@ const DREAM_IMAGES = [
 ];
 
 export const BudgetView: React.FC = () => {
+  const [activeTab, setActiveTab] = useState<'transfers' | 'operating'>('transfers');
+
+  return (
+    <div className="space-y-6 pb-24 animate-in slide-in-from-right duration-300">
+      
+      {/* HEADER & TABS */}
+      <div className="flex flex-col gap-4">
+          <header>
+            <h1 className="text-3xl font-bold text-white mb-1">Budget & Ekonomi</h1>
+            <p className="text-slate-400 text-sm">Hantera dina överföringar och följ upp dina kostnader.</p>
+          </header>
+
+          <div className="bg-slate-800 p-1 rounded-xl flex gap-1 shadow-lg border border-slate-700">
+              <button 
+                onClick={() => setActiveTab('transfers')}
+                className={cn(
+                    "flex-1 py-3 px-4 rounded-lg text-sm font-bold flex items-center justify-center gap-2 transition-all",
+                    activeTab === 'transfers' ? "bg-blue-600 text-white shadow-md" : "text-slate-400 hover:text-white hover:bg-slate-700"
+                )}
+              >
+                  <ArrowRightLeft size={16} />
+                  Kassaflöde (Lön)
+              </button>
+              <button 
+                onClick={() => setActiveTab('operating')}
+                className={cn(
+                    "flex-1 py-3 px-4 rounded-lg text-sm font-bold flex items-center justify-center gap-2 transition-all",
+                    activeTab === 'operating' ? "bg-emerald-600 text-white shadow-md" : "text-slate-400 hover:text-white hover:bg-slate-700"
+                )}
+              >
+                  <PieChart size={16} />
+                  Drift (Uppföljning)
+              </button>
+          </div>
+      </div>
+
+      {/* VIEW CONTENT */}
+      <div className="min-h-[400px]">
+          {activeTab === 'transfers' ? (
+              <TransfersViewContent />
+          ) : (
+              <OperatingBudgetView />
+          )}
+      </div>
+    </div>
+  );
+};
+
+const TransfersViewContent: React.FC = () => {
   const { accounts, buckets, addBucket, updateBucket, deleteBucket, confirmBucketAmount, selectedMonth, settings, addAccount, copyFromNextMonth } = useApp();
   
   // REAL-TIME ACTUALS HOOK
@@ -125,13 +174,9 @@ export const BudgetView: React.FC = () => {
   const handleSave = () => {
     if (!editingBucket) return;
 
-    // Check if we are updating an existing bucket in a way that requires a "Split" in history.
-    // Structural changes (Type, Savings Status, Payment Source, Account) should NOT apply retroactively.
-    // Instead, we effectively "End" the old bucket at the previous month, and create a "New" bucket from this month.
     const originalBucket = buckets.find(b => b.id === editingBucket.id);
     const isExistingBucket = !!originalBucket;
     
-    // Define what constitutes a "Structural Change" that breaks history
     const isStructuralChange = isExistingBucket && (
         originalBucket.type !== editingBucket.type ||
         originalBucket.isSavings !== editingBucket.isSavings ||
@@ -140,20 +185,12 @@ export const BudgetView: React.FC = () => {
     );
 
     if (isStructuralChange) {
-        // --- HISTORY SPLIT LOGIC ---
-        
-        // 1. Soft delete the OLD bucket from this month forward
-        // This ensures historical data (Jan) stays as "Fixed", but it stops existing in Feb.
         deleteBucket(originalBucket.id, selectedMonth, 'THIS_AND_FUTURE');
-
-        // 2. Create a NEW bucket with the new settings
-        // This bucket starts fresh from this month.
         const newBucketId = generateId();
         const newBucket: Bucket = {
             ...editingBucket,
             id: newBucketId,
             monthlyData: {
-                // Initialize with the data for the current month
                 [selectedMonth]: editingMonthData
             }
         };
@@ -163,10 +200,7 @@ export const BudgetView: React.FC = () => {
         return;
     }
 
-    // --- STANDARD UPDATE LOGIC (No History Split) ---
-
     let finalBucket = editingBucket;
-    
     const updatedMonthlyData = {
         ...finalBucket.monthlyData,
         [selectedMonth]: editingMonthData
@@ -183,7 +217,6 @@ export const BudgetView: React.FC = () => {
       addBucket(bucketToSave);
     }
 
-    // SPECIAL LOGIC FOR GOALS
     if (bucketToSave.type === 'GOAL' && bucketToSave.targetDate && bucketToSave.targetAmount > 0) {
         handleGoalSpendingBucket(bucketToSave);
     }
@@ -250,7 +283,6 @@ export const BudgetView: React.FC = () => {
             icon: "text-amber-400"
         };
     }
-    // Default: Expense
     return {
         container: "border-l-rose-500 bg-rose-500/5 hover:bg-rose-500/10",
         text: "text-rose-300",
@@ -287,18 +319,19 @@ export const BudgetView: React.FC = () => {
   const isOverride = editingMonthData.amount !== recommendedAmount;
 
   return (
-    <div className="space-y-8 pb-24 animate-in slide-in-from-right duration-300">
-      <header>
-        <div className="flex items-center gap-3 mb-2">
-            <div className="bg-gradient-to-br from-rose-500 to-orange-500 p-2 rounded-xl text-white">
-                <ArrowRightLeft className="w-6 h-6" />
-            </div>
-            <h1 className="text-3xl font-bold text-transparent bg-clip-text bg-gradient-to-r from-rose-400 to-orange-400">Överföringar</h1>
-        </div>
-        <p className="text-slate-400">Dina fasta överföringar vid lön (Vattenfall).</p>
+    <div className="space-y-8 animate-in fade-in">
         
-        {/* COPY BUDGET BUTTON (If current is empty but next has data) */}
-        {isCurrentMonthEmpty && nextMonthHasData && (
+      <div className="bg-blue-900/20 border border-blue-500/30 p-4 rounded-xl text-sm text-blue-200 mb-6 flex gap-3 items-start">
+         <div className="p-2 bg-blue-500/20 rounded-lg">
+             <LayoutGrid size={18} />
+         </div>
+         <div>
+             <h3 className="font-bold flex items-center gap-2 mb-1">Kassaflödesplanering</h3>
+             <p className="opacity-80">Här planerar du hur lönen ska fördelas till dina olika konton (Överföringar).</p>
+         </div>
+      </div>
+
+      {isCurrentMonthEmpty && nextMonthHasData && (
              <div className="mt-4 p-4 bg-indigo-900/30 border border-indigo-500/30 rounded-xl flex items-center justify-between animate-in slide-in-from-top-2">
                  <div className="text-sm">
                      <div className="text-indigo-300 font-bold mb-1">Tom månad?</div>
@@ -312,14 +345,12 @@ export const BudgetView: React.FC = () => {
                      Hämta från {nextMonthLabel}
                  </Button>
              </div>
-        )}
-      </header>
+      )}
 
       {accounts.map(account => {
         const accountBuckets = buckets.filter(b => b.accountId === account.id && isBucketActiveInMonth(b, selectedMonth));
         const accountTotal = accountBuckets.reduce((sum, b) => sum + calculateCost(b), 0);
         
-        // Calculate Actuals per Account (Aggregated)
         const accountSpent = actuals?.spentByAccount[account.id] || 0;
         const accountRemaining = Math.max(0, accountTotal - accountSpent);
 
@@ -336,7 +367,6 @@ export const BudgetView: React.FC = () => {
                     </div>
                 </div>
 
-                {/* Account Level Progress Bar - Renamed Label to imply "Moved" */}
                 <BudgetProgressBar 
                     spent={accountSpent} 
                     total={accountTotal} 
@@ -352,9 +382,7 @@ export const BudgetView: React.FC = () => {
                 const showConfirmButton = isInherited && bucket.type !== 'GOAL';
                 const styles = getBucketStyles(bucket);
                 
-                // Actuals per Bucket
                 const spent = actuals?.spentByBucket[bucket.id] || 0;
-                // Determine if we should show the drill-down button/visuals
                 const hasTransactions = spent > 0;
 
                 return (
@@ -379,9 +407,7 @@ export const BudgetView: React.FC = () => {
                       </div>
                     </div>
                     
-                    {/* Right Side: Budget vs Actuals */}
                     <div className="flex items-center gap-4">
-                        {/* Actuals Bar (Clickable) */}
                         <div 
                             className="w-24 flex flex-col items-end justify-center group/bar"
                             onClick={(e) => {
@@ -432,7 +458,6 @@ export const BudgetView: React.FC = () => {
         <Wallet className="w-5 h-5 mr-2" /> Skapa nytt konto
       </Button>
 
-      {/* MODAL FOR NEW ACCOUNT */}
       <Modal isOpen={isAccountModalOpen} onClose={() => setIsAccountModalOpen(false)} title="Skapa Nytt Konto">
         <div className="space-y-6">
            <Input label="Kontonamn" placeholder="t.ex. Sommarstugan" value={newAccountName} onChange={e => setNewAccountName(e.target.value)} autoFocus />
@@ -456,17 +481,12 @@ export const BudgetView: React.FC = () => {
         </div>
       </Modal>
 
-      {/* MODAL FOR EDITING BUCKET */}
       <Modal isOpen={isModalOpen} onClose={() => setIsModalOpen(false)} title={editingBucket?.id && buckets.find(b => b.id === editingBucket.id) ? (editingBucket?.type === 'GOAL' ? editingBucket.name : 'Redigera Post') : 'Ny Post'}>
         {editingBucket && (
           <div className="space-y-6">
             
-            {/* =======================================================
-                REGULAR EXPENSES (FIXED / DAILY) - SIMPLIFIED LAYOUT
-               ======================================================= */}
             {editingBucket.type !== 'GOAL' && (
                 <>
-                    {/* PRIMARY: AMOUNT INPUT */}
                     <div className="bg-slate-800/50 p-4 rounded-2xl border border-slate-700 shadow-inner">
                         <label className="text-xs font-bold text-slate-400 uppercase tracking-wider block mb-2 text-center">
                             {editingBucket.type === 'DAILY' ? 'Daglig Kostnad' : 'Belopp denna månad'}
@@ -485,11 +505,10 @@ export const BudgetView: React.FC = () => {
                                 }}
                                 className="bg-transparent text-5xl font-mono font-bold text-center text-white w-full focus:outline-none placeholder-slate-700"
                                 placeholder="0"
-                                autoFocus={!editingBucket.name} // Focus here if name is present
+                                autoFocus={!editingBucket.name}
                             />
                         </div>
 
-                         {/* DAILY ACTIVE DAYS SELECTOR (Keep visible for Daily as it is common to change) */}
                         {editingBucket.type === 'DAILY' && (
                             <div className="mt-4 border-t border-slate-700/50 pt-3">
                                 <label className="text-[10px] font-bold text-slate-500 uppercase tracking-wider block mb-2 text-center">
@@ -515,7 +534,6 @@ export const BudgetView: React.FC = () => {
                             </div>
                         )}
                         
-                        {/* Summary of Monthly Total for Daily */}
                         {editingBucket.type === 'DAILY' && (
                              <div className="text-center mt-3 text-sm text-slate-400">
                                  Totalt ca: <span className="text-white font-mono">{formatMoney(calculateDailyBucketCost({...editingBucket, monthlyData: {[selectedMonth]: editingMonthData}}, selectedMonth, settings.payday))}</span> / mån
@@ -523,7 +541,6 @@ export const BudgetView: React.FC = () => {
                         )}
                     </div>
 
-                    {/* SECONDARY: COLLAPSIBLE DETAILS */}
                     <div className="border-t border-slate-700 pt-2">
                         <button 
                             onClick={() => setShowRegularDetails(!showRegularDetails)}
@@ -537,7 +554,6 @@ export const BudgetView: React.FC = () => {
                             <div className="space-y-4 pt-4 animate-in slide-in-from-top-2">
                                 <Input label="Namn" value={editingBucket.name} onChange={e => setEditingBucket({...editingBucket, name: e.target.value})} />
                                 
-                                {/* ACCOUNT SELECTOR */}
                                 <div>
                                     <label className="text-xs font-medium text-slate-400 uppercase tracking-wider block mb-1">Konto</label>
                                     <select 
@@ -553,7 +569,6 @@ export const BudgetView: React.FC = () => {
                                     </select>
                                 </div>
                                 
-                                {/* TYPE SELECTOR */}
                                 <div className="grid grid-cols-2 gap-2">
                                     <div className="col-span-2 text-xs font-medium text-slate-400 uppercase">Typ av post</div>
                                     <button 
@@ -579,7 +594,6 @@ export const BudgetView: React.FC = () => {
                                     </button>
                                 </div>
 
-                                {/* PAYMENT SOURCE */}
                                 <div className="space-y-3">
                                     <div className="text-xs font-medium text-slate-400 uppercase">Finansiering</div>
                                     <div className="flex flex-col gap-2">
@@ -606,7 +620,6 @@ export const BudgetView: React.FC = () => {
                                     </div>
                                 </div>
 
-                                {/* SAVINGS TOGGLE */}
                                 <div className="flex items-center gap-3 bg-slate-800/50 p-3 rounded-xl">
                                     <span className="text-sm text-slate-300 flex-1">Är detta ett sparande?</span>
                                     <div className="flex bg-slate-900 rounded-lg p-1">
@@ -620,12 +633,8 @@ export const BudgetView: React.FC = () => {
                 </>
             )}
 
-            {/* =======================================================
-                GOAL INPUTS (New Interface)
-               ======================================================= */}
             {editingBucket.type === 'GOAL' && (
               <div className="space-y-6">
-                 {/* PRIMARY: CURRENT MONTH ADJUSTMENT */}
                  <div className="bg-slate-800/50 p-4 rounded-2xl border border-indigo-500/20 shadow-inner">
                      <label className="text-xs font-bold text-indigo-300 uppercase tracking-wider block mb-2 text-center">
                          Insättning {format(new Date(selectedMonth), 'MMMM', {locale: sv})}
@@ -640,7 +649,6 @@ export const BudgetView: React.FC = () => {
                          />
                      </div>
                      
-                     {/* Suggestion / Reset Button */}
                      <div className="flex justify-center mt-3">
                          {isOverride ? (
                              <button 
@@ -659,7 +667,6 @@ export const BudgetView: React.FC = () => {
                      </div>
                  </div>
 
-                 {/* SECONDARY: DETAILS & PLANNING */}
                  <div className="border-t border-slate-700 pt-2">
                      <button 
                         onClick={() => setShowGoalDetails(!showGoalDetails)}
@@ -673,7 +680,6 @@ export const BudgetView: React.FC = () => {
                          <div className="space-y-4 pt-4 animate-in slide-in-from-top-2">
                              <Input label="Namn" value={editingBucket.name} onChange={e => setEditingBucket({...editingBucket, name: e.target.value})} />
                              
-                             {/* ACCOUNT SELECTOR (GOALS) */}
                              <div>
                                 <label className="text-xs font-medium text-slate-400 uppercase tracking-wider block mb-1">Konto</label>
                                 <select 
@@ -748,7 +754,6 @@ export const BudgetView: React.FC = () => {
         )}
       </Modal>
 
-      {/* TRANSACTION DRILL DOWN MODAL */}
       {drillDownBucketId && (
          <TransactionDrillDown 
             bucketId={drillDownBucketId} 
