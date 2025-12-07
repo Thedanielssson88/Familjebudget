@@ -346,7 +346,7 @@ const TransfersViewContent: React.FC = () => {
          </div>
          <div>
              <h3 className="font-bold flex items-center gap-2 mb-1">Kassaflödesplanering</h3>
-             <p className="opacity-80">Här planerar du hur lönen ska fördelas till dina olika konton (Överföringar).</p>
+             <p className="opacity-80">Här planerar du hur lönen ska fördelas till dina olika konton (Överföringar). Konsumtion syns ej här.</p>
          </div>
       </div>
 
@@ -370,8 +370,10 @@ const TransfersViewContent: React.FC = () => {
         const accountBuckets = buckets.filter(b => b.accountId === account.id && isBucketActiveInMonth(b, selectedMonth));
         const accountTotal = accountBuckets.reduce((sum, b) => sum + calculateCost(b), 0);
         
-        const accountSpent = actuals?.spentByAccount[account.id] || 0;
-        const accountRemaining = Math.max(0, accountTotal - accountSpent);
+        // Sum transfers for the entire account visualization (strictly funding/inflow)
+        const accountTransferred = accountBuckets.reduce((sum, b) => {
+            return sum + (actuals?.transfersByBucket[b.id] || 0);
+        }, 0);
 
         return (
           <div key={account.id} className="space-y-4 mb-8">
@@ -396,9 +398,9 @@ const TransfersViewContent: React.FC = () => {
                 </div>
 
                 <BudgetProgressBar 
-                    spent={accountSpent} 
+                    spent={accountTransferred} 
                     total={accountTotal} 
-                    label={`Flyttat till konto / Sparat`}
+                    label={`Totalt Överfört till kontot`}
                     className="mt-1"
                 />
             </div>
@@ -410,7 +412,9 @@ const TransfersViewContent: React.FC = () => {
                 const showConfirmButton = isInherited && bucket.type !== 'GOAL';
                 const styles = getBucketStyles(bucket);
                 
-                const spent = actuals?.spentByBucket[bucket.id] || 0;
+                // Show ONLY transfers here (as per user request "Kassaflöde ska enbart överföringar synas")
+                // actuals.transfersByBucket is now strictly absolute value (Funding)
+                const transferred = actuals?.transfersByBucket[bucket.id] || 0;
                 
                 // --- NEW: Calculate Accumulated Balance for Goal ---
                 const accumulated = bucket.type === 'GOAL' ? calculateSavedAmount(bucket, selectedMonth) : 0;
@@ -452,14 +456,14 @@ const TransfersViewContent: React.FC = () => {
                             }}
                         >
                             <div className="text-right mb-1">
-                                <span className={cn("font-mono font-bold text-sm", spent > cost ? "text-rose-400" : "text-white")}>
-                                    {formatMoney(spent)}
+                                <span className={cn("font-mono font-bold text-sm", transferred >= cost ? "text-emerald-400" : "text-white")}>
+                                    {transferred > 0 && '+'}{formatMoney(transferred)}
                                 </span>
                                 <span className="text-[10px] text-slate-500 mx-1">/</span>
                                 <span className="text-[10px] text-slate-400">{formatMoney(cost)}</span>
                             </div>
                             <BudgetProgressBar 
-                                spent={spent} 
+                                spent={transferred} 
                                 total={cost} 
                                 compact
                             />
@@ -797,6 +801,7 @@ const TransfersViewContent: React.FC = () => {
             month={selectedMonth}
             payday={settings.payday}
             onClose={() => setDrillDownBucketId(null)}
+            filterType="TRANSFER"
          />
       )}
     </div>

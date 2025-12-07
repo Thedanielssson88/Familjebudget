@@ -1,10 +1,10 @@
-import React, { useState, useRef, useMemo } from 'react';
+import React, { useState, useRef, useMemo, useEffect } from 'react';
 import { useApp } from '../store';
 import { Transaction, ImportRule, Bucket, MainCategory, SubCategory, AppSettings } from '../types';
 import { parseBankFile, runImportPipeline } from '../services/importService';
 import { categorizeTransactionsWithAi } from '../services/aiService';
 import { cn, Button, Card, Modal, Input } from '../components/components';
-import { Upload, Check, Wand2, Save, Trash2, Loader2, AlertTriangle, Zap, Clock, ArrowRightLeft, ShoppingCart, ArrowDownLeft, Sparkles, CheckCircle, Target } from 'lucide-react';
+import { Upload, Check, Wand2, Save, Trash2, Loader2, AlertTriangle, Zap, Clock, ArrowRightLeft, ShoppingCart, ArrowDownLeft, Sparkles, CheckCircle, Target, LayoutList, GalleryHorizontalEnd, ChevronLeft, ChevronRight, Search, Filter } from 'lucide-react';
 import { formatMoney, generateId } from '../utils';
 
 // --- SUB-COMPONENT: STAGING ROW ---
@@ -219,6 +219,252 @@ const TransactionRow: React.FC<{
     );
 };
 
+// --- SUB-COMPONENT: FOCUS CARD (One by One) ---
+
+const TransactionFocusCard: React.FC<{ 
+    tx: Transaction; 
+    buckets: Bucket[]; 
+    mainCategories: MainCategory[];
+    subCategories: SubCategory[];
+    settings: AppSettings;
+    index: number;
+    total: number;
+    onChange: (id: string, field: 'type'|'bucketId'|'categoryMainId'|'categorySubId'|'isManuallyApproved', value: string | boolean) => void;
+    onNext: () => void;
+    onPrev: () => void;
+    onCreateRule: (tx: Transaction) => void;
+    onAiGuess: (tx: Transaction) => void;
+    isAiLoading: boolean;
+}> = ({ tx, buckets, mainCategories, subCategories, settings, index, total, onChange, onNext, onPrev, onCreateRule, onAiGuess, isAiLoading }) => {
+    
+    // Swipe Handlers
+    const touchStart = useRef<number | null>(null);
+    const touchEnd = useRef<number | null>(null);
+
+    const onTouchStart = (e: React.TouchEvent) => {
+        touchEnd.current = null;
+        touchStart.current = e.targetTouches[0].clientX;
+    };
+
+    const onTouchMove = (e: React.TouchEvent) => {
+        touchEnd.current = e.targetTouches[0].clientX;
+    };
+
+    const onTouchEnd = () => {
+        if (!touchStart.current || !touchEnd.current) return;
+        const distance = touchStart.current - touchEnd.current;
+        const isLeftSwipe = distance > 50;
+        const isRightSwipe = distance < -50;
+
+        if (isLeftSwipe && index < total - 1) onNext();
+        if (isRightSwipe && index > 0) onPrev();
+    };
+
+    // Keyboard Handlers
+    useEffect(() => {
+        const handleKeyDown = (e: KeyboardEvent) => {
+            if (e.key === 'ArrowRight') onNext();
+            if (e.key === 'ArrowLeft') onPrev();
+        };
+        window.addEventListener('keydown', handleKeyDown);
+        return () => window.removeEventListener('keydown', handleKeyDown);
+    }, [onNext, onPrev]);
+
+    const isTransfer = tx.type === 'TRANSFER';
+    const isExpense = tx.type === 'EXPENSE';
+    const isIncome = tx.type === 'INCOME';
+
+    const validSubCats = useMemo(() => {
+        if (!tx.categoryMainId) return [];
+        return subCategories.filter(sc => sc.mainCategoryId === tx.categoryMainId);
+    }, [tx.categoryMainId, subCategories]);
+
+    const hasRequiredData = 
+        (isTransfer && !!tx.bucketId) || 
+        (isExpense && !!tx.categoryMainId && !!tx.categorySubId) || 
+        (isIncome && !!tx.categoryMainId);
+
+    const isSystemMatch = tx.matchType === 'rule' || tx.matchType === 'history';
+    const settingAllowsAuto = 
+        (isTransfer && settings.autoApproveTransfer) ||
+        (isExpense && settings.autoApproveExpense) ||
+        (isIncome && settings.autoApproveIncome);
+    const autoApproved = isSystemMatch && settingAllowsAuto;
+    const isReady = hasRequiredData && (tx.isManuallyApproved || autoApproved);
+
+    // Dynamic background based on Type
+    const bgGradient = isExpense ? "from-slate-800 to-rose-950/20" : (isTransfer ? "from-slate-800 to-blue-950/20" : "from-slate-800 to-emerald-950/20");
+    
+    return (
+        <div 
+            className="flex flex-col gap-4 animate-in fade-in zoom-in duration-300"
+            onTouchStart={onTouchStart}
+            onTouchMove={onTouchMove}
+            onTouchEnd={onTouchEnd}
+        >
+            <div className="flex justify-between items-center text-sm text-slate-400 px-2">
+                <button onClick={onPrev} disabled={index === 0} className="p-2 hover:text-white disabled:opacity-20"><ChevronLeft size={24}/></button>
+                <span className="font-mono">{index + 1} / {total}</span>
+                <button onClick={onNext} disabled={index === total - 1} className="p-2 hover:text-white disabled:opacity-20"><ChevronRight size={24}/></button>
+            </div>
+
+            <div className={cn("bg-gradient-to-br rounded-3xl p-6 border border-slate-700 shadow-2xl flex flex-col gap-6 relative overflow-hidden min-h-[400px]", bgGradient)}>
+                {/* Status Badge */}
+                <div className="absolute top-4 right-4">
+                     {isReady ? (
+                        <div className="flex items-center gap-1 bg-emerald-500/20 text-emerald-300 px-3 py-1 rounded-full text-xs font-bold border border-emerald-500/50 shadow-emerald-500/10 shadow-lg">
+                            <Check size={12} strokeWidth={3} /> KLAR
+                        </div>
+                     ) : (
+                         <div className="flex items-center gap-1 bg-yellow-500/20 text-yellow-300 px-3 py-1 rounded-full text-xs font-bold border border-yellow-500/50">
+                             <div className="w-2 h-2 bg-yellow-400 rounded-full animate-pulse" /> GRANSKA
+                         </div>
+                     )}
+                </div>
+
+                {/* Amount & Desc */}
+                <div className="text-center mt-4">
+                    <div className="text-sm text-slate-400 font-mono mb-1">{tx.date}</div>
+                    <div className={cn("text-4xl font-bold font-mono tracking-tighter mb-2", tx.amount < 0 ? "text-white" : "text-emerald-400")}>
+                        {formatMoney(tx.amount)}
+                    </div>
+                    <div className="text-lg font-medium text-slate-200 leading-snug px-4">
+                        {tx.description}
+                    </div>
+                </div>
+
+                {/* Type Selectors (Large) */}
+                <div className="grid grid-cols-3 gap-2 bg-slate-900/50 p-1 rounded-xl border border-slate-800">
+                    <button 
+                        onClick={() => onChange(tx.id, 'type', 'EXPENSE')}
+                        className={cn("flex flex-col items-center py-3 rounded-lg text-xs font-bold transition-all", isExpense ? "bg-rose-600 text-white shadow-lg" : "text-slate-500 hover:text-white hover:bg-slate-800")}
+                    >
+                        <ShoppingCart size={20} className="mb-1" /> Utgift
+                    </button>
+                    <button 
+                        onClick={() => onChange(tx.id, 'type', 'TRANSFER')}
+                        className={cn("flex flex-col items-center py-3 rounded-lg text-xs font-bold transition-all", isTransfer ? "bg-blue-600 text-white shadow-lg" : "text-slate-500 hover:text-white hover:bg-slate-800")}
+                    >
+                        <ArrowRightLeft size={20} className="mb-1" /> Överföring
+                    </button>
+                    <button 
+                        onClick={() => onChange(tx.id, 'type', 'INCOME')}
+                        className={cn("flex flex-col items-center py-3 rounded-lg text-xs font-bold transition-all", isIncome ? "bg-emerald-600 text-white shadow-lg" : "text-slate-500 hover:text-white hover:bg-slate-800")}
+                    >
+                        <ArrowDownLeft size={20} className="mb-1" /> Inkomst
+                    </button>
+                </div>
+
+                {/* Inputs (Large) */}
+                <div className="space-y-3 flex-1">
+                    {isTransfer && (
+                        <div className="space-y-1">
+                            <label className="text-xs uppercase font-bold text-slate-500 ml-1">Välj Budgetpost</label>
+                            <select 
+                                className={cn("w-full bg-slate-900 border-2 rounded-xl px-4 py-4 text-base outline-none transition-colors appearance-none", 
+                                !tx.bucketId ? "border-rose-500 text-rose-200" : "border-slate-700 text-blue-200 focus:border-blue-500")}
+                                value={tx.bucketId || ""}
+                                onChange={(e) => onChange(tx.id, 'bucketId', e.target.value)}
+                            >
+                                <option value="">Välj Budget...</option>
+                                {buckets.filter(b => b.accountId === tx.accountId).map(b => (
+                                    <option key={b.id} value={b.id}>{b.name}</option>
+                                ))}
+                            </select>
+                        </div>
+                    )}
+
+                    {isExpense && (
+                        <>
+                            <div className="space-y-1">
+                                <label className="text-xs uppercase font-bold text-slate-500 ml-1">Kategori</label>
+                                <select 
+                                    className="w-full bg-slate-900 border border-slate-700 rounded-xl px-4 py-3 text-base text-white focus:border-blue-500 outline-none"
+                                    value={tx.categoryMainId || ""}
+                                    onChange={(e) => onChange(tx.id, 'categoryMainId', e.target.value)}
+                                >
+                                    <option value="">Välj Kategori...</option>
+                                    {mainCategories.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+                                </select>
+                            </div>
+                            <div className="space-y-1">
+                                <label className="text-xs uppercase font-bold text-slate-500 ml-1">Underkategori</label>
+                                <select 
+                                    className="w-full bg-slate-900 border border-slate-700 rounded-xl px-4 py-3 text-base text-white focus:border-blue-500 outline-none disabled:opacity-50"
+                                    value={tx.categorySubId || ""}
+                                    onChange={(e) => onChange(tx.id, 'categorySubId', e.target.value)}
+                                    disabled={!tx.categoryMainId}
+                                >
+                                    <option value="">Specificera...</option>
+                                    {validSubCats.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+                                </select>
+                            </div>
+                        </>
+                    )}
+
+                    {isIncome && (
+                         <div className="space-y-1">
+                            <label className="text-xs uppercase font-bold text-slate-500 ml-1">Typ av inkomst</label>
+                            <select 
+                                className="w-full bg-slate-900 border border-slate-700 rounded-xl px-4 py-3 text-base text-white focus:border-emerald-500 outline-none"
+                                value={tx.categoryMainId || ""}
+                                onChange={(e) => onChange(tx.id, 'categoryMainId', e.target.value)}
+                            >
+                                <option value="">Välj typ...</option>
+                                {mainCategories.filter(c => c.name.includes('Inkomst')).map(c => (
+                                    <option key={c.id} value={c.id}>{c.name}</option>
+                                ))}
+                            </select>
+                        </div>
+                    )}
+                </div>
+
+                {/* Bottom Action Bar */}
+                <div className="flex gap-2 mt-auto">
+                    {/* Tools */}
+                    <button 
+                         onClick={() => onAiGuess(tx)}
+                         disabled={isAiLoading}
+                         className="aspect-square h-14 rounded-xl bg-purple-500/10 border border-purple-500/30 text-purple-400 flex flex-col items-center justify-center gap-1 hover:bg-purple-500/20"
+                    >
+                         {isAiLoading ? <Loader2 className="w-5 h-5 animate-spin" /> : <Sparkles className="w-5 h-5" />}
+                         <span className="text-[10px] font-bold">AI</span>
+                    </button>
+
+                    <button 
+                         onClick={() => onCreateRule(tx)}
+                         className="aspect-square h-14 rounded-xl bg-slate-700/50 border border-slate-600 text-slate-400 flex flex-col items-center justify-center gap-1 hover:bg-slate-700 hover:text-white"
+                    >
+                         <Save className="w-5 h-5" />
+                         <span className="text-[10px] font-bold">Regel</span>
+                    </button>
+                    
+                    {/* APPROVE / NEXT */}
+                    {isReady ? (
+                        <button 
+                            onClick={onNext}
+                            className="flex-1 h-14 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl font-bold text-lg shadow-lg shadow-emerald-900/20 flex items-center justify-center gap-2"
+                        >
+                            Nästa <ChevronRight />
+                        </button>
+                    ) : (
+                        <button 
+                            onClick={() => onChange(tx.id, 'isManuallyApproved', true)}
+                            disabled={!hasRequiredData}
+                            className="flex-1 h-14 bg-yellow-500 hover:bg-yellow-400 disabled:bg-slate-700 disabled:text-slate-500 text-slate-900 rounded-xl font-bold text-lg shadow-lg flex items-center justify-center gap-2"
+                        >
+                            <CheckCircle /> Godkänn
+                        </button>
+                    )}
+                </div>
+            </div>
+            <div className="text-center text-xs text-slate-500 animate-pulse">
+                Svep för att bläddra • Piltangenter fungerar också
+            </div>
+        </div>
+    );
+};
+
 export const TransactionsView: React.FC = () => {
     const { 
         accounts, buckets, transactions, importRules, mainCategories, subCategories, settings,
@@ -226,11 +472,18 @@ export const TransactionsView: React.FC = () => {
     } = useApp();
     
     const [viewMode, setViewMode] = useState<'import' | 'history'>('import');
+    const [importViewStyle, setImportViewStyle] = useState<'list' | 'card'>('list'); // New state for toggling views
     const [stagingTransactions, setStagingTransactions] = useState<Transaction[]>([]);
+    const [currentIndex, setCurrentIndex] = useState(0); // For card view navigation
+
     const [isProcessing, setIsProcessing] = useState(false);
     const [isAiAnalysisRunning, setIsAiAnalysisRunning] = useState(false);
     const [loadingAiId, setLoadingAiId] = useState<string | null>(null);
     const [selectedAccountId, setSelectedAccountId] = useState(accounts[0]?.id || '');
+
+    // Search / Filter State
+    const [searchTerm, setSearchTerm] = useState('');
+    const [historyAccountFilter, setHistoryAccountFilter] = useState('');
     
     // Error Logging State
     const [errorLog, setErrorLog] = useState<string | null>(null);
@@ -241,6 +494,32 @@ export const TransactionsView: React.FC = () => {
     
     // File Input
     const fileInputRef = useRef<HTMLInputElement>(null);
+
+    // Reset filters when switching views
+    useEffect(() => {
+        setSearchTerm('');
+        setHistoryAccountFilter('');
+    }, [viewMode]);
+
+    // DERIVED: Filtered Staging Transactions
+    const filteredStaging = useMemo(() => {
+        if (!searchTerm) return stagingTransactions;
+        return stagingTransactions.filter(t => 
+            t.description.toLowerCase().includes(searchTerm.toLowerCase())
+        );
+    }, [stagingTransactions, searchTerm]);
+
+    // DERIVED: Filtered History Transactions
+    const filteredHistory = useMemo(() => {
+        return transactions
+            .filter(t => {
+                const matchesSearch = !searchTerm || t.description.toLowerCase().includes(searchTerm.toLowerCase());
+                const matchesAccount = !historyAccountFilter || t.accountId === historyAccountFilter;
+                return matchesSearch && matchesAccount;
+            })
+            .sort((a,b) => b.date.localeCompare(a.date))
+            .slice(0, 50); // Limit to 50 results after filter
+    }, [transactions, searchTerm, historyAccountFilter]);
 
     const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
         const file = e.target.files?.[0];
@@ -261,6 +540,7 @@ export const TransactionsView: React.FC = () => {
             const processed = await runImportPipeline(raw, transactions, importRules, buckets);
             
             setStagingTransactions(processed);
+            setCurrentIndex(0); // Reset index on new import
         } catch (err: any) {
             console.error("Import Error:", err);
             // Capture detailed error info
@@ -378,6 +658,8 @@ export const TransactionsView: React.FC = () => {
 
     const handleCommit = async () => {
         // Only commit items that are READY (Green)
+        // We commit from ALL staging transactions, not just filtered ones, to avoid confusion.
+        // OR should we only commit filtered? Usually commit means "Save my work", so saving all valid ones is safer.
         
         const toCommit = stagingTransactions.filter(tx => {
             const isTransfer = tx.type === 'TRANSFER';
@@ -418,6 +700,8 @@ export const TransactionsView: React.FC = () => {
         const committedIds = new Set(verified.map(v => v.id));
         const remaining = stagingTransactions.filter(t => !committedIds.has(t.id));
         setStagingTransactions(remaining);
+        setCurrentIndex(0); // Reset focus index
+        setSearchTerm(''); // Clear filter
         
         // If everything is done, switch view. Otherwise stay to let user fix the rest.
         if (remaining.length === 0) {
@@ -567,50 +851,120 @@ export const TransactionsView: React.FC = () => {
                         </Card>
                     ) : (
                         <div className="animate-in slide-in-from-bottom-4 space-y-4">
+                            {/* SEARCH BAR (Import View) */}
+                            <div className="relative">
+                                <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-500" />
+                                <input 
+                                    type="text" 
+                                    placeholder="Sök transaktion..."
+                                    value={searchTerm}
+                                    onChange={(e) => setSearchTerm(e.target.value)}
+                                    className="w-full bg-slate-900 border border-slate-700 rounded-xl pl-10 pr-4 py-3 text-sm focus:outline-none focus:border-blue-500 transition-colors"
+                                />
+                                {filteredStaging.length !== stagingTransactions.length && (
+                                    <div className="absolute right-3 top-1/2 -translate-y-1/2 text-xs text-slate-500">
+                                        Visar {filteredStaging.length} av {stagingTransactions.length}
+                                    </div>
+                                )}
+                            </div>
+
                             {/* ACTION BAR */}
-                            <div className="flex justify-between items-center bg-slate-800 p-3 rounded-xl border border-slate-700 sticky top-16 z-30 shadow-xl">
-                                <div className="flex items-center gap-4">
+                            <div className="flex flex-col sm:flex-row justify-between items-center bg-slate-800 p-3 rounded-xl border border-slate-700 sticky top-16 z-30 shadow-xl gap-3">
+                                
+                                {/* Left Controls */}
+                                <div className="flex items-center gap-4 w-full sm:w-auto justify-between">
                                     <button onClick={() => setStagingTransactions([])} className="text-slate-400 hover:text-white text-sm flex items-center gap-1">
                                         <Trash2 className="w-4 h-4" /> Rensa
                                     </button>
-                                    <div className="h-4 w-px bg-slate-700"></div>
+                                    
+                                    <div className="h-4 w-px bg-slate-700 hidden sm:block"></div>
+                                    
+                                    {/* View Toggle */}
+                                    <div className="flex bg-slate-900 rounded-lg p-0.5">
+                                        <button 
+                                            onClick={() => setImportViewStyle('list')}
+                                            className={cn("p-1.5 rounded-md transition-all", importViewStyle === 'list' ? "bg-slate-700 text-white" : "text-slate-500 hover:text-slate-300")}
+                                            title="Listvy"
+                                        >
+                                            <LayoutList size={16} />
+                                        </button>
+                                        <button 
+                                            onClick={() => setImportViewStyle('card')}
+                                            className={cn("p-1.5 rounded-md transition-all", importViewStyle === 'card' ? "bg-slate-700 text-white" : "text-slate-500 hover:text-slate-300")}
+                                            title="Fokusvy (Kort)"
+                                        >
+                                            <GalleryHorizontalEnd size={16} />
+                                        </button>
+                                    </div>
+
+                                    <div className="h-4 w-px bg-slate-700 hidden sm:block"></div>
+
                                     <button 
                                         onClick={handleRunAiAnalysis} 
                                         disabled={isAiAnalysisRunning}
                                         className="text-purple-400 hover:text-purple-300 text-sm flex items-center gap-1 disabled:opacity-50"
                                     >
                                         {isAiAnalysisRunning ? <Loader2 className="w-4 h-4 animate-spin" /> : <Wand2 className="w-4 h-4" />}
-                                        AI-Analysera alla
+                                        <span className="hidden sm:inline">AI-Analysera alla</span>
+                                        <span className="sm:hidden">AI</span>
                                     </button>
                                 </div>
 
                                 <Button 
                                     onClick={handleCommit} 
                                     disabled={validForCommitCount === 0}
-                                    className={cn("transition-all", validForCommitCount > 0 ? "bg-emerald-600 hover:bg-emerald-500" : "bg-slate-700 text-slate-500")}
+                                    className={cn("transition-all w-full sm:w-auto", validForCommitCount > 0 ? "bg-emerald-600 hover:bg-emerald-500" : "bg-slate-700 text-slate-500")}
                                 >
                                     <Check className="w-4 h-4 mr-2" />
                                     Bokför {validForCommitCount} st
                                 </Button>
                             </div>
 
-                            {/* LIST */}
-                            <div className="space-y-2 pb-20">
-                                {stagingTransactions.map(tx => (
-                                    <TransactionRow 
-                                        key={tx.id} 
-                                        tx={tx} 
-                                        buckets={buckets}
-                                        mainCategories={mainCategories}
-                                        subCategories={subCategories}
-                                        settings={settings}
-                                        onChange={handleChange}
-                                        onCreateRule={openRuleModal}
-                                        onAiGuess={handleAiGuess}
-                                        isAiLoading={loadingAiId === tx.id}
-                                    />
-                                ))}
-                            </div>
+                            {/* LIST OR CARD VIEW */}
+                            {importViewStyle === 'list' ? (
+                                <div className="space-y-2 pb-20">
+                                    {filteredStaging.length > 0 ? (
+                                        filteredStaging.map(tx => (
+                                            <TransactionRow 
+                                                key={tx.id} 
+                                                tx={tx} 
+                                                buckets={buckets}
+                                                mainCategories={mainCategories}
+                                                subCategories={subCategories}
+                                                settings={settings}
+                                                onChange={handleChange}
+                                                onCreateRule={openRuleModal}
+                                                onAiGuess={handleAiGuess}
+                                                isAiLoading={loadingAiId === tx.id}
+                                            />
+                                        ))
+                                    ) : (
+                                        <div className="text-center py-10 text-slate-500">Inga transaktioner matchar sökningen.</div>
+                                    )}
+                                </div>
+                            ) : (
+                                <div className="pb-20 max-w-md mx-auto">
+                                    {filteredStaging[currentIndex] ? (
+                                        <TransactionFocusCard 
+                                            tx={filteredStaging[currentIndex]}
+                                            buckets={buckets}
+                                            mainCategories={mainCategories}
+                                            subCategories={subCategories}
+                                            settings={settings}
+                                            index={currentIndex}
+                                            total={filteredStaging.length}
+                                            onChange={handleChange}
+                                            onNext={() => setCurrentIndex(prev => Math.min(prev + 1, filteredStaging.length - 1))}
+                                            onPrev={() => setCurrentIndex(prev => Math.max(prev - 1, 0))}
+                                            onCreateRule={openRuleModal}
+                                            onAiGuess={handleAiGuess}
+                                            isAiLoading={loadingAiId === filteredStaging[currentIndex].id}
+                                        />
+                                    ) : (
+                                        <div className="text-center py-10 text-slate-500">Inga transaktioner att visa.</div>
+                                    )}
+                                </div>
+                            )}
                         </div>
                     )}
                 </div>
@@ -618,10 +972,38 @@ export const TransactionsView: React.FC = () => {
             
             {viewMode === 'history' && (
                 <div className="space-y-4 animate-in slide-in-from-right">
-                    <div className="bg-slate-800/50 p-4 rounded-xl border border-slate-700 text-center text-sm text-slate-400">
-                        Visar de senaste 50 transaktionerna
+                    
+                    {/* HISTORY FILTERS */}
+                    <div className="flex gap-2">
+                        <div className="relative flex-1">
+                            <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-500" />
+                            <input 
+                                type="text" 
+                                placeholder="Sök..."
+                                value={searchTerm}
+                                onChange={(e) => setSearchTerm(e.target.value)}
+                                className="w-full bg-slate-900 border border-slate-700 rounded-xl pl-10 pr-4 py-3 text-sm focus:outline-none focus:border-blue-500 transition-colors"
+                            />
+                        </div>
+                        <div className="relative w-1/3">
+                            <Filter className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-500" />
+                             <select 
+                                className="w-full bg-slate-900 border border-slate-700 rounded-xl pl-9 pr-4 py-3 text-sm focus:outline-none focus:border-blue-500 transition-colors appearance-none"
+                                value={historyAccountFilter}
+                                onChange={(e) => setHistoryAccountFilter(e.target.value)}
+                            >
+                                <option value="">Alla Konton</option>
+                                {accounts.map(a => <option key={a.id} value={a.id}>{a.name}</option>)}
+                            </select>
+                        </div>
                     </div>
-                    {transactions.slice().sort((a,b) => b.date.localeCompare(a.date)).slice(0, 50).map(tx => (
+
+                    <div className="bg-slate-800/50 p-4 rounded-xl border border-slate-700 text-center text-sm text-slate-400">
+                        Visar {filteredHistory.length} träffar (av totalt {transactions.length})
+                    </div>
+                    
+                    {filteredHistory.length > 0 ? (
+                        filteredHistory.map(tx => (
                         <div key={tx.id} className="bg-slate-800 p-3 rounded-lg border border-slate-700 flex justify-between items-center">
                             <div>
                                 <div className="font-bold text-white text-sm mb-1">{tx.description}</div>
@@ -655,7 +1037,10 @@ export const TransactionsView: React.FC = () => {
                                 <button onClick={() => deleteTransaction(tx.id)} className="text-xs text-rose-400 hover:text-white mt-1 opacity-50 hover:opacity-100">Ta bort</button>
                             </div>
                         </div>
-                    ))}
+                    ))
+                    ) : (
+                        <div className="text-center py-10 text-slate-500">Inga historiska transaktioner matchar sökningen.</div>
+                    )}
                 </div>
             )}
             

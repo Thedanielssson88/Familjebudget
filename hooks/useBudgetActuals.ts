@@ -7,8 +7,6 @@ export const useBudgetActuals = (selectedMonth: string, payday: number) => {
     const { start, end } = getBudgetInterval(selectedMonth, payday);
     
     // Hämta alla transaktioner i intervallet
-    // Vi använder start och end datum strängar för jämförelse (YYYY-MM-DD)
-    // Eftersom datum i DB är strängar, fungerar lexiografisk jämförelse bra
     const startStr = start.toISOString().split('T')[0];
     const endStr = end.toISOString().split('T')[0];
 
@@ -17,44 +15,49 @@ export const useBudgetActuals = (selectedMonth: string, payday: number) => {
       .between(startStr, endStr, true, true)
       .toArray();
 
-    // Summera per Bucket och per Konto
+    // Aggregates
     const spentByBucket: Record<string, number> = {};
+    const transfersByBucket: Record<string, number> = {};
+    const expensesByBucket: Record<string, number> = {};
     const spentByAccount: Record<string, number> = {};
 
     transactions.forEach(t => {
-      // Vi antar att utgifter är negativa belopp eller positiva belopp som ska dras av.
-      // I denna app verkar "amount" på transaktioner ofta vara absolutbelopp eller negativa?
-      // Låt oss anta att vi summerar absolutbeloppet av alla transaktioner som matchar.
-      
-      // OBS: En inkomst (retur) bör minska spenderat belopp.
-      // Om importen sparar utgifter som negativa tal:
-      // -100 (utgift) -> ökar spent med 100
-      // +100 (retur) -> minskar spent med 100
-      
-      // Om importen sparar utgifter som positiva tal (mindre troligt för bank-csv, men möjligt):
-      // Vi kör en säkerhetslogik: Utgifter brukar vara negativa i CSV.
-      
-      let impact = 0;
-      
-      // Om beloppet är negativt (vanligast för utgift), gör det positivt för "spent"
+      // Calculate generic impact for legacy spentByBucket (Consumption View)
+      // Negative transaction (outflow) -> Positive Impact (Money spent)
+      // Positive transaction (inflow) -> Negative Impact (Refund)
+      let consumptionImpact = 0;
       if (t.amount < 0) {
-          impact = Math.abs(t.amount);
+          consumptionImpact = Math.abs(t.amount);
       } else {
-          // Positivt belopp är oftast en insättning/retur, vilket ska MINSKA utgifterna.
-          impact = -t.amount;
+          consumptionImpact = -t.amount;
       }
 
       if (t.bucketId) {
-        spentByBucket[t.bucketId] = (spentByBucket[t.bucketId] || 0) + impact;
+        // Split by Type for specific views
+        if (t.type === 'TRANSFER') {
+            // For Cash Flow / Funding:
+            // Any transfer associated with a bucket is considered a "Funding Event".
+            // Whether it is negative (from Main Account) or positive (arriving in Goal Account),
+            // it represents money allocated to this bucket. We use Absolute Value to show magnitude of funding.
+            transfersByBucket[t.bucketId] = (transfersByBucket[t.bucketId] || 0) + Math.abs(t.amount);
+        } else if (t.type === 'EXPENSE') {
+            // For Expenses:
+            // Standard consumption logic.
+            expensesByBucket[t.bucketId] = (expensesByBucket[t.bucketId] || 0) + consumptionImpact;
+        }
+
+        // Total aggregate (Legacy/Consumption focused)
+        // We generally don't want Transfers to count as "Spent" in the generic sense if we are looking at consumption,
+        // but some views might rely on this. 
+        // Given the new strict separation, we populate this mainly with Expenses + consumption logic.
+        spentByBucket[t.bucketId] = (spentByBucket[t.bucketId] || 0) + consumptionImpact;
       }
       
-      // Aggregera även på konto om bucketId saknas men accountId finns (för översikt)
-      // Men oftast vill vi summera ALLT på kontot för att se totalen
       if (t.accountId) {
-        spentByAccount[t.accountId] = (spentByAccount[t.accountId] || 0) + impact;
+        spentByAccount[t.accountId] = (spentByAccount[t.accountId] || 0) + consumptionImpact;
       }
     });
 
-    return { spentByBucket, spentByAccount, transactions };
+    return { spentByBucket, transfersByBucket, expensesByBucket, spentByAccount, transactions };
   }, [selectedMonth, payday]);
 };
