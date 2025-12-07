@@ -161,24 +161,40 @@ export const parseBankFile = async (file: File, accountId: string): Promise<Tran
 // --- PIPELINE LOGIC ---
 
 const applyHistoricalCategories = async (transactions: Transaction[]): Promise<Transaction[]> => {
-    const enriched = await Promise.all(transactions.map(async (t) => {
-        if (t.bucketId || t.categoryMainId) return t;
+    const enriched = await Promise.all(transactions.map(async (t): Promise<Transaction> => {
+        if (t.bucketId || t.categoryMainId || t.type) return t;
 
         try {
+            // Find last transaction with same description that has a type
             const lastMatch = await db.transactions
                 .where({ accountId: t.accountId, description: t.description })
-                .filter(old => !!old.bucketId || !!old.categoryMainId)
+                .filter(old => !!old.type && (!!old.bucketId || !!old.categoryMainId))
                 .reverse()
                 .first();
 
             if (lastMatch) {
-                return {
-                    ...t,
-                    bucketId: lastMatch.bucketId,
-                    categoryMainId: lastMatch.categoryMainId,
-                    categorySubId: lastMatch.categorySubId,
-                    matchType: 'history' as const
-                };
+                // If the historical match is a TRANSFER, only copy bucketId
+                if (lastMatch.type === 'TRANSFER') {
+                    return {
+                        ...t,
+                        type: 'TRANSFER',
+                        bucketId: lastMatch.bucketId,
+                        categoryMainId: undefined,
+                        categorySubId: undefined,
+                        matchType: 'history' as const
+                    };
+                }
+                // If it is an EXPENSE, only copy categories
+                if (lastMatch.type === 'EXPENSE') {
+                    return {
+                        ...t,
+                        type: 'EXPENSE',
+                        bucketId: undefined,
+                        categoryMainId: lastMatch.categoryMainId,
+                        categorySubId: lastMatch.categorySubId,
+                        matchType: 'history' as const
+                    };
+                }
             }
         } catch (e) {
             console.warn("History lookup failed for", t.description, e);
@@ -192,7 +208,8 @@ const applyHistoricalCategories = async (transactions: Transaction[]): Promise<T
 export const runImportPipeline = async (
     rawTransactions: Transaction[],
     existingTransactions: Transaction[],
-    rules: ImportRule[]
+    rules: ImportRule[],
+    buckets: Bucket[]
 ): Promise<Transaction[]> => {
     
     // 1. DUPLICATE CHECK
@@ -203,9 +220,10 @@ export const runImportPipeline = async (
         return !existingHashes.has(hash);
     });
 
-    // 2. APPLY RULES (Highest Priority)
     processed = processed.map(t => {
         const lowerDesc = t.description.toLowerCase();
+        
+        // A. RULE MATCH (Highest priority)
         const matchedRule = rules.find(r => {
             const kw = r.keyword.toLowerCase();
             if (r.matchType === 'exact') return lowerDesc === kw;
@@ -214,20 +232,63 @@ export const runImportPipeline = async (
         });
 
         if (matchedRule) {
-            return { 
-                ...t, 
-                bucketId: matchedRule.targetBucketId || t.bucketId,
-                categoryMainId: matchedRule.targetCategoryMainId || t.categoryMainId,
-                categorySubId: matchedRule.targetCategorySubId || t.categorySubId,
-                matchType: 'rule' as const,
-                ruleMatch: true 
+            const type = matchedRule.targetType || (matchedRule.targetBucketId ? 'TRANSFER' : 'EXPENSE');
+            
+            if (type === 'TRANSFER') {
+                return { 
+                    ...t, 
+                    type: 'TRANSFER',
+                    bucketId: matchedRule.targetBucketId,
+                    categoryMainId: undefined,
+                    categorySubId: undefined,
+                    matchType: 'rule' as const,
+                    ruleMatch: true 
+                };
+            } else {
+                return { 
+                    ...t, 
+                    type: 'EXPENSE',
+                    bucketId: undefined,
+                    categoryMainId: matchedRule.targetCategoryMainId,
+                    categorySubId: matchedRule.targetCategorySubId,
+                    matchType: 'rule' as const,
+                    ruleMatch: true 
+                };
+            }
+        }
+
+        // B. SMART TRANSFER DETECTION
+        const isTransferKeywords = ['överföring', 'till konto', 'omsättning', 'sparande', 'flytt', 'insättning', 'girering'];
+        const isLikelyTransfer = isTransferKeywords.some(kw => lowerDesc.includes(kw));
+
+        if (isLikelyTransfer) {
+            // Find a Bucket that matches the description name
+            const targetBucket = buckets.find(b => lowerDesc.includes(b.name.toLowerCase()));
+            
+            return {
+                ...t,
+                type: 'TRANSFER',
+                bucketId: targetBucket ? targetBucket.id : undefined,
+                categoryMainId: undefined,
+                categorySubId: undefined,
+                matchType: targetBucket ? 'ai' : undefined // Using 'ai' icon to indicate smart guess
             };
         }
-        return t;
+
+        // C. DEFAULT TO EXPENSE (Consumption) or INCOME
+        if (t.amount > 0) {
+             return { ...t, type: 'INCOME', categoryMainId: '9', bucketId: undefined }; // 9 = Inkomster
+        }
+        
+        // Default Consumption
+        return { 
+            ...t, 
+            type: 'EXPENSE', 
+            bucketId: undefined 
+        };
     });
 
     // 3. APPLY HISTORY (Smart Matching)
-    // Only applied to those not yet matched by rules
     processed = await applyHistoricalCategories(processed);
 
     return processed;

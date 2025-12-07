@@ -59,12 +59,30 @@ export interface MainCategory {
   description?: string;
 }
 
+export interface BudgetGroupData {
+    limit: number;
+    isExplicitlyDeleted?: boolean;
+}
+
+export interface BudgetGroup {
+  id: string;
+  name: string;
+  // monthlyLimit: number; // DEPRECATED: Replaced by monthlyData
+  monthlyData: Record<MonthKey, BudgetGroupData>; 
+  isCatchAll?: boolean; // If true, this is the "Other/Unbudgeted" group
+  icon?: string; 
+}
+
 export interface SubCategory {
   id: string;
   name: string;
   mainCategoryId: string;
   description?: string;
+  monthlyBudget?: number; // Kept for reference, but BudgetGroup limit is primary
+  budgetGroupId?: string; // Links this specific category to a high-level budget group
 }
+
+export type TransactionType = 'EXPENSE' | 'TRANSFER' | 'INCOME';
 
 export interface Transaction {
   id: string;
@@ -73,10 +91,12 @@ export interface Transaction {
   amount: number;
   description: string;
   
-  // Funding / Budgeting
-  bucketId?: string; // Where the money comes from (Budget Post). Previously 'categoryId'.
+  type?: TransactionType; // New: Distinguish between consumption (Expense) and movement (Transfer)
+
+  // Funding / Budgeting (Used if type == TRANSFER)
+  bucketId?: string; // Where the money comes from (Budget Post).
   
-  // Statistics / Categorization
+  // Statistics / Categorization (Used if type == EXPENSE)
   categoryMainId?: string; // What kind of expense is this? (e.g. "Food")
   categorySubId?: string;  // Specifics (e.g. "Groceries")
 
@@ -96,7 +116,8 @@ export interface ImportRule {
   keyword: string;
   matchType: 'contains' | 'exact' | 'starts_with';
   
-  // A rule can apply any combination of these
+  // Rule actions
+  targetType?: TransactionType;
   targetBucketId?: string;
   targetCategoryMainId?: string;
   targetCategorySubId?: string;
@@ -111,9 +132,10 @@ export interface GlobalState {
   accounts: Account[];
   buckets: Bucket[];
   
-  // Categories
+  // Categories & Groups
   mainCategories: MainCategory[];
   subCategories: SubCategory[];
+  budgetGroups: BudgetGroup[];
 
   settings: AppSettings;
   selectedMonth: string; // YYYY-MM

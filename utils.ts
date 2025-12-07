@@ -1,7 +1,8 @@
 
+
 import { format, subMonths, addMonths, startOfMonth, endOfMonth, setDate, isAfter, isBefore, parseISO, differenceInMonths, eachDayOfInterval, getDay, isSameMonth, isSameDay, isValid, min, max } from 'date-fns';
 import { sv } from 'date-fns/locale';
-import { Bucket, BucketData, User } from './types';
+import { Bucket, BucketData, User, BudgetGroup, BudgetGroupData } from './types';
 
 // Generate a unique ID using crypto API for safety
 export const generateId = () => self.crypto.randomUUID();
@@ -54,6 +55,36 @@ export const getEffectiveBucketData = (bucket: Bucket, monthKey: string): { data
 
   return { data: null, isInherited: false };
 }
+
+/**
+ * Same inheritance logic as Buckets, but for Budget Groups (Operating Budget)
+ */
+export const getEffectiveBudgetGroupData = (group: BudgetGroup, monthKey: string): { data: BudgetGroupData | null, isInherited: boolean } => {
+  if (!group.monthlyData) return { data: { limit: 0 }, isInherited: false }; // Safety for migration
+
+  // 1. Check exact month
+  if (group.monthlyData[monthKey]) {
+      return { data: group.monthlyData[monthKey], isInherited: false };
+  }
+
+  // 2. Search backwards
+  let currentSearchDate = parseISO(`${monthKey}-01`);
+  if (!isValid(currentSearchDate)) return { data: null, isInherited: false };
+
+  for (let i = 0; i < 36; i++) {
+      currentSearchDate = subMonths(currentSearchDate, 1);
+      const searchKey = format(currentSearchDate, 'yyyy-MM');
+      
+      const foundData = group.monthlyData[searchKey];
+      if (foundData) {
+          if (foundData.isExplicitlyDeleted) return { data: null, isInherited: false };
+          return { data: foundData, isInherited: true };
+      }
+  }
+  
+  return { data: null, isInherited: false };
+};
+
 
 /**
  * Helper to get the most recent daily deduction value for a user.

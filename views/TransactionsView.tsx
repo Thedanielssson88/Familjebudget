@@ -1,11 +1,10 @@
-
 import React, { useState, useRef, useMemo } from 'react';
 import { useApp } from '../store';
 import { Transaction, ImportRule, Bucket, MainCategory, SubCategory } from '../types';
 import { parseBankFile, runImportPipeline } from '../services/importService';
 import { categorizeTransactionsWithAi } from '../services/aiService';
 import { cn, Button, Card, Modal, Input } from '../components/components';
-import { Upload, Check, Wand2, Save, Trash2, ArrowRight, Clock, Zap, Sparkles, Loader2, AlertTriangle, XCircle } from 'lucide-react';
+import { Upload, Check, Wand2, Save, Trash2, Loader2, AlertTriangle, Zap, Clock, ArrowRightLeft, ShoppingCart, ArrowDownLeft, Sparkles } from 'lucide-react';
 import { formatMoney, generateId } from '../utils';
 
 // --- SUB-COMPONENT: STAGING ROW ---
@@ -15,16 +14,21 @@ const TransactionRow: React.FC<{
     buckets: Bucket[]; 
     mainCategories: MainCategory[];
     subCategories: SubCategory[];
-    onChange: (id: string, field: 'bucketId'|'categoryMainId'|'categorySubId', value: string) => void;
+    onChange: (id: string, field: 'type'|'bucketId'|'categoryMainId'|'categorySubId', value: string) => void;
     onCreateRule: (tx: Transaction) => void;
     onAiGuess: (tx: Transaction) => void;
     isAiLoading: boolean;
 }> = ({ tx, buckets, mainCategories, subCategories, onChange, onCreateRule, onAiGuess, isAiLoading }) => {
     
     // Check completeness
-    const isComplete = !!(tx.bucketId && tx.categoryMainId && tx.categorySubId);
-    // Budget is mandatory for commit
-    const hasBudget = !!tx.bucketId;
+    const isTransfer = tx.type === 'TRANSFER';
+    const isExpense = tx.type === 'EXPENSE';
+    const isIncome = tx.type === 'INCOME';
+
+    const isComplete = 
+        (isTransfer && !!tx.bucketId) || 
+        (isExpense && !!tx.categoryMainId && !!tx.categorySubId) ||
+        (isIncome && !!tx.categoryMainId);
 
     // Determine status color & icon based on matchType or completeness
     let statusColor = "bg-slate-800 border-slate-700"; 
@@ -37,11 +41,6 @@ const TransactionRow: React.FC<{
         statusColor = "bg-emerald-900/30 border-emerald-500/50 shadow-[inset_0_0_20px_-10px_rgba(16,185,129,0.3)]";
         icon = <div className="w-5 h-5 rounded-full bg-emerald-500 flex items-center justify-center shadow-lg shadow-emerald-500/20"><Check className="w-3 h-3 text-white stroke-[3]" /></div>;
         title = "Klar";
-    } else if (hasBudget) {
-        // Has budget but missing categories - Valid for commit but technically incomplete categorization
-        statusColor = "bg-emerald-900/20 border-emerald-500/30";
-        icon = <div className="w-4 h-4 rounded-full border-2 border-emerald-500"></div>;
-        title = "Redo att bokföras (saknar kategori)";
     } else if (matchType === 'rule') {
         statusColor = "bg-emerald-950/30 border-emerald-500/30";
         icon = <Zap className="w-4 h-4 text-emerald-500" />;
@@ -54,7 +53,7 @@ const TransactionRow: React.FC<{
         statusColor = "bg-purple-950/30 border-purple-500/30";
         icon = <Wand2 className="w-4 h-4 text-purple-400" />;
         title = "AI-gissning";
-    } else if (!tx.bucketId && !tx.categoryMainId) {
+    } else if (!isComplete) {
         statusColor = "bg-slate-800 border-l-4 border-l-slate-500";
     }
 
@@ -73,65 +72,95 @@ const TransactionRow: React.FC<{
             <div className="col-span-3 font-medium text-white truncate mt-2" title={tx.description}>{tx.description}</div>
             <div className="col-span-1 text-right font-mono mt-2">{formatMoney(tx.amount)}</div>
             
-            <div className="col-span-4 flex flex-col gap-1">
-                {/* Budget Source */}
-                <select 
-                    className={cn(
-                        "w-full bg-slate-900 border rounded px-2 py-1 text-xs focus:border-blue-500 outline-none transition-colors",
-                        !tx.bucketId ? "border-rose-500/50 text-rose-200" : "border-slate-600 text-blue-200"
-                    )}
-                    value={tx.bucketId || ""}
-                    onChange={(e) => onChange(tx.id, 'bucketId', e.target.value)}
-                    title="Budgetpost (Varifrån tas pengarna?) - OBLIGATORISK"
-                >
-                    <option value="">-- Välj Budget (Krävs) --</option>
-                    {buckets.map(b => (
-                        <option key={b.id} value={b.id}>{b.name}</option>
-                    ))}
-                </select>
-
-                {/* Categories Row */}
-                <div className="flex gap-1 items-center">
-                    <select 
-                        className="w-1/2 bg-slate-900 border border-slate-600 rounded px-2 py-1 text-xs text-white focus:border-blue-500 outline-none"
-                        value={tx.categoryMainId || ""}
-                        onChange={(e) => onChange(tx.id, 'categoryMainId', e.target.value)}
-                        title="Huvudkategori"
+            <div className="col-span-4 flex flex-col gap-2">
+                
+                {/* TYPE SELECTOR (Transfer vs Expense) */}
+                <div className="flex bg-slate-900 rounded-lg p-0.5 w-full">
+                    <button 
+                        onClick={() => onChange(tx.id, 'type', 'EXPENSE')}
+                        className={cn("flex-1 text-[10px] py-1 rounded flex items-center justify-center gap-1 transition-all", isExpense ? "bg-rose-500 text-white font-bold" : "text-slate-400 hover:text-white")}
+                        title="Utgift / Konsumtion"
                     >
-                        <option value="">-- Kategori --</option>
-                        {mainCategories.map(c => (
-                            <option key={c.id} value={c.id}>{c.name}</option>
-                        ))}
-                    </select>
-                    <select 
-                        className="w-1/2 bg-slate-900 border border-slate-600 rounded px-2 py-1 text-xs text-white focus:border-blue-500 outline-none disabled:opacity-50"
-                        value={tx.categorySubId || ""}
-                        onChange={(e) => onChange(tx.id, 'categorySubId', e.target.value)}
-                        disabled={!tx.categoryMainId || validSubCats.length === 0}
-                        title="Underkategori"
+                        <ShoppingCart size={10} /> Utgift
+                    </button>
+                    <button 
+                        onClick={() => onChange(tx.id, 'type', 'TRANSFER')}
+                        className={cn("flex-1 text-[10px] py-1 rounded flex items-center justify-center gap-1 transition-all", isTransfer ? "bg-blue-500 text-white font-bold" : "text-slate-400 hover:text-white")}
+                        title="Överföring till konto/budget"
                     >
-                        <option value="">-- Underkategori --</option>
-                        {validSubCats.map(c => (
-                            <option key={c.id} value={c.id}>{c.name}</option>
-                        ))}
-                    </select>
-
-                    {/* AI Button - Show if not complete */}
-                    {!isComplete && (
-                        <button 
-                            onClick={() => onAiGuess(tx)}
-                            disabled={isAiLoading}
-                            className="bg-purple-600/20 hover:bg-purple-600/40 text-purple-300 border border-purple-500/30 p-1.5 rounded transition-colors flex-shrink-0"
-                            title="AI Gissning"
-                        >
-                            <Sparkles size={12} />
-                        </button>
-                    )}
+                        <ArrowRightLeft size={10} /> Överföring
+                    </button>
+                    <button 
+                        onClick={() => onChange(tx.id, 'type', 'INCOME')}
+                        className={cn("flex-1 text-[10px] py-1 rounded flex items-center justify-center gap-1 transition-all", isIncome ? "bg-emerald-500 text-white font-bold" : "text-slate-400 hover:text-white")}
+                        title="Inkomst"
+                    >
+                        <ArrowDownLeft size={10} /> Inkomst
+                    </button>
                 </div>
+
+                {/* LOGIC FOR TRANSFER */}
+                {isTransfer && (
+                    <select 
+                        className={cn(
+                            "w-full bg-slate-900 border rounded px-2 py-1 text-xs focus:border-blue-500 outline-none transition-colors",
+                            !tx.bucketId ? "border-rose-500/50 text-rose-200" : "border-slate-600 text-blue-200"
+                        )}
+                        value={tx.bucketId || ""}
+                        onChange={(e) => onChange(tx.id, 'bucketId', e.target.value)}
+                        title="Budgetpost (Varifrån tas pengarna?)"
+                    >
+                        <option value="">-- Välj Budget (Krävs) --</option>
+                        {buckets.map(b => (
+                            <option key={b.id} value={b.id}>{b.name}</option>
+                        ))}
+                    </select>
+                )}
+
+                {/* LOGIC FOR EXPENSE */}
+                {(isExpense || isIncome) && (
+                    <div className="flex gap-1 items-center">
+                        <select 
+                            className="w-1/2 bg-slate-900 border border-slate-600 rounded px-2 py-1 text-xs text-white focus:border-blue-500 outline-none"
+                            value={tx.categoryMainId || ""}
+                            onChange={(e) => onChange(tx.id, 'categoryMainId', e.target.value)}
+                            title="Huvudkategori"
+                        >
+                            <option value="">-- Kategori --</option>
+                            {mainCategories.map(c => (
+                                <option key={c.id} value={c.id}>{c.name}</option>
+                            ))}
+                        </select>
+                        <select 
+                            className="w-1/2 bg-slate-900 border border-slate-600 rounded px-2 py-1 text-xs text-white focus:border-blue-500 outline-none disabled:opacity-50"
+                            value={tx.categorySubId || ""}
+                            onChange={(e) => onChange(tx.id, 'categorySubId', e.target.value)}
+                            disabled={!tx.categoryMainId || validSubCats.length === 0}
+                            title="Underkategori"
+                        >
+                            <option value="">-- Specifikt --</option>
+                            {validSubCats.map(c => (
+                                <option key={c.id} value={c.id}>{c.name}</option>
+                            ))}
+                        </select>
+
+                        {/* AI Button - Show if not complete and is expense */}
+                        {!isComplete && isExpense && (
+                            <button 
+                                onClick={() => onAiGuess(tx)}
+                                disabled={isAiLoading}
+                                className="bg-purple-600/20 hover:bg-purple-600/40 text-purple-300 border border-purple-500/30 p-1.5 rounded transition-colors flex-shrink-0"
+                                title="AI Gissning"
+                            >
+                                <Sparkles size={12} />
+                            </button>
+                        )}
+                    </div>
+                )}
             </div>
             
             <div className="col-span-1 flex justify-center mt-2">
-                {(tx.bucketId || tx.categoryMainId) && matchType !== 'rule' && (
+                {isComplete && matchType !== 'rule' && (
                     <button 
                         onClick={() => onCreateRule(tx)}
                         className="p-1.5 text-slate-400 hover:text-white hover:bg-blue-600 rounded transition-colors"
@@ -184,7 +213,7 @@ export const TransactionsView: React.FC = () => {
             }
 
             // 2. Run Pipeline (Fast: Duplicates, Rules, History only)
-            const processed = await runImportPipeline(raw, transactions, importRules);
+            const processed = await runImportPipeline(raw, transactions, importRules, buckets);
             
             setStagingTransactions(processed);
         } catch (err: any) {
@@ -199,12 +228,19 @@ export const TransactionsView: React.FC = () => {
         }
     };
 
-    const handleChange = (txId: string, field: 'bucketId'|'categoryMainId'|'categorySubId', value: string) => {
+    const handleChange = (txId: string, field: 'type'|'bucketId'|'categoryMainId'|'categorySubId', value: string) => {
         setStagingTransactions(prev => prev.map(t => {
             if (t.id !== txId) return t;
             
             const updates: any = { [field]: value, aiSuggested: false, ruleMatch: false, matchType: undefined };
             
+            // Logic reset when changing type
+            if (field === 'type') {
+                updates.bucketId = undefined;
+                updates.categoryMainId = undefined;
+                updates.categorySubId = undefined;
+            }
+
             // Reset subcategory if main category changes
             if (field === 'categoryMainId') {
                 updates.categorySubId = '';
@@ -224,8 +260,14 @@ export const TransactionsView: React.FC = () => {
             if (suggestion) {
                 setStagingTransactions(prev => prev.map(t => {
                     if (t.id !== tx.id) return t;
+                    
+                    // The AI service returns IDs. If we have categories, assume Expense. If bucket, assume Transfer.
+                    // Prioritize Category if both exist (usually safer)
+                    const newType = suggestion.mainCatId ? 'EXPENSE' : (suggestion.bucketId ? 'TRANSFER' : t.type);
+
                     return {
                         ...t,
+                        type: newType,
                         bucketId: suggestion.bucketId || t.bucketId,
                         categoryMainId: suggestion.mainCatId || t.categoryMainId,
                         categorySubId: suggestion.subCatId || t.categorySubId,
@@ -252,8 +294,10 @@ export const TransactionsView: React.FC = () => {
             setStagingTransactions(prev => prev.map(t => {
                 const suggestion = aiMapping[t.id];
                 if (suggestion && !t.bucketId && !t.categoryMainId) {
+                    const newType = suggestion.mainCatId ? 'EXPENSE' : (suggestion.bucketId ? 'TRANSFER' : t.type);
                     return {
                         ...t,
+                        type: newType,
                         bucketId: suggestion.bucketId,
                         categoryMainId: suggestion.mainCatId,
                         categorySubId: suggestion.subCatId,
@@ -272,8 +316,14 @@ export const TransactionsView: React.FC = () => {
     };
 
     const handleCommit = async () => {
-        // STRICT REQUIREMENT: Only commit transactions that have a Budget (Bucket) assigned
-        const toCommit = stagingTransactions.filter(t => t.bucketId);
+        // Validate Completeness based on Type
+        const toCommit = stagingTransactions.filter(t => {
+            if (t.type === 'TRANSFER') return !!t.bucketId;
+            if (t.type === 'EXPENSE') return !!t.categoryMainId; // Sub is optional but recommended
+            if (t.type === 'INCOME') return !!t.categoryMainId;
+            return false;
+        });
+
         const count = toCommit.length;
         if (count === 0) return;
 
@@ -283,7 +333,8 @@ export const TransactionsView: React.FC = () => {
         await addTransactions(verified);
         
         // Remove only the committed ones from staging
-        const remaining = stagingTransactions.filter(t => !t.bucketId);
+        const committedIds = new Set(verified.map(v => v.id));
+        const remaining = stagingTransactions.filter(t => !committedIds.has(t.id));
         setStagingTransactions(remaining);
         
         // If everything is done, switch view. Otherwise stay to let user fix the rest.
@@ -295,6 +346,7 @@ export const TransactionsView: React.FC = () => {
     const openRuleModal = (tx: Transaction) => {
         setRuleDraft({
             keyword: tx.description,
+            targetType: tx.type,
             targetBucketId: tx.bucketId,
             targetCategoryMainId: tx.categoryMainId,
             targetCategorySubId: tx.categorySubId,
@@ -309,6 +361,7 @@ export const TransactionsView: React.FC = () => {
         const newRule: ImportRule = {
             id: generateId(),
             keyword: ruleDraft.keyword,
+            targetType: ruleDraft.targetType,
             targetBucketId: ruleDraft.targetBucketId,
             targetCategoryMainId: ruleDraft.targetCategoryMainId,
             targetCategorySubId: ruleDraft.targetCategorySubId,
@@ -323,6 +376,7 @@ export const TransactionsView: React.FC = () => {
             if (t.description.toLowerCase().includes(newRule.keyword!.toLowerCase())) {
                  return {
                      ...t,
+                     type: newRule.targetType || t.type,
                      bucketId: newRule.targetBucketId || t.bucketId,
                      categoryMainId: newRule.targetCategoryMainId || t.categoryMainId,
                      categorySubId: newRule.targetCategorySubId || t.categorySubId,
@@ -339,7 +393,11 @@ export const TransactionsView: React.FC = () => {
     const validRuleSubCats = subCategories.filter(sc => sc.mainCategoryId === ruleDraft.targetCategoryMainId);
 
     // Count valid transactions for commit
-    const validForCommitCount = stagingTransactions.filter(t => t.bucketId).length;
+    const validForCommitCount = stagingTransactions.filter(t => {
+        if (t.type === 'TRANSFER') return !!t.bucketId;
+        if (t.type === 'EXPENSE') return !!t.categoryMainId;
+        return false;
+    }).length;
 
     return (
         <div className="space-y-6 pb-24 animate-in slide-in-from-right duration-300">
@@ -422,7 +480,7 @@ export const TransactionsView: React.FC = () => {
                                 </div>
                                 <div className="flex gap-2">
                                     {/* BULK AI BUTTON */}
-                                    {stagingTransactions.some(t => !t.bucketId && !t.categoryMainId) && (
+                                    {stagingTransactions.some(t => t.type === 'EXPENSE' && !t.categoryMainId) && (
                                         <Button 
                                             variant="secondary" 
                                             onClick={handleRunAiAnalysis} 
@@ -486,8 +544,8 @@ export const TransactionsView: React.FC = () => {
                                      <tr>
                                          <th className="p-3">Datum</th>
                                          <th className="p-3">Beskrivning</th>
-                                         <th className="p-3">Budget</th>
-                                         <th className="p-3">Kategori</th>
+                                         <th className="p-3 text-center">Typ</th>
+                                         <th className="p-3">Koppling</th>
                                          <th className="p-3 text-right">Belopp</th>
                                          <th className="p-3 w-10"></th>
                                      </tr>
@@ -501,17 +559,22 @@ export const TransactionsView: React.FC = () => {
                                              <tr key={tx.id} className="hover:bg-slate-800/50">
                                                  <td className="p-3 text-slate-300 font-mono">{tx.date}</td>
                                                  <td className="p-3 font-medium text-white">{tx.description}</td>
-                                                 <td className="p-3">
-                                                     {bucket ? (
-                                                         <span className="bg-blue-900/40 text-blue-300 px-2 py-1 rounded text-xs border border-blue-500/20">
-                                                             {bucket.name}
-                                                         </span>
-                                                     ) : <span className="text-slate-600">-</span>}
+                                                 <td className="p-3 text-center">
+                                                     {tx.type === 'TRANSFER' && <span className="bg-blue-900/30 text-blue-300 text-[10px] px-2 py-1 rounded">Överföring</span>}
+                                                     {tx.type === 'EXPENSE' && <span className="bg-rose-900/30 text-rose-300 text-[10px] px-2 py-1 rounded">Utgift</span>}
+                                                     {tx.type === 'INCOME' && <span className="bg-emerald-900/30 text-emerald-300 text-[10px] px-2 py-1 rounded">Inkomst</span>}
                                                  </td>
                                                  <td className="p-3">
-                                                     {category ? (
-                                                         <span className="text-slate-300">{category.name}</span>
-                                                     ) : <span className="text-slate-600">-</span>}
+                                                     {tx.type === 'TRANSFER' && bucket && (
+                                                         <span className="text-blue-300 text-xs flex items-center gap-1">
+                                                             <ArrowRightLeft size={12}/> {bucket.name}
+                                                         </span>
+                                                     )}
+                                                     {tx.type === 'EXPENSE' && category && (
+                                                         <span className="text-rose-300 text-xs flex items-center gap-1">
+                                                             <ShoppingCart size={12}/> {category.name}
+                                                         </span>
+                                                     )}
                                                  </td>
                                                  <td className="p-3 text-right font-mono font-bold text-white">
                                                      {formatMoney(tx.amount)}
@@ -567,63 +630,84 @@ export const TransactionsView: React.FC = () => {
                         onChange={(e) => setRuleDraft({...ruleDraft, keyword: e.target.value})}
                     />
                     
-                    <div className="grid grid-cols-2 gap-4">
-                        <div className="col-span-2">
-                             <label className="text-xs font-medium text-blue-300 uppercase tracking-wider block mb-1">Budgetpost (Finansiering)</label>
-                             <select 
-                                className="w-full bg-slate-900 border border-slate-700 rounded-xl px-4 py-3 text-white focus:outline-none focus:ring-2 focus:ring-blue-500"
-                                value={ruleDraft.targetBucketId || ''}
-                                onChange={(e) => setRuleDraft({...ruleDraft, targetBucketId: e.target.value})}
-                            >
-                                <option value="">Ingen vald (Manuell)</option>
-                                {buckets.map(b => (
-                                    <option key={b.id} value={b.id}>{b.name}</option>
-                                ))}
-                            </select>
-                        </div>
-                        
-                        <div>
-                             <label className="text-xs font-medium text-purple-300 uppercase tracking-wider block mb-1">Huvudkategori</label>
-                             <select 
-                                className="w-full bg-slate-900 border border-slate-700 rounded-xl px-4 py-3 text-white focus:outline-none focus:ring-2 focus:ring-blue-500"
-                                value={ruleDraft.targetCategoryMainId || ''}
-                                onChange={(e) => setRuleDraft({...ruleDraft, targetCategoryMainId: e.target.value, targetCategorySubId: ''})}
-                            >
-                                <option value="">Ingen vald</option>
-                                {mainCategories.map(c => (
-                                    <option key={c.id} value={c.id}>{c.name}</option>
-                                ))}
-                            </select>
-                        </div>
+                    {/* RULE CONFIG */}
+                    <div className="bg-slate-800 p-3 rounded-lg border border-slate-700 space-y-3">
+                         <div>
+                            <label className="text-xs font-medium text-slate-400 uppercase block mb-1">Typ av regel</label>
+                            <div className="flex gap-2">
+                                <button 
+                                    onClick={() => setRuleDraft({...ruleDraft, targetType: 'EXPENSE'})}
+                                    className={cn("flex-1 py-2 text-xs rounded border transition-all", ruleDraft.targetType === 'EXPENSE' ? "bg-rose-500 border-rose-600 text-white" : "border-slate-600 text-slate-400")}
+                                >Utgift</button>
+                                <button 
+                                    onClick={() => setRuleDraft({...ruleDraft, targetType: 'TRANSFER'})}
+                                    className={cn("flex-1 py-2 text-xs rounded border transition-all", ruleDraft.targetType === 'TRANSFER' ? "bg-blue-500 border-blue-600 text-white" : "border-slate-600 text-slate-400")}
+                                >Överföring</button>
+                            </div>
+                         </div>
 
-                        <div>
-                             <label className="text-xs font-medium text-purple-300 uppercase tracking-wider block mb-1">Underkategori</label>
-                             <select 
-                                className="w-full bg-slate-900 border border-slate-700 rounded-xl px-4 py-3 text-white focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-50"
-                                value={ruleDraft.targetCategorySubId || ''}
-                                onChange={(e) => setRuleDraft({...ruleDraft, targetCategorySubId: e.target.value})}
-                                disabled={!ruleDraft.targetCategoryMainId}
-                            >
-                                <option value="">Ingen vald</option>
-                                {validRuleSubCats.map(c => (
-                                    <option key={c.id} value={c.id}>{c.name}</option>
-                                ))}
-                            </select>
-                        </div>
+                         {ruleDraft.targetType === 'TRANSFER' && (
+                             <div>
+                                <label className="text-xs font-medium text-blue-300 uppercase block mb-1">Koppla till Budget</label>
+                                <select 
+                                    className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-white text-sm"
+                                    value={ruleDraft.targetBucketId || ''}
+                                    onChange={(e) => setRuleDraft({...ruleDraft, targetBucketId: e.target.value})}
+                                >
+                                    <option value="">Ingen vald</option>
+                                    {buckets.map(b => (
+                                        <option key={b.id} value={b.id}>{b.name}</option>
+                                    ))}
+                                </select>
+                             </div>
+                         )}
 
-                        <div className="col-span-2">
-                             <label className="text-xs font-medium text-slate-400 uppercase tracking-wider block mb-1">Matchningstyp</label>
-                             <select 
-                                className="w-full bg-slate-900 border border-slate-700 rounded-xl px-4 py-3 text-white focus:outline-none focus:ring-2 focus:ring-blue-500"
-                                value={ruleDraft.matchType || 'contains'}
-                                onChange={(e) => setRuleDraft({...ruleDraft, matchType: e.target.value as any})}
-                            >
-                                <option value="contains">Innehåller (Texten finns i beskrivningen)</option>
-                                <option value="starts_with">Börjar med (Texten är i början)</option>
-                                <option value="exact">Exakt matchning (Hela texten måste stämma)</option>
-                            </select>
-                        </div>
+                         {ruleDraft.targetType === 'EXPENSE' && (
+                             <>
+                                <div>
+                                    <label className="text-xs font-medium text-rose-300 uppercase block mb-1">Huvudkategori</label>
+                                    <select 
+                                        className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-white text-sm"
+                                        value={ruleDraft.targetCategoryMainId || ''}
+                                        onChange={(e) => setRuleDraft({...ruleDraft, targetCategoryMainId: e.target.value, targetCategorySubId: ''})}
+                                    >
+                                        <option value="">Ingen vald</option>
+                                        {mainCategories.map(c => (
+                                            <option key={c.id} value={c.id}>{c.name}</option>
+                                        ))}
+                                    </select>
+                                </div>
+                                <div>
+                                    <label className="text-xs font-medium text-rose-300 uppercase block mb-1">Underkategori</label>
+                                    <select 
+                                        className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-white text-sm disabled:opacity-50"
+                                        value={ruleDraft.targetCategorySubId || ''}
+                                        onChange={(e) => setRuleDraft({...ruleDraft, targetCategorySubId: e.target.value})}
+                                        disabled={!ruleDraft.targetCategoryMainId}
+                                    >
+                                        <option value="">Ingen vald</option>
+                                        {validRuleSubCats.map(c => (
+                                            <option key={c.id} value={c.id}>{c.name}</option>
+                                        ))}
+                                    </select>
+                                </div>
+                             </>
+                         )}
                     </div>
+
+                    <div className="col-span-2">
+                            <label className="text-xs font-medium text-slate-400 uppercase tracking-wider block mb-1">Matchningstyp</label>
+                            <select 
+                            className="w-full bg-slate-900 border border-slate-700 rounded-xl px-4 py-3 text-white focus:outline-none focus:ring-2 focus:ring-blue-500"
+                            value={ruleDraft.matchType || 'contains'}
+                            onChange={(e) => setRuleDraft({...ruleDraft, matchType: e.target.value as any})}
+                        >
+                            <option value="contains">Innehåller (Texten finns i beskrivningen)</option>
+                            <option value="starts_with">Börjar med (Texten är i början)</option>
+                            <option value="exact">Exakt matchning (Hela texten måste stämma)</option>
+                        </select>
+                    </div>
+
 
                     <div className="flex gap-3 pt-4 border-t border-slate-700">
                         <Button variant="secondary" onClick={() => setRuleModalOpen(false)} className="flex-1">Avbryt</Button>

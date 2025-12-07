@@ -1,91 +1,160 @@
-import React, { useMemo } from 'react';
+import React, { useMemo, useState } from 'react';
 import { useApp } from '../store';
-import { calculateGoalBucketCost, calculateFixedBucketCost, calculateDailyBucketCost, formatMoney } from '../utils';
-import { PieChart, Pie, Cell, Tooltip, ResponsiveContainer, BarChart, Bar, XAxis, YAxis } from 'recharts';
-import { format, addMonths } from 'date-fns';
-import { sv } from 'date-fns/locale';
+import { formatMoney, getEffectiveBudgetGroupData } from '../utils';
+import { PieChart, Pie, Cell, Tooltip, ResponsiveContainer } from 'recharts';
+import { ChevronRight, ChevronDown, Edit2, Check, AlertTriangle, Save, X, Plus, Wallet } from 'lucide-react';
+import { BudgetProgressBar } from '../components/BudgetProgressBar';
+import { cn, Button, Input, Modal } from '../components/components';
+import { BudgetGroup } from '../types';
 
 export const StatsView: React.FC = () => {
-  const { buckets, selectedMonth, accounts, settings, mainCategories, transactions } = useApp();
-
-  // 1. Prepare Data for Pie Chart (Expenses)
-  // Logic: Prefer Main Category statistics if we have classified transactions.
-  // Fallback: If no categories used, use Buckets logic.
+  const { selectedMonth, budgetGroups, subCategories, transactions, updateBudgetGroup } = useApp();
   
-  const pieData = useMemo(() => {
-    // Check if we have transactions for this month with categories
+  const [expandedGroup, setExpandedGroup] = useState<string | null>(null);
+  const [editingGroupId, setEditingGroupId] = useState<string | null>(null);
+  const [tempLimit, setTempLimit] = useState<string>('');
+  
+  // 1. Calculate Actuals vs Budget Groups
+  const data = useMemo(() => {
     const txForMonth = transactions.filter(t => t.date.startsWith(selectedMonth));
-    const hasCategories = txForMonth.some(t => !!t.categoryMainId);
+    
+    // Only count EXPENSES (Consumption)
+    const expenseTx = txForMonth.filter(t => t.type === 'EXPENSE' || (!t.type && t.amount < 0)); 
 
-    if (hasCategories) {
-        // --- CATEGORY BASED STATS ---
-        const categoryMap = new Map<string, number>();
+    // Find the Catch-All group (fallback)
+    const catchAllGroup = budgetGroups.find(g => g.isCatchAll);
+    
+    // Helper to find which group a transaction belongs to
+    const getGroupIdForTx = (tx: { categorySubId?: string }) => {
+        if (!tx.categorySubId) return catchAllGroup?.id || 'unknown';
+        const sub = subCategories.find(s => s.id === tx.categorySubId);
+        return sub?.budgetGroupId || catchAllGroup?.id || 'unknown';
+    };
+
+    const groupStats = budgetGroups.map(group => {
+        // Find all subcategories belonging to this group
+        const assignedSubs = subCategories.filter(s => s.budgetGroupId === group.id);
+        const assignedSubIds = new Set(assignedSubs.map(s => s.id));
         
-        txForMonth.forEach(tx => {
-            if (tx.categoryMainId) {
-                const current = categoryMap.get(tx.categoryMainId) || 0;
-                categoryMap.set(tx.categoryMainId, current + tx.amount);
-            } else {
-                // Uncategorized
-                const current = categoryMap.get('uncat') || 0;
-                categoryMap.set('uncat', current + tx.amount);
-            }
+        // Find transactions matching this group
+        // Match logic: 
+        // 1. Transaction has a SubCategory that belongs to this Group
+        // 2. OR Transaction has NO SubCategory (or unknown) and this is the Catch-All group
+        
+        const groupTxs = expenseTx.filter(t => {
+            if (t.categorySubId && assignedSubIds.has(t.categorySubId)) return true;
+            if (group.isCatchAll && (!t.categorySubId || !subCategories.find(s => s.id === t.categorySubId)?.budgetGroupId)) return true;
+            return false;
         });
+        
+        const spent = groupTxs.reduce((sum, t) => sum + Math.abs(t.amount), 0);
+        
+        // Breakdown by SubCategory for the expanded view
+        const breakdown = assignedSubs.map(sub => {
+            const subSpent = groupTxs
+                .filter(t => t.categorySubId === sub.id)
+                .reduce((sum, t) => sum + Math.abs(t.amount), 0);
+            return { ...sub, spent: subSpent };
+        }).sort((a,b) => b.spent - a.spent);
 
-        const data = Array.from(categoryMap.entries()).map(([id, value]) => {
-            if (id === 'uncat') return { name: 'Okategoriserat', value: Math.abs(value) };
-            const cat = mainCategories.find(c => c.id === id);
-            return { name: cat ? cat.name : 'Okänd', value: Math.abs(value) }; // Using abs for expenses
-        }).filter(d => d.value > 0);
+        // Calculate "Other/Uncategorized" inside this group (only relevant for CatchAll really)
+        const totalSubSpent = breakdown.reduce((sum, s) => sum + s.spent, 0);
+        const unclassifiedSpent = spent - totalSubSpent;
 
-        return data;
+        // Get effective limit for the month
+        const { data } = getEffectiveBudgetGroupData(group, selectedMonth);
+        const limit = data ? data.limit : 0;
 
-    } else {
-        // --- BUCKET BASED STATS (Fallback) ---
-        return accounts.map(acc => {
-            const accBuckets = buckets.filter(b => b.accountId === acc.id);
-            const value = accBuckets.reduce((sum, b) => {
-                let cost = 0;
-                if (b.type === 'FIXED') cost = calculateFixedBucketCost(b, selectedMonth);
-                else if (b.type === 'DAILY') cost = calculateDailyBucketCost(b, selectedMonth, settings.payday);
-                else if (b.type === 'GOAL') cost = calculateGoalBucketCost(b, selectedMonth);
-                return sum + cost;
-            }, 0);
-            return { name: acc.name, value };
-        }).filter(d => d.value > 0);
-    }
-  }, [accounts, buckets, selectedMonth, settings.payday, transactions, mainCategories]);
-
-  const COLORS = ['#3b82f6', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#ec4899', '#6366f1'];
-
-  // 2. Future Projection (Next 6 months of savings goals)
-  const { savingsGoals, projectionData } = useMemo(() => {
-      const goals = buckets.filter(b => b.type === 'GOAL');
-      
-      const data = Array.from({ length: 6 }).map((_, i) => {
-        const month = format(addMonths(new Date(selectedMonth), i), 'yyyy-MM');
-        const totalSavingLoad = goals.reduce((sum, b) => sum + calculateGoalBucketCost(b, month), 0);
         return {
-            month: format(addMonths(new Date(selectedMonth), i), 'MMM', { locale: sv }),
-            belopp: Math.round(totalSavingLoad)
+            ...group,
+            spent,
+            limit,
+            remaining: limit - spent,
+            breakdown,
+            unclassifiedSpent
         };
-      });
+    }).sort((a, b) => {
+        // Sort Catch-All last, others by name
+        if (a.isCatchAll) return 1;
+        if (b.isCatchAll) return -1;
+        return b.spent - a.spent; // Highest spent first
+    });
 
-      return { savingsGoals: goals, projectionData: data };
-  }, [buckets, selectedMonth]);
+    // Totals
+    const totalLimit = groupStats.reduce((sum, g) => sum + g.limit, 0);
+    const totalSpent = groupStats.reduce((sum, g) => sum + g.spent, 0);
+    const totalRemaining = totalLimit - totalSpent;
+
+    return { groupStats, totalLimit, totalSpent, totalRemaining };
+  }, [budgetGroups, subCategories, transactions, selectedMonth]);
+
+  const handleStartEdit = (group: BudgetGroup) => {
+      setEditingGroupId(group.id);
+      const { data } = getEffectiveBudgetGroupData(group, selectedMonth);
+      setTempLimit((data ? data.limit : 0).toString());
+  };
+
+  const handleSaveLimit = async (group: BudgetGroup) => {
+      const amount = parseInt(tempLimit) || 0;
+      const updatedGroup: BudgetGroup = {
+          ...group,
+          monthlyData: {
+              ...group.monthlyData,
+              [selectedMonth]: { limit: amount, isExplicitlyDeleted: false }
+          }
+      };
+      await updateBudgetGroup(updatedGroup);
+      setEditingGroupId(null);
+  };
+  
+  // Prepare Pie Data
+  const pieData = data.groupStats
+      .filter(g => g.spent > 0)
+      .map(g => ({ name: g.name, value: g.spent }));
+      
+  const COLORS = ['#3b82f6', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#ec4899', '#6366f1', '#14b8a6', '#f43f5e', '#8b5cf6'];
 
   return (
     <div className="space-y-8 pb-24 animate-in slide-in-from-right duration-300">
-      <header>
-        <h1 className="text-3xl font-bold text-white">Ekonomisk Översikt</h1>
-        <p className="text-slate-400">Var tar pengarna vägen?</p>
+      <header className="flex flex-col gap-2">
+        <div>
+            <h1 className="text-3xl font-bold text-transparent bg-clip-text bg-gradient-to-r from-emerald-400 to-teal-400">Driftbudget</h1>
+            <p className="text-slate-400">Uppföljning per budgetgrupp (Kostnadsställe).</p>
+        </div>
       </header>
 
+      {/* SUMMARY DASHBOARD */}
+      <div className="grid grid-cols-3 gap-3">
+          <div className="bg-slate-800/80 p-3 rounded-xl border border-slate-700/50 flex flex-col justify-center text-center">
+              <div className="text-[10px] text-slate-400 uppercase font-bold tracking-wider mb-1">Budget</div>
+              <div className="text-lg md:text-xl font-mono text-white font-bold truncate">{formatMoney(data.totalLimit)}</div>
+          </div>
+          <div className="bg-slate-800/80 p-3 rounded-xl border border-slate-700/50 flex flex-col justify-center text-center">
+              <div className="text-[10px] text-slate-400 uppercase font-bold tracking-wider mb-1">Utfall</div>
+              <div className="text-lg md:text-xl font-mono text-white font-bold truncate">{formatMoney(data.totalSpent)}</div>
+          </div>
+          <div className={cn("p-3 rounded-xl border flex flex-col justify-center text-center", data.totalRemaining >= 0 ? "bg-emerald-950/30 border-emerald-500/30" : "bg-rose-950/30 border-rose-500/30")}>
+              <div className={cn("text-[10px] uppercase font-bold tracking-wider mb-1", data.totalRemaining >= 0 ? "text-emerald-400" : "text-rose-400")}>Resultat</div>
+              <div className={cn("text-lg md:text-xl font-mono font-bold truncate", data.totalRemaining >= 0 ? "text-emerald-300" : "text-rose-300")}>
+                 {data.totalRemaining > 0 && "+"}{formatMoney(data.totalRemaining)}
+              </div>
+          </div>
+      </div>
+      
+      {/* TOTAL PROGRESS */}
+      <div className="bg-slate-900/50 p-4 rounded-xl border border-slate-700">
+          <div className="flex justify-between items-center mb-2">
+               <span className="text-xs font-bold text-slate-400 uppercase">Totalt nyttjande</span>
+               <span className="text-xs font-mono text-slate-500">{Math.round((data.totalSpent / (data.totalLimit || 1)) * 100)}%</span>
+          </div>
+          <BudgetProgressBar 
+             spent={data.totalSpent} 
+             total={data.totalLimit} 
+          />
+      </div>
+
       {/* PIE CHART */}
-      <div className="bg-surface border border-slate-700 p-4 rounded-2xl h-80">
-        <h3 className="text-sm font-bold text-slate-300 mb-4 uppercase tracking-wider">
-            Utgifter ({format(new Date(selectedMonth), 'MMM', {locale: sv})})
-        </h3>
+      <div className="h-64 relative">
         {pieData.length > 0 ? (
             <ResponsiveContainer width="100%" height="100%">
                 <PieChart>
@@ -103,7 +172,7 @@ export const StatsView: React.FC = () => {
                         ))}
                     </Pie>
                     <Tooltip 
-                        contentStyle={{ backgroundColor: '#1e293b', border: '1px solid #334155', borderRadius: '8px' }}
+                        contentStyle={{ backgroundColor: '#1e293b', border: '1px solid #334155', borderRadius: '8px', color: '#fff' }}
                         itemStyle={{ color: '#fff' }}
                         formatter={(value: number) => formatMoney(value)}
                     />
@@ -112,36 +181,109 @@ export const StatsView: React.FC = () => {
         ) : (
             <div className="flex items-center justify-center h-full text-slate-500 text-sm">Inga utgifter registrerade denna månad.</div>
         )}
-        <div className="flex flex-wrap justify-center gap-3 mt-[-20px] max-h-16 overflow-y-auto no-scrollbar">
-            {pieData.map((d, i) => (
-                <div key={i} className="flex items-center gap-1 text-xs text-slate-400">
-                    <div className="w-2 h-2 rounded-full" style={{ backgroundColor: COLORS[i % COLORS.length] }}></div>
-                    {d.name}
-                </div>
-            ))}
+        <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
+            <div className="text-center opacity-50">
+                <div className="text-xs text-slate-400 uppercase">Totalt</div>
+                <div className="text-xl font-bold text-white">{formatMoney(data.totalSpent)}</div>
+            </div>
         </div>
       </div>
 
-      {/* BAR CHART: Future Savings Load */}
-      {savingsGoals.length > 0 && (
-          <div className="bg-surface border border-slate-700 p-4 rounded-2xl h-80">
-            <h3 className="text-sm font-bold text-slate-300 mb-4 uppercase tracking-wider">Kommande Sparbelastning</h3>
-            <ResponsiveContainer width="100%" height="100%">
-                <BarChart data={projectionData}>
-                    <XAxis dataKey="month" stroke="#64748b" fontSize={12} tickLine={false} axisLine={false} />
-                    <YAxis stroke="#64748b" fontSize={10} tickLine={false} axisLine={false} tickFormatter={(val) => `${val/1000}k`} />
-                    <Tooltip 
-                        cursor={{fill: '#334155', opacity: 0.2}}
-                        contentStyle={{ backgroundColor: '#1e293b', border: '1px solid #334155', borderRadius: '8px' }}
-                        itemStyle={{ color: '#fff' }}
-                        formatter={(value: number) => formatMoney(value)}
-                    />
-                    <Bar dataKey="belopp" fill="#8b5cf6" radius={[4, 4, 0, 0]} />
-                </BarChart>
-            </ResponsiveContainer>
-            <p className="text-xs text-slate-500 mt-2 text-center">Visar hur mycket som måste sparas till era mål de kommande månaderna.</p>
+      {/* BUDGET GROUPS LIST */}
+      <div className="space-y-4">
+          <div className="flex justify-between items-center px-2">
+              <h2 className="text-sm font-bold text-slate-400 uppercase tracking-wider">Budgetgrupper</h2>
           </div>
-      )}
+          
+          {data.groupStats.map(group => {
+              const isExpanded = expandedGroup === group.id;
+              const hasOverspend = group.remaining < 0;
+              const percent = Math.min((group.spent / (group.limit || 1)) * 100, 100);
+              
+              // Only show if budget exists OR money spent
+              // if (group.limit === 0 && group.spent === 0 && !group.isCatchAll) return null;
+
+              return (
+                  <div key={group.id} className={cn("bg-surface border rounded-xl overflow-hidden transition-all duration-300", group.isCatchAll ? "border-dashed border-slate-600" : "border-slate-700")}>
+                      {/* GROUP HEADER */}
+                      <div 
+                        className="p-4 cursor-pointer hover:bg-slate-800/50 transition-colors"
+                        onClick={() => setExpandedGroup(isExpanded ? null : group.id)}
+                      >
+                          <div className="flex justify-between items-center mb-2">
+                              <div className="flex items-center gap-3">
+                                  {isExpanded ? <ChevronDown size={18} className="text-blue-400"/> : <ChevronRight size={18} className="text-slate-500"/>}
+                                  <div>
+                                      <div className="font-bold text-lg text-white flex items-center gap-2">
+                                          <span>{group.icon} {group.name}</span>
+                                          {hasOverspend && <AlertTriangle size={14} className="text-rose-500" />}
+                                      </div>
+                                      {group.isCatchAll && <div className="text-[10px] text-orange-400 uppercase font-bold">Obudgeterat / Övrigt</div>}
+                                  </div>
+                              </div>
+                              
+                              <div className="text-right">
+                                  {/* INLINE EDITING OF LIMIT */}
+                                  {editingGroupId === group.id ? (
+                                      <div onClick={e => e.stopPropagation()} className="flex items-center justify-end gap-1 mb-1">
+                                          <input 
+                                            autoFocus
+                                            type="number"
+                                            className="w-20 bg-slate-950 border border-blue-500 rounded px-2 py-1 text-right text-sm text-white outline-none font-mono"
+                                            value={tempLimit}
+                                            onChange={(e) => setTempLimit(e.target.value)}
+                                            onKeyDown={(e) => e.key === 'Enter' && handleSaveLimit(group)}
+                                          />
+                                          <button onClick={() => handleSaveLimit(group)} className="p-1 bg-blue-600 text-white rounded hover:bg-blue-500"><Check size={14}/></button>
+                                      </div>
+                                  ) : (
+                                      <div className="flex items-center justify-end gap-2 group/edit">
+                                          <div className="text-sm font-mono font-bold text-white">
+                                              {formatMoney(group.spent)}
+                                              <span className="text-slate-500 font-normal text-xs mx-1">/</span>
+                                              <span className="text-slate-400 text-xs">{formatMoney(group.limit)}</span>
+                                          </div>
+                                          <button 
+                                            onClick={(e) => { e.stopPropagation(); handleStartEdit(group); }}
+                                            className="p-1 text-slate-600 hover:text-blue-400 opacity-0 group-hover/edit:opacity-100 transition-opacity"
+                                          >
+                                              <Edit2 size={12} />
+                                          </button>
+                                      </div>
+                                  )}
+                              </div>
+                          </div>
+                          <BudgetProgressBar spent={group.spent} total={group.limit} compact />
+                      </div>
+
+                      {/* BREAKDOWN (Expanded) */}
+                      {isExpanded && (
+                          <div className="bg-slate-900/30 border-t border-slate-700/50 animate-in slide-in-from-top-2">
+                              {/* Subcategories Breakdown */}
+                              {group.breakdown.map(sub => (
+                                  <div key={sub.id} className="p-3 border-b border-slate-700/30 last:border-0 hover:bg-slate-800/30 transition-colors flex justify-between items-center">
+                                      <span className="text-sm text-slate-300">{sub.name}</span>
+                                      <span className="text-sm font-mono text-white">{formatMoney(sub.spent)}</span>
+                                  </div>
+                              ))}
+
+                              {/* Unclassified (if direct match to CatchAll without subcategory) */}
+                              {group.unclassifiedSpent > 0 && (
+                                  <div className="p-3 border-b border-slate-700/30 flex justify-between items-center bg-slate-800/20">
+                                      <span className="text-sm text-slate-400 italic">Ospecificerat / Saknar underkategori</span>
+                                      <span className="text-sm font-mono text-slate-400">{formatMoney(group.unclassifiedSpent)}</span>
+                                  </div>
+                              )}
+                              
+                              {group.breakdown.length === 0 && group.unclassifiedSpent === 0 && (
+                                  <div className="p-4 text-center text-xs text-slate-500 italic">Inga utgifter här än.</div>
+                              )}
+                          </div>
+                      )}
+                  </div>
+              );
+          })}
+      </div>
     </div>
   );
 };

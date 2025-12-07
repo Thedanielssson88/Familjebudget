@@ -1,7 +1,7 @@
 import React, { createContext, useContext, useEffect, useState } from 'react';
-import { Account, AppSettings, Bucket, GlobalState, User, MonthKey, Transaction, ImportRule, MainCategory, SubCategory } from './types';
+import { Account, AppSettings, Bucket, GlobalState, User, MonthKey, Transaction, ImportRule, MainCategory, SubCategory, BudgetGroup, BudgetGroupData } from './types';
 import { format, addMonths, parseISO } from 'date-fns';
-import { getEffectiveBucketData, generateId, isBucketActiveInMonth, calculateFixedBucketCost, calculateDailyBucketCost, calculateGoalBucketCost } from './utils';
+import { getEffectiveBucketData, generateId, isBucketActiveInMonth, calculateFixedBucketCost, calculateDailyBucketCost, calculateGoalBucketCost, getEffectiveBudgetGroupData } from './utils';
 import { z } from 'zod';
 import { db } from './db';
 import { DEFAULT_MAIN_CATEGORIES, DEFAULT_SUB_CATEGORIES } from './constants/defaultCategories';
@@ -71,7 +71,23 @@ const SubCategorySchema = z.object({
   id: z.string(),
   name: z.string(),
   mainCategoryId: z.string(),
-  description: z.string().optional()
+  description: z.string().optional(),
+  budgetGroupId: z.string().optional(),
+  monthlyBudget: z.number().optional()
+});
+
+const BudgetGroupDataSchema = z.object({
+    limit: z.number(),
+    isExplicitlyDeleted: z.boolean().optional()
+});
+
+const BudgetGroupSchema = z.object({
+    id: z.string(),
+    name: z.string(),
+    // monthlyLimit: z.number(), // REMOVED
+    monthlyData: z.record(z.string(), BudgetGroupDataSchema).optional().default({}),
+    isCatchAll: z.boolean().optional(),
+    icon: z.string().optional()
 });
 
 const TransactionSchema = z.object({
@@ -80,6 +96,7 @@ const TransactionSchema = z.object({
     date: z.string(),
     amount: z.number(),
     description: z.string(),
+    type: z.enum(['EXPENSE', 'TRANSFER', 'INCOME']).optional(),
     bucketId: z.string().optional(),
     categoryMainId: z.string().optional(),
     categorySubId: z.string().optional(),
@@ -90,6 +107,7 @@ const TransactionSchema = z.object({
 const ImportRuleSchema = z.object({
     id: z.string(),
     keyword: z.string(),
+    targetType: z.enum(['EXPENSE', 'TRANSFER', 'INCOME']).optional(),
     targetBucketId: z.string().optional(),
     targetCategoryMainId: z.string().optional(),
     targetCategorySubId: z.string().optional(),
@@ -104,7 +122,8 @@ const GlobalStateSchema = z.object({
   transactions: z.array(TransactionSchema).optional().default([]),
   importRules: z.array(ImportRuleSchema).optional().default([]),
   mainCategories: z.array(MainCategorySchema).optional().default([]),
-  subCategories: z.array(SubCategorySchema).optional().default([])
+  subCategories: z.array(SubCategorySchema).optional().default([]),
+  budgetGroups: z.array(BudgetGroupSchema).optional().default([])
 });
 
 // --- END SCHEMAS ---
@@ -128,11 +147,17 @@ interface AppContextType extends GlobalState {
   addImportRule: (rule: ImportRule) => Promise<void>;
   deleteTransaction: (id: string) => Promise<void>;
   // Category Methods
-  addMainCategory: (name: string) => Promise<void>;
+  addMainCategory: (name: string) => Promise<string>;
   deleteMainCategory: (id: string) => Promise<void>;
-  addSubCategory: (mainCatId: string, name: string) => Promise<void>;
+  addSubCategory: (mainCatId: string, name: string) => Promise<string>;
+  updateSubCategory: (subCat: SubCategory) => Promise<void>;
   deleteSubCategory: (id: string) => Promise<void>;
   resetCategoriesToDefault: () => Promise<void>;
+  // Budget Group Methods
+  addBudgetGroup: (name: string, limit: number, icon: string) => Promise<void>;
+  updateBudgetGroup: (group: BudgetGroup) => Promise<void>;
+  deleteBudgetGroup: (id: string, month?: MonthKey, scope?: 'THIS_MONTH' | 'THIS_AND_FUTURE' | 'ALL') => Promise<void>;
+  
   // Backup features
   getExportData: () => Promise<string>; 
   importData: (json: string) => Promise<boolean>; 
@@ -140,7 +165,7 @@ interface AppContextType extends GlobalState {
 
 const AppContext = createContext<AppContextType | undefined>(undefined);
 
-const STORAGE_KEY = 'familyflow_db_v3'; 
+const STORAGE_KEY = 'familyflow_db_v5'; 
 const defaultSettings: AppSettings = { payday: 25 };
 
 export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
@@ -154,6 +179,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const [importRules, setImportRules] = useState<ImportRule[]>([]);
   const [mainCategories, setMainCategories] = useState<MainCategory[]>([]);
   const [subCategories, setSubCategories] = useState<SubCategory[]>([]);
+  const [budgetGroups, setBudgetGroups] = useState<BudgetGroup[]>([]);
 
   // Initial Load & Migration Logic
   useEffect(() => {
@@ -171,7 +197,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
                 if (result.success) {
                     const data = result.data;
-                    await (db as any).transaction('rw', db.users, db.accounts, db.buckets, db.settings, db.transactions, db.importRules, db.mainCategories, db.subCategories, async () => {
+                    await (db as any).transaction('rw', db.users, db.accounts, db.buckets, db.settings, db.transactions, db.importRules, db.mainCategories, db.subCategories, db.budgetGroups, async () => {
                         await db.users.bulkAdd(data.users);
                         await db.accounts.bulkAdd(data.accounts);
                         await db.buckets.bulkAdd(data.buckets);
@@ -180,6 +206,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
                         if (data.importRules) await db.importRules.bulkAdd(data.importRules);
                         if (data.mainCategories) await db.mainCategories.bulkAdd(data.mainCategories);
                         if (data.subCategories) await db.subCategories.bulkAdd(data.subCategories);
+                        if (data.budgetGroups) await db.budgetGroups.bulkAdd(data.budgetGroups);
                     });
                 }
             } else {
@@ -213,7 +240,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
                     },
                 ];
 
-                await (db as any).transaction('rw', db.users, db.accounts, db.buckets, db.settings, db.mainCategories, db.subCategories, async () => {
+                await (db as any).transaction('rw', db.users, db.accounts, db.buckets, db.settings, db.mainCategories, db.subCategories, db.budgetGroups, async () => {
                     await db.users.bulkAdd(demoUsers);
                     await db.accounts.bulkAdd(demoAccounts);
                     await db.buckets.bulkAdd(demoBuckets);
@@ -238,6 +265,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         const dbRules = await db.importRules.toArray();
         const dbMainCats = await db.mainCategories.toArray();
         const dbSubCats = await db.subCategories.toArray();
+        const dbGroups = await db.budgetGroups.toArray();
 
         setUsers(dbUsers);
         setAccounts(dbAccounts);
@@ -255,6 +283,41 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
              setMainCategories(dbMainCats);
              setSubCategories(dbSubCats);
         }
+
+        // MIGRATION: Ensure at least one "Catch All" Budget Group exists
+        // MIGRATION 2: Ensure all budget groups have monthlyData structure
+        let loadedGroups = dbGroups;
+        
+        // Check for old structure (monthlyLimit instead of monthlyData)
+        const needsMigration = dbGroups.some((g: any) => typeof g.monthlyLimit === 'number' && !g.monthlyData);
+        if (needsMigration) {
+            console.log("Migrating Budget Groups to Monthly Data Structure...");
+            const migratedGroups = dbGroups.map((g: any) => {
+                if (g.monthlyData) return g;
+                // Create a starting point for monthly data (using current month or a past default)
+                // We use a generic start key like "2023-01" to ensure inheritance works for now
+                return {
+                    ...g,
+                    monthlyData: {
+                        "2023-01": { limit: g.monthlyLimit || 0, isExplicitlyDeleted: false }
+                    },
+                    monthlyLimit: undefined // remove old field
+                };
+            });
+            await db.budgetGroups.bulkPut(migratedGroups);
+            loadedGroups = migratedGroups;
+        }
+
+        if (loadedGroups.length === 0) {
+            const defaultGroups: BudgetGroup[] = [
+                { id: generateId(), name: 'Hushåll & Drift', monthlyData: { "2023-01": { limit: 15000 } }, icon: '🏠' },
+                { id: generateId(), name: 'Nöje & Lyx', monthlyData: { "2023-01": { limit: 5000 } }, icon: '🎉' },
+                { id: generateId(), name: 'Övrigt / Obudgeterat', monthlyData: { "2023-01": { limit: 0 } }, isCatchAll: true, icon: '❓' }
+            ];
+            await db.budgetGroups.bulkAdd(defaultGroups);
+            loadedGroups = defaultGroups;
+        }
+        setBudgetGroups(loadedGroups);
         
         // MIGRATION: Map old categoryId to bucketId if needed
         const migratedTransactions = dbTransactions.map(t => {
@@ -405,48 +468,142 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     await db.buckets.put(updatedBucket);
     setBuckets(prev => prev.map(b => b.id === id ? updatedBucket : b));
   };
-
+  
   const copyFromNextMonth = async (currentMonth: MonthKey) => {
       const nextMonth = format(addMonths(parseISO(`${currentMonth}-01`), 1), 'yyyy-MM');
       
+      const newBuckets = [...buckets];
       const updates: Bucket[] = [];
-      const bucketsToUpdate = buckets.filter(b => 
-          b.type !== 'GOAL' && 
-          b.paymentSource !== 'BALANCE'
-      );
+      
+      for (const bucket of newBuckets) {
+          // If current month has data, skip (safety)
+          if (bucket.monthlyData[currentMonth]) continue;
 
-      for (const bucket of bucketsToUpdate) {
-          // Check if bucket is active in next month
-          // Note: isBucketActiveInMonth checks for valid data (inherited or explicit)
-          if (isBucketActiveInMonth(bucket, nextMonth)) {
-              const { data } = getEffectiveBucketData(bucket, nextMonth);
-              if (data) {
-                  updates.push({
-                      ...bucket,
-                      monthlyData: {
-                          ...bucket.monthlyData,
-                          [currentMonth]: { ...data, isExplicitlyDeleted: false }
-                      }
-                  });
-              }
+          // Check next month data
+          const nextData = bucket.monthlyData[nextMonth];
+          if (nextData && !nextData.isExplicitlyDeleted) {
+              bucket.monthlyData[currentMonth] = { ...nextData };
+              updates.push(bucket);
           }
       }
 
       if (updates.length > 0) {
           await db.buckets.bulkPut(updates);
-          setBuckets(prev => prev.map(b => {
-              const updated = updates.find(u => u.id === b.id);
-              return updated || b;
-          }));
+          setBuckets(newBuckets);
       }
   };
 
-  const setPayday = async (day: number) => {
-      const newSettings = { ...settings, payday: day };
-      await db.settings.put({ ...newSettings, id: 1 });
-      setSettings(newSettings);
+  // --- CATEGORY ACTIONS ---
+  const addMainCategory = async (name: string): Promise<string> => {
+      const id = generateId();
+      const newCat: MainCategory = { id, name };
+      await db.mainCategories.add(newCat);
+      setMainCategories(prev => [...prev, newCat]);
+      return id;
+  };
+  
+  const deleteMainCategory = async (id: string) => {
+      await db.mainCategories.delete(id);
+      // Delete subs
+      const subsToDelete = subCategories.filter(s => s.mainCategoryId === id).map(s => s.id);
+      if (subsToDelete.length > 0) {
+          await db.subCategories.bulkDelete(subsToDelete);
+      }
+      setMainCategories(prev => prev.filter(c => c.id !== id));
+      setSubCategories(prev => prev.filter(s => s.mainCategoryId !== id));
   };
 
+  const addSubCategory = async (mainCatId: string, name: string): Promise<string> => {
+      const id = generateId();
+      const newSub: SubCategory = { id, mainCategoryId: mainCatId, name };
+      await db.subCategories.add(newSub);
+      setSubCategories(prev => [...prev, newSub]);
+      return id;
+  };
+
+  const updateSubCategory = async (subCat: SubCategory) => {
+      await db.subCategories.put(subCat);
+      setSubCategories(prev => prev.map(s => s.id === subCat.id ? subCat : s));
+  };
+
+  const deleteSubCategory = async (id: string) => {
+      await db.subCategories.delete(id);
+      setSubCategories(prev => prev.filter(s => s.id !== id));
+  };
+
+  const resetCategoriesToDefault = async () => {
+      await db.mainCategories.clear();
+      await db.subCategories.clear();
+      await db.mainCategories.bulkAdd(DEFAULT_MAIN_CATEGORIES);
+      await db.subCategories.bulkAdd(DEFAULT_SUB_CATEGORIES);
+      setMainCategories(DEFAULT_MAIN_CATEGORIES);
+      setSubCategories(DEFAULT_SUB_CATEGORIES);
+  };
+
+  // --- BUDGET GROUP ACTIONS ---
+  
+  const addBudgetGroup = async (name: string, limit: number, icon: string) => {
+      const newGroup: BudgetGroup = { 
+          id: generateId(), 
+          name, 
+          icon,
+          // Set initial data for the selected month (or far past to propagate)
+          // We use a safe past date to ensure it appears in current month via inheritance if we just created it.
+          monthlyData: {
+             [selectedMonth]: { limit, isExplicitlyDeleted: false }
+          }
+      };
+      await db.budgetGroups.add(newGroup);
+      setBudgetGroups(prev => [...prev, newGroup]);
+  };
+
+  const updateBudgetGroup = async (group: BudgetGroup) => {
+      await db.budgetGroups.put(group);
+      setBudgetGroups(prev => prev.map(g => g.id === group.id ? group : g));
+  };
+
+  const deleteBudgetGroup = async (id: string, month: MonthKey = selectedMonth, scope: 'THIS_MONTH' | 'THIS_AND_FUTURE' | 'ALL' = 'ALL') => {
+      if (scope === 'ALL') {
+          await db.budgetGroups.delete(id);
+          setBudgetGroups(prev => prev.filter(g => g.id !== id));
+          
+          // Unlink subcategories
+          const subsToUpdate = subCategories.filter(s => s.budgetGroupId === id);
+          if (subsToUpdate.length > 0) {
+              const updatedSubs = subsToUpdate.map(s => ({ ...s, budgetGroupId: undefined }));
+              await db.subCategories.bulkPut(updatedSubs);
+              setSubCategories(prev => prev.map(s => s.budgetGroupId === id ? { ...s, budgetGroupId: undefined } : s));
+          }
+          return;
+      }
+
+      const group = budgetGroups.find(g => g.id === id);
+      if (!group) return;
+
+      const newMonthlyData = { ...group.monthlyData };
+      const { data: effectiveData } = getEffectiveBudgetGroupData(group, month);
+      const currentData = effectiveData || { limit: 0 };
+
+      if (scope === 'THIS_MONTH') {
+           newMonthlyData[month] = { ...currentData, limit: 0, isExplicitlyDeleted: true };
+           const nextMonth = format(addMonths(parseISO(`${month}-01`), 1), 'yyyy-MM');
+           if (!newMonthlyData[nextMonth]) {
+               newMonthlyData[nextMonth] = { ...currentData, isExplicitlyDeleted: false };
+           }
+      } else if (scope === 'THIS_AND_FUTURE') {
+           newMonthlyData[month] = { ...currentData, limit: 0, isExplicitlyDeleted: true };
+           Object.keys(newMonthlyData).forEach(key => {
+               if (key > month) {
+                   newMonthlyData[key] = { ...newMonthlyData[key], limit: 0, isExplicitlyDeleted: true };
+               }
+           });
+      }
+
+      const updatedGroup = { ...group, monthlyData: newMonthlyData };
+      await db.budgetGroups.put(updatedGroup);
+      setBudgetGroups(prev => prev.map(g => g.id === id ? updatedGroup : g));
+  };
+  
   // --- TRANSACTION ACTIONS ---
   
   const addTransactions = async (txs: Transaction[]) => {
@@ -458,7 +615,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       await db.transactions.put(tx);
       setTransactions(prev => prev.map(t => t.id === tx.id ? tx : t));
   };
-
+  
   const deleteTransaction = async (id: string) => {
       await db.transactions.delete(id);
       setTransactions(prev => prev.filter(t => t.id !== id));
@@ -468,137 +625,69 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       await db.importRules.add(rule);
       setImportRules(prev => [...prev, rule]);
   };
-  
-  // --- CATEGORY ACTIONS ---
 
-  const addMainCategory = async (name: string) => {
-      const newCat: MainCategory = { id: generateId(), name };
-      await db.mainCategories.add(newCat);
-      setMainCategories(prev => [...prev, newCat]);
-  };
-
-  const deleteMainCategory = async (id: string) => {
-      // Also delete subcategories
-      const subsToDelete = subCategories.filter(s => s.mainCategoryId === id).map(s => s.id);
-      
-      await (db as any).transaction('rw', db.mainCategories, db.subCategories, async () => {
-          await db.mainCategories.delete(id);
-          await db.subCategories.bulkDelete(subsToDelete);
-      });
-      
-      setMainCategories(prev => prev.filter(c => c.id !== id));
-      setSubCategories(prev => prev.filter(s => s.mainCategoryId !== id));
-  };
-
-  const addSubCategory = async (mainCategoryId: string, name: string) => {
-      const newSub: SubCategory = { id: generateId(), mainCategoryId, name };
-      await db.subCategories.add(newSub);
-      setSubCategories(prev => [...prev, newSub]);
-  };
-
-  const deleteSubCategory = async (id: string) => {
-      await db.subCategories.delete(id);
-      setSubCategories(prev => prev.filter(s => s.id !== id));
-  };
-  
-  const resetCategoriesToDefault = async () => {
-      await (db as any).transaction('rw', db.mainCategories, db.subCategories, async () => {
-          await db.mainCategories.clear();
-          await db.subCategories.clear();
-          await db.mainCategories.bulkAdd(DEFAULT_MAIN_CATEGORIES);
-          await db.subCategories.bulkAdd(DEFAULT_SUB_CATEGORIES);
-      });
-      setMainCategories(DEFAULT_MAIN_CATEGORIES);
-      setSubCategories(DEFAULT_SUB_CATEGORIES);
-  };
-
-
-  // --- BACKUP FUNCTIONS ---
+  // --- BACKUP ---
   const getExportData = async () => {
-      const dbUsers = await db.users.toArray();
-      const dbAccounts = await db.accounts.toArray();
-      const dbBuckets = await db.buckets.toArray();
-      const dbSettings = await db.settings.get(1);
-      const dbTxs = await db.transactions.toArray();
-      const dbRules = await db.importRules.toArray();
-      const dbMain = await db.mainCategories.toArray();
-      const dbSub = await db.subCategories.toArray();
-      
-      const { id, ...cleanSettings } = dbSettings || defaultSettings;
-
-      const state = { 
-          users: dbUsers, 
-          accounts: dbAccounts, 
-          buckets: dbBuckets, 
-          settings: cleanSettings,
-          transactions: dbTxs,
-          importRules: dbRules,
-          mainCategories: dbMain,
-          subCategories: dbSub
+      const data = {
+          users, accounts, buckets, settings, transactions, importRules, mainCategories, subCategories, budgetGroups
       };
-      return JSON.stringify(state);
+      return JSON.stringify(data, null, 2);
   };
 
   const importData = async (json: string): Promise<boolean> => {
       try {
-          const raw = JSON.parse(json);
-          const result = GlobalStateSchema.safeParse(raw);
-          
+          const data = JSON.parse(json);
+          const result = GlobalStateSchema.safeParse(data);
           if (!result.success) {
-              console.error("Backup file validation failed", result.error);
-              alert("Filen är trasig eller har fel format.");
+              console.error("Invalid backup format", result.error);
               return false;
           }
           
-          const data = result.data;
-          
-          await (db as any).transaction('rw', db.users, db.accounts, db.buckets, db.settings, db.transactions, db.importRules, db.mainCategories, db.subCategories, async () => {
-             await db.users.clear();
-             await db.accounts.clear();
-             await db.buckets.clear();
-             await db.settings.clear();
-             await db.transactions.clear();
-             await db.importRules.clear();
-             await db.mainCategories.clear();
-             await db.subCategories.clear();
-
-             await db.users.bulkAdd(data.users);
-             await db.accounts.bulkAdd(data.accounts);
-             await db.buckets.bulkAdd(data.buckets);
-             if (data.settings) await db.settings.put({ ...data.settings, id: 1 });
-             if (data.transactions) await db.transactions.bulkAdd(data.transactions);
-             if (data.importRules) await db.importRules.bulkAdd(data.importRules);
-             if (data.mainCategories) await db.mainCategories.bulkAdd(data.mainCategories);
-             if (data.subCategories) await db.subCategories.bulkAdd(data.subCategories);
+          await (db as any).transaction('rw', db.users, db.accounts, db.buckets, db.settings, db.transactions, db.importRules, db.mainCategories, db.subCategories, db.budgetGroups, async () => {
+              await db.users.clear(); await db.users.bulkAdd(data.users);
+              await db.accounts.clear(); await db.accounts.bulkAdd(data.accounts);
+              await db.buckets.clear(); await db.buckets.bulkAdd(data.buckets);
+              await db.settings.clear(); await db.settings.put({ ...data.settings, id: 1 });
+              
+              if (data.transactions) { await db.transactions.clear(); await db.transactions.bulkAdd(data.transactions); }
+              if (data.importRules) { await db.importRules.clear(); await db.importRules.bulkAdd(data.importRules); }
+              if (data.mainCategories) { await db.mainCategories.clear(); await db.mainCategories.bulkAdd(data.mainCategories); }
+              if (data.subCategories) { await db.subCategories.clear(); await db.subCategories.bulkAdd(data.subCategories); }
+              if (data.budgetGroups) { await db.budgetGroups.clear(); await db.budgetGroups.bulkAdd(data.budgetGroups); }
           });
-          
-          setUsers(data.users);
-          setAccounts(data.accounts);
-          setBuckets(data.buckets);
-          if (data.settings) setSettings(data.settings);
-          setTransactions(data.transactions || []);
-          setImportRules(data.importRules || []);
-          setMainCategories(data.mainCategories || []);
-          setSubCategories(data.subCategories || []);
           
           return true;
       } catch (e) {
-          console.error("Failed to import data", e);
-          alert("Kunde inte läsa filen (JSON Parse Error).");
+          console.error("Import failed", e);
           return false;
       }
   };
 
-  if (!isLoaded) return <div className="min-h-screen bg-background flex items-center justify-center text-white">Laddar FamilyFlow från databas...</div>;
+  const providerValue: AppContextType = {
+    users, addUser, updateUserIncome, updateUserName,
+    accounts, addAccount,
+    buckets, addBucket, updateBucket, deleteBucket, confirmBucketAmount, archiveBucket, copyFromNextMonth,
+    settings, setPayday: (day) => {
+        const newSettings = { ...settings, payday: day };
+        setSettings(newSettings);
+        db.settings.put({ ...newSettings, id: 1 });
+    },
+    selectedMonth, setMonth: setSelectedMonth,
+    transactions, addTransactions, updateTransaction, deleteTransaction,
+    importRules, addImportRule,
+    // Categories
+    mainCategories, addMainCategory, deleteMainCategory,
+    subCategories, addSubCategory, updateSubCategory, deleteSubCategory, resetCategoriesToDefault,
+    // Budget Groups
+    budgetGroups, addBudgetGroup, updateBudgetGroup, deleteBudgetGroup,
+    
+    getExportData, importData
+  };
+
+  if (!isLoaded) return <div className="min-h-screen bg-slate-900 flex items-center justify-center text-white">Laddar din ekonomi...</div>;
 
   return (
-    <AppContext.Provider value={{
-      users, accounts, buckets, settings, selectedMonth, transactions, importRules, mainCategories, subCategories,
-      addUser, updateUserIncome, updateUserName, addAccount, addBucket, updateBucket, deleteBucket, archiveBucket, confirmBucketAmount, copyFromNextMonth, setMonth: setSelectedMonth, setPayday,
-      addTransactions, updateTransaction, addImportRule, deleteTransaction, 
-      addMainCategory, deleteMainCategory, addSubCategory, deleteSubCategory, resetCategoriesToDefault,
-      getExportData, importData
-    }}>
+    <AppContext.Provider value={providerValue}>
       {children}
     </AppContext.Provider>
   );
@@ -606,6 +695,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
 export const useApp = () => {
   const context = useContext(AppContext);
-  if (!context) throw new Error("useApp must be used within AppProvider");
+  if (context === undefined) {
+    throw new Error('useApp must be used within an AppProvider');
+  }
   return context;
 };

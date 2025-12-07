@@ -14,7 +14,6 @@ export const categorizeTransactionsWithAi = async (
 
   try {
       // Dynamically import the SDK only when needed to prevent load errors if network fails
-      // Handle both named export and default export scenarios depending on CDN
       const module = await import("@google/genai");
       const GoogleGenAI = module.GoogleGenAI || (module.default && module.default.GoogleGenAI);
 
@@ -38,18 +37,23 @@ export const categorizeTransactionsWithAi = async (
       const transactionList = unknown.map(t => `- ID: "${t.id}", Text: "${t.description}", Belopp: ${t.amount}`).join("\n");
 
       const prompt = `
-        Jag har en lista med banktransaktioner. Jag vill att du mappar varje transaktion till:
-        1. En Budgetpost (Bucket) - Varifrån pengarna tas.
-        2. En Huvudkategori (MainCategory) - Vad det är för typ av utgift.
-        3. En Underkategori (SubCategory) - Specifikt vad det är.
+        Jag har en lista med banktransaktioner. Jag vill att du klassificerar varje transaktion enligt följande logik:
 
-        BUDGETPOSTER (Buckets):
+        1. ÄR DETTA EN ÖVERFÖRING MELLAN KONTON (Funding)?
+           - T.ex. "Överföring till Matkonto", "Sparande", "Buffert".
+           - Om JA: Välj en matchande Budgetpost (Bucket) ID. Sätt Main/Sub Category till null.
+        
+        2. ÄR DETTA EN UTGIFT/KONSUMTION?
+           - T.ex. "ICA Maxi", "Circle K", "Netflix", "Hyra".
+           - Om JA: Välj en matchande Huvudkategori och Underkategori ID. Sätt Bucket ID till null.
+
+        BUDGETPOSTER (Endast för överföringar):
         ${bucketsList}
         
-        HUVUDKATEGORIER:
+        KATEGORIER (Endast för utgifter):
         ${mainCatsList}
         
-        UNDERKATEGORIER:
+        UNDERKATEGORIER (Endast för utgifter):
         ${subCatsList}
 
         TRANSAKTIONER:
@@ -57,14 +61,13 @@ export const categorizeTransactionsWithAi = async (
 
         INSTRUKTIONER:
         1. Analysera texten i varje transaktion.
-        2. Välj bäst passande IDn.
-        3. Om du är osäker, svara med null för det fältet.
-        4. Svara ENDAST med ett JSON-objekt där nyckeln är Transaktions-ID och värdet är ett objekt { bucketId, mainCatId, subCatId }.
+        2. Avgör om det är TRANSFER (Bucket) eller EXPENSE (Category).
+        3. Svara ENDAST med ett JSON-objekt där nyckeln är Transaktions-ID och värdet är ett objekt { bucketId, mainCatId, subCatId }.
         
         Exempel:
         {
-          "tx_1": { "bucketId": "b1", "mainCatId": "mc1", "subCatId": "sc1" },
-          "tx_2": { "bucketId": null, "mainCatId": "mc2", "subCatId": null }
+          "tx_1": { "bucketId": "b1", "mainCatId": null, "subCatId": null },  // Överföring
+          "tx_2": { "bucketId": null, "mainCatId": "mc2", "subCatId": "sc1" } // Utgift
         }
       `;
 

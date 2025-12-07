@@ -4,7 +4,7 @@ import { useApp } from '../store';
 import { Bucket, BucketData } from '../types';
 import { calculateDailyBucketCost, calculateFixedBucketCost, calculateGoalBucketCost, formatMoney, generateId, getBudgetInterval, isBucketActiveInMonth, getEffectiveBucketData } from '../utils';
 import { Card, Button, Input, Modal, cn } from '../components/components';
-import { Plus, Trash2, Calendar, Target, Repeat, Wallet, PiggyBank, CreditCard, Image as ImageIcon, X, Check, ChevronDown, ChevronUp, Settings, Copy } from 'lucide-react';
+import { Plus, Trash2, Calendar, Target, Repeat, Wallet, PiggyBank, CreditCard, Image as ImageIcon, X, Check, ChevronDown, ChevronUp, Settings, Copy, ArrowRightLeft } from 'lucide-react';
 import { format, addMonths, parseISO, differenceInMonths } from 'date-fns';
 import { sv } from 'date-fns/locale';
 import { useBudgetActuals } from '../hooks/useBudgetActuals';
@@ -289,8 +289,13 @@ export const BudgetView: React.FC = () => {
   return (
     <div className="space-y-8 pb-24 animate-in slide-in-from-right duration-300">
       <header>
-        <h1 className="text-3xl font-bold text-transparent bg-clip-text bg-gradient-to-r from-rose-400 to-orange-400">Budget & Utgifter</h1>
-        <p className="text-slate-400">Planera utgifterna för {format(new Date(selectedMonth), 'MMMM', {locale: sv})}.</p>
+        <div className="flex items-center gap-3 mb-2">
+            <div className="bg-gradient-to-br from-rose-500 to-orange-500 p-2 rounded-xl text-white">
+                <ArrowRightLeft className="w-6 h-6" />
+            </div>
+            <h1 className="text-3xl font-bold text-transparent bg-clip-text bg-gradient-to-r from-rose-400 to-orange-400">Överföringar</h1>
+        </div>
+        <p className="text-slate-400">Dina fasta överföringar vid lön (Vattenfall).</p>
         
         {/* COPY BUDGET BUTTON (If current is empty but next has data) */}
         {isCurrentMonthEmpty && nextMonthHasData && (
@@ -326,16 +331,16 @@ export const BudgetView: React.FC = () => {
                         <span>{account.icon}</span> {account.name}
                     </h2>
                     <div className="text-right">
-                        <div className="text-[10px] uppercase font-bold text-slate-500 tracking-wider">Planerat</div>
+                        <div className="text-[10px] uppercase font-bold text-slate-500 tracking-wider">Planerad Överföring</div>
                         <div className="text-lg font-mono font-bold text-white leading-none">{formatMoney(accountTotal)}</div>
                     </div>
                 </div>
 
-                {/* Account Level Progress Bar */}
+                {/* Account Level Progress Bar - Renamed Label to imply "Moved" */}
                 <BudgetProgressBar 
                     spent={accountSpent} 
                     total={accountTotal} 
-                    label={`Kvar: ${formatMoney(accountRemaining)}`}
+                    label={`Flyttat till konto / Sparat`}
                     className="mt-1"
                 />
             </div>
@@ -416,7 +421,7 @@ export const BudgetView: React.FC = () => {
               })}
               
               <Button variant="ghost" className="border-dashed border border-slate-700 text-slate-500 hover:text-white" onClick={() => openModal(undefined, account.id)}>
-                <Plus className="w-5 h-5" /> Lägg till utgift i {account.name}
+                <Plus className="w-5 h-5" /> Lägg till post i {account.name}
               </Button>
             </div>
           </div>
@@ -452,7 +457,7 @@ export const BudgetView: React.FC = () => {
       </Modal>
 
       {/* MODAL FOR EDITING BUCKET */}
-      <Modal isOpen={isModalOpen} onClose={() => setIsModalOpen(false)} title={editingBucket?.id && buckets.find(b => b.id === editingBucket.id) ? (editingBucket?.type === 'GOAL' ? editingBucket.name : 'Redigera Utgift') : 'Ny Utgift'}>
+      <Modal isOpen={isModalOpen} onClose={() => setIsModalOpen(false)} title={editingBucket?.id && buckets.find(b => b.id === editingBucket.id) ? (editingBucket?.type === 'GOAL' ? editingBucket.name : 'Redigera Post') : 'Ny Post'}>
         {editingBucket && (
           <div className="space-y-6">
             
@@ -464,7 +469,7 @@ export const BudgetView: React.FC = () => {
                     {/* PRIMARY: AMOUNT INPUT */}
                     <div className="bg-slate-800/50 p-4 rounded-2xl border border-slate-700 shadow-inner">
                         <label className="text-xs font-bold text-slate-400 uppercase tracking-wider block mb-2 text-center">
-                            {editingBucket.type === 'DAILY' ? 'Daglig Kostnad' : 'Kostnad denna månad'}
+                            {editingBucket.type === 'DAILY' ? 'Daglig Kostnad' : 'Belopp denna månad'}
                         </label>
                         <div className="flex items-center justify-center gap-2">
                             <input 
@@ -524,7 +529,7 @@ export const BudgetView: React.FC = () => {
                             onClick={() => setShowRegularDetails(!showRegularDetails)}
                             className="flex items-center justify-between w-full p-2 text-sm text-slate-400 hover:text-white transition-colors"
                         >
-                            <span className="flex items-center gap-2"><Settings className="w-4 h-4" /> Fler inställningar (Namn, Typ, Konto)</span>
+                            <span className="flex items-center gap-2"><Settings className="w-4 h-4" /> Inställningar (Namn, Typ, Konto)</span>
                             {showRegularDetails ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
                         </button>
 
