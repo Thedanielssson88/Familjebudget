@@ -5,7 +5,7 @@ import { Transaction, ImportRule, Bucket, MainCategory, SubCategory, AppSettings
 import { parseBankFile, runImportPipeline } from '../services/importService';
 import { categorizeTransactionsWithAi } from '../services/aiService';
 import { cn, Button, Card, Modal, Input } from '../components/components';
-import { Upload, Check, Wand2, Save, Trash2, Loader2, AlertTriangle, Zap, Clock, ArrowRightLeft, ShoppingCart, ArrowDownLeft, Sparkles, CheckCircle, Target, LayoutList, GalleryHorizontalEnd, ChevronLeft, ChevronRight, Search, Filter, Link2, CalendarClock, PlusCircle, CheckCircle2, Gavel, Edit2, FileText, X, Plus, XCircle, Smartphone, LayoutGrid } from 'lucide-react';
+import { Upload, Check, Wand2, Save, Trash2, Loader2, AlertTriangle, Zap, Clock, ArrowRightLeft, ShoppingCart, ArrowDownLeft, Sparkles, CheckCircle, Target, LayoutList, GalleryHorizontalEnd, ChevronLeft, ChevronRight, Search, Filter, Link2, CalendarClock, PlusCircle, CheckCircle2, Gavel, Edit2, FileText, X, Plus, XCircle, Smartphone, LayoutGrid, Square, CheckSquare, Layers } from 'lucide-react';
 import { formatMoney, generateId } from '../utils';
 import { useTransferMatching } from '../hooks/useTransferMatching';
 import { useSubscriptionDetection } from '../hooks/useSubscriptionDetection';
@@ -466,6 +466,16 @@ export const TransactionsView: React.FC = () => {
     const [ruleMatchType, setRuleMatchType] = useState<'contains' | 'exact' | 'starts_with'>('contains');
     const [ruleSign, setRuleSign] = useState<'positive' | 'negative' | undefined>(undefined);
 
+    // History Bulk Selection State
+    const [selectedHistoryIds, setSelectedHistoryIds] = useState<Set<string>>(new Set());
+    const [isBulkEditOpen, setIsBulkEditOpen] = useState(false);
+    
+    // Bulk Edit Form State
+    const [bulkTargetType, setBulkTargetType] = useState<'EXPENSE' | 'TRANSFER' | 'INCOME' | undefined>(undefined);
+    const [bulkBucketId, setBulkBucketId] = useState('');
+    const [bulkMainCatId, setBulkMainCatId] = useState('');
+    const [bulkSubCatId, setBulkSubCatId] = useState('');
+
     const fileInputRef = useRef<HTMLInputElement>(null);
 
     // Filtered transaction list for "Import" tab
@@ -487,6 +497,74 @@ export const TransactionsView: React.FC = () => {
             .sort((a, b) => b.date.localeCompare(a.date))
             .slice(0, 100); // Show last 100 (after filter)
     }, [transactions, historySearch, historyAccountFilter]);
+
+    // History Selection Logic
+    const toggleHistorySelection = (id: string) => {
+        const next = new Set(selectedHistoryIds);
+        if (next.has(id)) next.delete(id); else next.add(id);
+        setSelectedHistoryIds(next);
+    };
+
+    const selectAllHistory = () => {
+        if (selectedHistoryIds.size === historyTransactions.length) {
+            setSelectedHistoryIds(new Set());
+        } else {
+            setSelectedHistoryIds(new Set(historyTransactions.map(t => t.id)));
+        }
+    };
+
+    const selectHistoryByType = (type: 'EXPENSE' | 'TRANSFER' | 'INCOME') => {
+        const ids = historyTransactions.filter(t => t.type === type).map(t => t.id);
+        setSelectedHistoryIds(new Set(ids));
+    };
+
+    const handleBulkEdit = () => {
+        // Reset form
+        setBulkTargetType(undefined);
+        setBulkBucketId('');
+        setBulkMainCatId('');
+        setBulkSubCatId('');
+        setIsBulkEditOpen(true);
+    };
+
+    const handleBulkSave = async () => {
+        if (!bulkTargetType) return;
+        
+        const updates: Promise<void>[] = [];
+        const ids = Array.from(selectedHistoryIds);
+
+        for (const id of ids) {
+            const tx = transactions.find(t => t.id === id);
+            if (!tx) continue;
+
+            // Security check: Don't allow negative income
+            if (bulkTargetType === 'INCOME' && tx.amount < 0) continue;
+
+            const updateData: Partial<Transaction> = {
+                type: bulkTargetType
+            };
+
+            if (bulkTargetType === 'TRANSFER') {
+                updateData.bucketId = bulkBucketId || undefined;
+                updateData.categoryMainId = undefined;
+                updateData.categorySubId = undefined;
+            } else if (bulkTargetType === 'EXPENSE') {
+                updateData.bucketId = undefined;
+                updateData.categoryMainId = bulkMainCatId || undefined;
+                updateData.categorySubId = bulkSubCatId || undefined;
+            } else if (bulkTargetType === 'INCOME') {
+                updateData.bucketId = undefined;
+                updateData.categoryMainId = bulkMainCatId || undefined;
+                updateData.categorySubId = undefined;
+            }
+
+            updates.push(updateTransaction({ ...tx, ...updateData }));
+        }
+
+        await Promise.all(updates);
+        setIsBulkEditOpen(false);
+        setSelectedHistoryIds(new Set());
+    };
 
     const transferMatches = useTransferMatching(transactions);
     const subscriptionsRaw = useSubscriptionDetection(transactions);
@@ -943,21 +1021,99 @@ export const TransactionsView: React.FC = () => {
                          </div>
                      </div>
 
+                     {/* Bulk Selection Actions */}
+                     <div className="bg-slate-800/80 p-2 rounded-lg border border-slate-700 flex flex-wrap gap-2 items-center text-xs">
+                         <button onClick={selectAllHistory} className="flex items-center gap-1.5 px-3 py-1.5 rounded hover:bg-slate-700 text-slate-300 transition-colors">
+                             {selectedHistoryIds.size === historyTransactions.length && historyTransactions.length > 0 ? <CheckSquare size={14} className="text-blue-400" /> : <Square size={14} />}
+                             <span>Välj alla</span>
+                         </button>
+                         <div className="w-px h-4 bg-slate-700 mx-1" />
+                         <button onClick={() => selectHistoryByType('EXPENSE')} className="px-2 py-1.5 hover:bg-slate-700 rounded text-slate-400 hover:text-white transition-colors">Kostnader</button>
+                         <button onClick={() => selectHistoryByType('TRANSFER')} className="px-2 py-1.5 hover:bg-slate-700 rounded text-slate-400 hover:text-white transition-colors">Överföringar</button>
+                         <button onClick={() => selectHistoryByType('INCOME')} className="px-2 py-1.5 hover:bg-slate-700 rounded text-slate-400 hover:text-white transition-colors">Inkomster</button>
+                     </div>
+                    
+                    {/* Floating Action Button for Bulk Edit */}
+                    {selectedHistoryIds.size > 0 && (
+                        <div className="fixed bottom-24 left-1/2 -translate-x-1/2 z-50 animate-in slide-in-from-bottom-4 fade-in">
+                            <div className="bg-blue-600 text-white shadow-xl rounded-full px-6 py-3 flex items-center gap-4 border border-blue-400">
+                                <span className="font-bold text-sm whitespace-nowrap">{selectedHistoryIds.size} valda</span>
+                                <button 
+                                    onClick={handleBulkEdit}
+                                    className="flex items-center gap-2 bg-white/20 hover:bg-white/30 px-3 py-1.5 rounded-full transition-colors font-medium text-xs"
+                                >
+                                    <Edit2 size={14} /> Redigera
+                                </button>
+                                <button onClick={() => setSelectedHistoryIds(new Set())} className="hover:text-blue-200"><X size={16}/></button>
+                            </div>
+                        </div>
+                    )}
+
                      <div className="space-y-2">
-                         {historyTransactions.map(tx => (
-                             <div key={tx.id} className="bg-slate-800 p-3 rounded-lg border border-slate-700 flex justify-between items-center">
-                                 <div>
-                                     <div className="text-white font-medium">{tx.description}</div>
-                                     <div className="text-xs text-slate-500">{tx.date} • {accounts.find(a => a.id === tx.accountId)?.name}</div>
-                                 </div>
-                                 <div className="text-right">
-                                     <div className="font-mono font-bold text-white">{formatMoney(tx.amount)}</div>
-                                     <div className="text-xs text-slate-400">
-                                         {tx.type === 'EXPENSE' ? 'Utgift' : (tx.type === 'TRANSFER' ? 'Överföring' : 'Inkomst')}
+                         {historyTransactions.map(tx => {
+                             const isSelected = selectedHistoryIds.has(tx.id);
+                             const account = accounts.find(a => a.id === tx.accountId);
+                             
+                             let categoryLabel = '';
+                             if (tx.type === 'EXPENSE') {
+                                 const main = mainCategories.find(c => c.id === tx.categoryMainId)?.name;
+                                 const sub = subCategories.find(c => c.id === tx.categorySubId)?.name;
+                                 categoryLabel = main ? `${main} ${sub ? '/ ' + sub : ''}` : 'Okategoriserad';
+                             } else if (tx.type === 'TRANSFER') {
+                                 if (tx.bucketId === 'INTERNAL') categoryLabel = 'Intern Överföring';
+                                 else if (tx.bucketId === 'PAYOUT') categoryLabel = 'Utbetalning';
+                                 else categoryLabel = buckets.find(b => b.id === tx.bucketId)?.name || 'Okänd budgetpost';
+                             } else if (tx.type === 'INCOME') {
+                                 categoryLabel = mainCategories.find(c => c.id === tx.categoryMainId)?.name || 'Inkomst';
+                             }
+
+                             return (
+                                 <div 
+                                    key={tx.id} 
+                                    className={cn(
+                                        "bg-slate-800 p-3 rounded-lg border flex gap-3 items-start transition-all cursor-pointer group",
+                                        isSelected ? "border-blue-500 bg-blue-900/10" : "border-slate-700 hover:bg-slate-700/50"
+                                    )}
+                                    onClick={() => toggleHistorySelection(tx.id)}
+                                 >
+                                     <div className="pt-1 text-slate-400 group-hover:text-white transition-colors">
+                                         {isSelected ? <CheckSquare size={18} className="text-blue-500" /> : <Square size={18} />}
+                                     </div>
+                                     
+                                     <div className="flex-1 min-w-0">
+                                         <div className="flex justify-between items-start">
+                                             <div className="text-white font-medium truncate pr-2">{tx.description}</div>
+                                             <div className="font-mono font-bold text-white whitespace-nowrap">{formatMoney(tx.amount)}</div>
+                                         </div>
+                                         
+                                         <div className="text-xs text-slate-500 mt-1 flex items-center gap-1">
+                                             <span>{tx.date}</span>
+                                             <span>•</span>
+                                             <span className="flex items-center gap-0.5">{account?.icon} {account?.name}</span>
+                                         </div>
+                                         
+                                         <div className="flex flex-wrap gap-2 mt-2">
+                                             <span className={cn("text-[10px] px-1.5 py-0.5 rounded font-bold uppercase", 
+                                                 tx.type === 'EXPENSE' ? "bg-rose-950 text-rose-300 border border-rose-900" : 
+                                                 (tx.type === 'TRANSFER' ? "bg-blue-950 text-blue-300 border border-blue-900" : "bg-emerald-950 text-emerald-300 border border-emerald-900")
+                                             )}>
+                                                 {tx.type === 'EXPENSE' ? 'Utgift' : (tx.type === 'TRANSFER' ? 'Överföring' : 'Inkomst')}
+                                             </span>
+                                             
+                                             <span className="text-[10px] bg-slate-900 text-slate-300 px-1.5 py-0.5 rounded border border-slate-700 truncate max-w-[150px]">
+                                                 {categoryLabel}
+                                             </span>
+                                             
+                                             {tx.linkedTransactionId && (
+                                                 <span className="text-[10px] bg-indigo-900/50 text-indigo-300 px-1.5 py-0.5 rounded border border-indigo-900 flex items-center gap-1">
+                                                     <Link2 size={8} /> Kopplad
+                                                 </span>
+                                             )}
+                                         </div>
                                      </div>
                                  </div>
-                             </div>
-                         ))}
+                             );
+                         })}
                          {historyTransactions.length === 0 && (
                              <div className="text-center text-slate-500 py-10">Ingen historik matchade filtret.</div>
                          )}
@@ -1164,6 +1320,114 @@ export const TransactionsView: React.FC = () => {
 
                     <Button onClick={handleSaveRule} disabled={!ruleKeyword} className="w-full">
                         Spara Regel
+                    </Button>
+                </div>
+            </Modal>
+
+            {/* BULK EDIT MODAL */}
+            <Modal isOpen={isBulkEditOpen} onClose={() => setIsBulkEditOpen(false)} title={`Redigera ${selectedHistoryIds.size} transaktioner`}>
+                <div className="space-y-6">
+                    <div>
+                        <label className="text-xs font-medium text-slate-400 uppercase tracking-wider block mb-1">Ny Typ</label>
+                        <div className="flex bg-slate-900 rounded-lg p-1 w-full">
+                            <button 
+                                onClick={() => setBulkTargetType('EXPENSE')}
+                                className={cn("flex-1 py-2 rounded text-xs font-bold transition-all", bulkTargetType === 'EXPENSE' ? "bg-rose-600 text-white" : "text-slate-400 hover:text-white")}
+                            >
+                                <ShoppingCart size={14} className="mx-auto mb-1"/> Utgift
+                            </button>
+                            <button 
+                                onClick={() => setBulkTargetType('TRANSFER')}
+                                className={cn("flex-1 py-2 rounded text-xs font-bold transition-all", bulkTargetType === 'TRANSFER' ? "bg-blue-600 text-white" : "text-slate-400 hover:text-white")}
+                            >
+                                <ArrowRightLeft size={14} className="mx-auto mb-1"/> Överföring
+                            </button>
+                            <button 
+                                onClick={() => setBulkTargetType('INCOME')}
+                                disabled={Array.from(selectedHistoryIds).some(id => {
+                                    const t = transactions.find(tx => tx.id === id);
+                                    return t && t.amount < 0;
+                                })}
+                                className={cn(
+                                    "flex-1 py-2 rounded text-xs font-bold transition-all disabled:opacity-20 disabled:cursor-not-allowed", 
+                                    bulkTargetType === 'INCOME' ? "bg-emerald-600 text-white" : "text-slate-400 hover:text-white"
+                                )}
+                                title="Endast positiva belopp kan vara inkomst"
+                            >
+                                <ArrowDownLeft size={14} className="mx-auto mb-1"/> Inkomst
+                            </button>
+                        </div>
+                    </div>
+
+                    {/* Conditional Fields */}
+                    <div className="space-y-3">
+                         {bulkTargetType === 'TRANSFER' && (
+                             <div>
+                                <label className="text-xs font-medium text-slate-400 uppercase tracking-wider block mb-1">Ny Budgetpost</label>
+                                <select 
+                                    className="w-full bg-slate-900 border border-slate-700 rounded-xl px-4 py-3 text-white focus:border-blue-500 outline-none"
+                                    value={bulkBucketId}
+                                    onChange={(e) => setBulkBucketId(e.target.value)}
+                                >
+                                    <option value="">-- Behåll nuvarande (om möjligt) --</option>
+                                    <option value="INTERNAL">Intern Överföring</option>
+                                    <option value="PAYOUT">Utbetalning</option>
+                                    <optgroup label="Budgetposter">
+                                        {buckets.map(b => (
+                                            <option key={b.id} value={b.id}>{b.name}</option>
+                                        ))}
+                                    </optgroup>
+                                </select>
+                             </div>
+                         )}
+
+                         {bulkTargetType === 'EXPENSE' && (
+                             <div className="space-y-3">
+                                <div>
+                                    <label className="text-xs font-medium text-slate-400 uppercase tracking-wider block mb-1">Ny Huvudkategori</label>
+                                    <select 
+                                        className="w-full bg-slate-900 border border-slate-700 rounded-xl px-4 py-3 text-white focus:border-blue-500 outline-none"
+                                        value={bulkMainCatId}
+                                        onChange={(e) => setBulkMainCatId(e.target.value)}
+                                    >
+                                        <option value="">-- Behåll nuvarande --</option>
+                                        {mainCategories.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+                                    </select>
+                                </div>
+                                <div>
+                                    <label className="text-xs font-medium text-slate-400 uppercase tracking-wider block mb-1">Ny Underkategori</label>
+                                    <select 
+                                        className="w-full bg-slate-900 border border-slate-700 rounded-xl px-4 py-3 text-white focus:border-blue-500 outline-none disabled:opacity-50"
+                                        value={bulkSubCatId}
+                                        onChange={(e) => setBulkSubCatId(e.target.value)}
+                                        disabled={!bulkMainCatId}
+                                    >
+                                        <option value="">-- Välj Specifikt --</option>
+                                        {subCategories.filter(s => s.mainCategoryId === bulkMainCatId).map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+                                    </select>
+                                </div>
+                             </div>
+                         )}
+
+                        {bulkTargetType === 'INCOME' && (
+                             <div>
+                                <label className="text-xs font-medium text-slate-400 uppercase tracking-wider block mb-1">Ny Inkomsttyp</label>
+                                <select 
+                                    className="w-full bg-slate-900 border border-slate-700 rounded-xl px-4 py-3 text-white focus:border-blue-500 outline-none"
+                                    value={bulkMainCatId}
+                                    onChange={(e) => setBulkMainCatId(e.target.value)}
+                                >
+                                    <option value="">-- Behåll nuvarande --</option>
+                                    {mainCategories.filter(c => c.name.includes('Inkomst')).map(c => (
+                                        <option key={c.id} value={c.id}>{c.name}</option>
+                                    ))}
+                                </select>
+                             </div>
+                        )}
+                    </div>
+
+                    <Button onClick={handleBulkSave} disabled={!bulkTargetType} className="w-full">
+                        Uppdatera transaktioner
                     </Button>
                 </div>
             </Modal>

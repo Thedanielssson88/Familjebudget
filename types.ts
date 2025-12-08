@@ -43,6 +43,11 @@ export interface Bucket {
   targetAmount: number;
   targetDate: string; // YYYY-MM
   startSavingDate: string; // YYYY-MM
+
+  // Event / Trip Mode
+  eventStartDate?: string; // YYYY-MM-DD
+  eventEndDate?: string;   // YYYY-MM-DD
+  autoTagEvent?: boolean;  // Automatically link transactions in this date range to this bucket
 }
 
 export interface Account {
@@ -110,7 +115,7 @@ export interface Transaction {
   rowId?: string; // Helper to track CSV rows
   
   // UI Helpers for Import Review
-  matchType?: 'rule' | 'history' | 'ai'; // How was this categorized?
+  matchType?: 'rule' | 'history' | 'ai' | 'event'; // How was this categorized?
   aiSuggested?: boolean; // Deprecated, use matchType
   ruleMatch?: boolean; // Deprecated, use matchType
   isManuallyApproved?: boolean; // Transient state for UI during import

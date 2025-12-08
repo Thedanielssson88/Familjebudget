@@ -1,13 +1,13 @@
-
 import React, { useEffect, useState, useMemo } from 'react';
 import { useApp } from '../store';
 import { calculateSavedAmount, calculateGoalBucketCost, formatMoney } from '../utils';
 import { PieChart, Pie, Cell, ResponsiveContainer } from 'recharts';
 import { format, parseISO, isValid, addMonths, differenceInMonths } from 'date-fns';
 import { sv } from 'date-fns/locale';
-import { Archive, CheckCircle, Pause, Play, Rocket, TrendingUp, Calendar, Trash2 } from 'lucide-react';
-import { cn, Button } from '../components/components';
-import { Bucket } from '../types';
+import { Archive, CheckCircle, Pause, Play, Rocket, TrendingUp, Calendar, Trash2, Settings, Save, Search } from 'lucide-react';
+import { cn, Button, Modal, Input } from '../components/components';
+import { Bucket, Transaction } from '../types';
+import { db } from '../db';
 
 // Animated Number Component
 const AnimatedNumber = ({ value }: { value: number }) => {
@@ -43,10 +43,11 @@ interface DreamCardProps {
     selectedMonth: string;
     onArchive: (id: string, name: string) => void;
     onDelete: (id: string, name: string) => void;
+    onEdit: (goal: Bucket) => void;
 }
 
 // Sub-component for individual dream card to handle simulation/pause state
-const DreamCard: React.FC<DreamCardProps> = ({ goal, isArchived, selectedMonth, onArchive, onDelete }) => {
+const DreamCard: React.FC<DreamCardProps> = ({ goal, isArchived, selectedMonth, onArchive, onDelete, onEdit }) => {
     const { updateBucket } = useApp();
     const [isSimulating, setIsSimulating] = useState(false);
     const [simulatedExtra, setSimulatedExtra] = useState(0);
@@ -138,31 +139,42 @@ const DreamCard: React.FC<DreamCardProps> = ({ goal, isArchived, selectedMonth, 
                     </button>
                 ) : <div></div> /* Spacer */}
 
-                {!isArchived ? (
-                    <button 
-                        onClick={(e) => { 
-                            e.preventDefault();
-                            e.stopPropagation(); 
-                            onArchive(goal.id, goal.name); 
-                        }}
-                        className="bg-black/30 hover:bg-black/50 text-white/80 hover:text-white p-2 rounded-full transition-all backdrop-blur-md border border-white/10 z-50"
-                        title="Arkivera / Avsluta sparande"
-                    >
-                        <Archive className="w-4 h-4" />
-                    </button>
-                ) : (
-                    <button 
-                        onClick={(e) => { 
-                            e.preventDefault();
-                            e.stopPropagation(); 
-                            onDelete(goal.id, goal.name); 
-                        }}
-                        className="bg-red-500/20 hover:bg-red-500/40 text-red-300 hover:text-white p-2 rounded-full transition-all backdrop-blur-md border border-red-500/10 z-50"
-                        title="Ta bort permanent"
-                    >
-                        <Trash2 className="w-4 h-4" />
-                    </button>
-                )}
+                <div className="flex gap-2">
+                    {!isArchived && (
+                        <button 
+                            onClick={(e) => { e.stopPropagation(); onEdit(goal); }}
+                            className="bg-black/30 hover:bg-black/50 text-white/80 hover:text-white p-2 rounded-full transition-all backdrop-blur-md border border-white/10 z-50"
+                            title="Inställningar"
+                        >
+                            <Settings className="w-4 h-4" />
+                        </button>
+                    )}
+                    {!isArchived ? (
+                        <button 
+                            onClick={(e) => { 
+                                e.preventDefault();
+                                e.stopPropagation(); 
+                                onArchive(goal.id, goal.name); 
+                            }}
+                            className="bg-black/30 hover:bg-black/50 text-white/80 hover:text-white p-2 rounded-full transition-all backdrop-blur-md border border-white/10 z-50"
+                            title="Arkivera / Avsluta sparande"
+                        >
+                            <Archive className="w-4 h-4" />
+                        </button>
+                    ) : (
+                        <button 
+                            onClick={(e) => { 
+                                e.preventDefault();
+                                e.stopPropagation(); 
+                                onDelete(goal.id, goal.name); 
+                            }}
+                            className="bg-red-500/20 hover:bg-red-500/40 text-red-300 hover:text-white p-2 rounded-full transition-all backdrop-blur-md border border-red-500/10 z-50"
+                            title="Ta bort permanent"
+                        >
+                            <Trash2 className="w-4 h-4" />
+                        </button>
+                    )}
+                </div>
             </div>
 
             {/* Main Content */}
@@ -273,8 +285,12 @@ const DreamCard: React.FC<DreamCardProps> = ({ goal, isArchived, selectedMonth, 
 };
 
 export const DreamsView: React.FC = () => {
-    const { buckets, selectedMonth, archiveBucket, deleteBucket } = useApp();
+    const { buckets, selectedMonth, archiveBucket, deleteBucket, updateBucket, transactions } = useApp();
     const [activeTab, setActiveTab] = useState<'active' | 'archived'>('active');
+    
+    // Edit Modal State
+    const [isEditModalOpen, setIsEditModalOpen] = useState(false);
+    const [editingBucket, setEditingBucket] = useState<Bucket | null>(null);
 
     const allGoals = buckets.filter(b => b.type === 'GOAL');
     const activeGoals = allGoals.filter(b => !b.archivedDate);
@@ -291,6 +307,50 @@ export const DreamsView: React.FC = () => {
     const handleDelete = (id: string, name: string) => {
         if (confirm(`VARNING: Vill du ta bort "${name}" permanent? Detta går inte att ångra och all historik för detta mål försvinner.`)) {
             deleteBucket(id, selectedMonth, 'ALL');
+        }
+    };
+
+    const openEditModal = (bucket: Bucket) => {
+        setEditingBucket({ ...bucket });
+        setIsEditModalOpen(true);
+    };
+
+    const handleSaveEdit = () => {
+        if (!editingBucket) return;
+        updateBucket(editingBucket);
+        setIsEditModalOpen(false);
+    };
+
+    const handleTagHistory = async () => {
+        if (!editingBucket || !editingBucket.eventStartDate || !editingBucket.eventEndDate) return;
+
+        // Find all expenses in range that are not already linked to another bucket
+        const start = editingBucket.eventStartDate;
+        const end = editingBucket.eventEndDate;
+        
+        const matches = transactions.filter(t => {
+            const isExpense = t.type === 'EXPENSE' || (!t.type && t.amount < 0);
+            const inRange = t.date >= start && t.date <= end;
+            const notBucketed = !t.bucketId;
+            return isExpense && inRange && notBucketed;
+        });
+
+        if (matches.length === 0) {
+            alert("Hittade inga o-taggade utgifter inom detta datumintervall.");
+            return;
+        }
+
+        if (confirm(`Hittade ${matches.length} transaktioner mellan ${start} och ${end}. Vill du koppla dem till "${editingBucket.name}"?\n\nDetta flyttar dem från din driftbudget till denna händelse.`)) {
+            const updates = matches.map(t => ({
+                ...t,
+                bucketId: editingBucket.id,
+                matchType: t.matchType || 'event' as const
+            }));
+            
+            await db.transactions.bulkPut(updates);
+            alert("Klart! Transaktionerna är nu kopplade.");
+            // Force reload logic if needed, but live queries should handle it
+            window.location.reload(); 
         }
     };
 
@@ -345,9 +405,74 @@ export const DreamsView: React.FC = () => {
                         selectedMonth={selectedMonth} 
                         onArchive={handleArchive} 
                         onDelete={handleDelete}
+                        onEdit={openEditModal}
                     />
                 ))}
             </div>
+
+            {/* SETTINGS MODAL */}
+            <Modal isOpen={isEditModalOpen} onClose={() => setIsEditModalOpen(false)} title="Inställningar för Dröm/Event">
+                {editingBucket && (
+                    <div className="space-y-6">
+                        <Input 
+                            label="Namn" 
+                            value={editingBucket.name} 
+                            onChange={(e) => setEditingBucket({...editingBucket, name: e.target.value})} 
+                        />
+                        
+                        <div className="bg-slate-800/50 p-4 rounded-xl border border-slate-700 space-y-4">
+                            <h3 className="font-bold text-sm text-purple-300 flex items-center gap-2">
+                                <Calendar className="w-4 h-4" /> Resedatum & Händelse
+                            </h3>
+                            <p className="text-xs text-slate-400">
+                                Ange datum för när själva resan eller händelsen sker. Utgifter under denna period kan automatiskt kopplas till denna budgetpost.
+                            </p>
+                            
+                            <div className="grid grid-cols-2 gap-4">
+                                <Input 
+                                    label="Startdatum" 
+                                    type="date" 
+                                    value={editingBucket.eventStartDate || ''} 
+                                    onChange={(e) => setEditingBucket({...editingBucket, eventStartDate: e.target.value})} 
+                                />
+                                <Input 
+                                    label="Slutdatum" 
+                                    type="date" 
+                                    value={editingBucket.eventEndDate || ''} 
+                                    onChange={(e) => setEditingBucket({...editingBucket, eventEndDate: e.target.value})} 
+                                />
+                            </div>
+
+                            <label className="flex items-center gap-3 bg-slate-900/50 p-3 rounded-lg cursor-pointer">
+                                <input 
+                                    type="checkbox" 
+                                    checked={!!editingBucket.autoTagEvent}
+                                    onChange={(e) => setEditingBucket({...editingBucket, autoTagEvent: e.target.checked})}
+                                    className="w-5 h-5 rounded border-slate-600 bg-slate-800 text-purple-600 focus:ring-purple-500"
+                                />
+                                <div>
+                                    <div className="text-sm font-medium text-white">Auto-tagga vid import</div>
+                                    <div className="text-[10px] text-slate-400">Nya importerade transaktioner kopplas automatiskt hit</div>
+                                </div>
+                            </label>
+
+                            {editingBucket.eventStartDate && editingBucket.eventEndDate && (
+                                <Button 
+                                    variant="secondary" 
+                                    onClick={handleTagHistory}
+                                    className="w-full text-xs"
+                                >
+                                    <Search className="w-3 h-3 mr-2" /> Sök och tagga historik i detta intervall
+                                </Button>
+                            )}
+                        </div>
+
+                        <div className="flex gap-3 pt-4">
+                            <Button className="flex-1" onClick={handleSaveEdit}>Spara Ändringar</Button>
+                        </div>
+                    </div>
+                )}
+            </Modal>
         </div>
     );
 };

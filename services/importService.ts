@@ -276,45 +276,83 @@ export const runImportPipeline = async (
     });
 
     // 3. APPLY HISTORY (Second Highest Priority)
-    // This MUST run before defaults are applied, so we don't accidentally ignore history.
     processed = await applyHistoricalCategories(processed);
 
-    // 4. SMART DETECTION & DEFAULTS (Fallback)
+    // 4. APPLY EVENT/TRIP AUTO-TAGGING (Third Priority)
     processed = processed.map(t => {
-        // If already matched by Rule or History, skip.
-        if (t.matchType === 'rule' || t.matchType === 'history') return t;
+        // Only apply if:
+        // - It's not already matched by a Rule (History matches can be augmented)
+        // - It's likely an expense (negative amount)
+        // - The bucketId isn't already set (don't override transfer rules)
+        if (t.matchType === 'rule' || t.amount >= 0 || t.bucketId) return t;
 
-        const lowerDesc = t.description.toLowerCase();
+        // Check if transaction date falls within any active Goal's event window
+        const eventMatch = buckets.find(b => 
+            b.type === 'GOAL' && 
+            b.autoTagEvent && 
+            b.eventStartDate && 
+            b.eventEndDate &&
+            t.date >= b.eventStartDate && 
+            t.date <= b.eventEndDate
+        );
 
-        // A. Smart Transfer Detection (Keywords)
-        const isTransferKeywords = ['överföring', 'till konto', 'omsättning', 'sparande', 'flytt', 'insättning', 'girering'];
-        const isLikelyTransfer = isTransferKeywords.some(kw => lowerDesc.includes(kw));
-
-        if (isLikelyTransfer) {
-            // Find a Bucket that matches the description name
-            const targetBucket = buckets.find(b => lowerDesc.includes(b.name.toLowerCase()));
-            
+        if (eventMatch) {
+            // Link to the event bucket
+            // We KEEP the category info (from history or future steps) so we know WHAT was bought
             return {
                 ...t,
-                type: 'TRANSFER',
-                bucketId: targetBucket ? targetBucket.id : undefined,
-                categoryMainId: undefined,
-                categorySubId: undefined,
-                matchType: targetBucket ? 'ai' : undefined // Using 'ai' icon to indicate smart guess
+                bucketId: eventMatch.id,
+                matchType: t.matchType || 'event' // Keep history match type if exists, otherwise set to event
             };
         }
 
+        return t;
+    });
+
+    // 5. SMART DETECTION & DEFAULTS (Fallback)
+    processed = processed.map(t => {
+        // If already matched by Rule, skip completely.
+        if (t.matchType === 'rule') return t;
+
+        // If matched by History or Event, we still might want to run AI for category if missing?
+        // But for now, let's respect previous matches for Type.
+        
+        const lowerDesc = t.description.toLowerCase();
+
+        // A. Smart Transfer Detection (Keywords)
+        // Only run if not already identified as something else
+        if (!t.type) {
+            const isTransferKeywords = ['överföring', 'till konto', 'omsättning', 'sparande', 'flytt', 'insättning', 'girering'];
+            const isLikelyTransfer = isTransferKeywords.some(kw => lowerDesc.includes(kw));
+
+            if (isLikelyTransfer) {
+                // Find a Bucket that matches the description name
+                const targetBucket = buckets.find(b => lowerDesc.includes(b.name.toLowerCase()));
+                
+                return {
+                    ...t,
+                    type: 'TRANSFER',
+                    bucketId: targetBucket ? targetBucket.id : undefined,
+                    matchType: targetBucket ? 'ai' : undefined
+                };
+            }
+        }
+
         // B. Default to Income
-        if (t.amount > 0) {
+        if (t.amount > 0 && !t.type) {
              return { ...t, type: 'INCOME', categoryMainId: '9', bucketId: undefined }; // 9 = Inkomster
         }
         
         // C. Default to Consumption (Expense)
-        return { 
-            ...t, 
-            type: 'EXPENSE', 
-            bucketId: undefined 
-        };
+        if (!t.type) {
+            return { 
+                ...t, 
+                type: 'EXPENSE', 
+                bucketId: t.bucketId // Keep bucketId if set by Event logic
+            };
+        }
+
+        return t;
     });
 
     return processed;

@@ -1,11 +1,12 @@
+
 import React, { useMemo, useState } from 'react';
 import { useApp } from '../store';
 import { formatMoney, getEffectiveBudgetGroupData, calculateFixedBucketCost, calculateDailyBucketCost, calculateGoalBucketCost, getBudgetInterval } from '../utils';
-import { ChevronRight, ChevronDown, Check, AlertTriangle, PieChart, Edit2, Plus, Wallet, Trash2, X, Settings, ArrowRightLeft, Rocket, Calendar } from 'lucide-react';
+import { ChevronRight, ChevronDown, Check, AlertTriangle, PieChart, Edit2, Plus, Wallet, Trash2, X, Settings, ArrowRightLeft, Rocket, Calendar, Plane } from 'lucide-react';
 import { BudgetProgressBar } from '../components/BudgetProgressBar';
 import { cn, Button, Modal, Input } from '../components/components';
-import { BudgetGroup, SubCategory } from '../types';
-import { format } from 'date-fns';
+import { BudgetGroup, SubCategory, Bucket } from '../types';
+import { format, startOfMonth, endOfMonth, parseISO, differenceInDays, min, max, areIntervalsOverlapping, isValid } from 'date-fns';
 import { sv } from 'date-fns/locale';
 
 export const OperatingBudgetView: React.FC = () => {
@@ -25,6 +26,44 @@ export const OperatingBudgetView: React.FC = () => {
   const [newSubName, setNewSubName] = useState('');
   const [selectedMainId, setSelectedMainId] = useState('');
 
+  // Toggle for Events
+  const [includeEvents, setIncludeEvents] = useState(false);
+
+  // --- HELPER: Event Distribution Logic ---
+  const calculateEventDistribution = (goalBucket: Bucket, month: string): { amount: number, label?: string } | null => {
+      if (!goalBucket.eventStartDate || !goalBucket.eventEndDate) return null;
+
+      const currentMonthStart = startOfMonth(parseISO(`${month}-01`));
+      const currentMonthEnd = endOfMonth(currentMonthStart);
+      const eventStart = parseISO(goalBucket.eventStartDate);
+      const eventEnd = parseISO(goalBucket.eventEndDate);
+
+      if (!isValid(eventStart) || !isValid(eventEnd)) return null;
+
+      const overlaps = areIntervalsOverlapping(
+          { start: currentMonthStart, end: currentMonthEnd },
+          { start: eventStart, end: eventEnd },
+          { inclusive: true }
+      );
+
+      if (!overlaps) return { amount: 0 };
+
+      const totalEventDays = differenceInDays(eventEnd, eventStart) + 1;
+      if (totalEventDays <= 0) return { amount: 0 };
+
+      const overlapStart = max([currentMonthStart, eventStart]);
+      const overlapEnd = min([currentMonthEnd, eventEnd]);
+      const overlapDays = Math.max(0, differenceInDays(overlapEnd, overlapStart) + 1);
+
+      if (overlapDays === 0) return { amount: 0 };
+
+      const dailyBudget = goalBucket.targetAmount / totalEventDays;
+      const amount = Math.round(dailyBudget * overlapDays);
+      const label = `Reskassa (${overlapDays} av ${totalEventDays} dagar)`;
+
+      return { amount, label };
+  };
+
   // --- DATA PROCESSING ---
   const data = useMemo(() => {
     // 1. Calculate Date Range for Budget Month
@@ -42,11 +81,34 @@ export const OperatingBudgetView: React.FC = () => {
         return isExpense && inRange;
     });
 
-    // 3. Identify "Spending Goals" (Goals active for payout this month)
-    const spendingGoals = buckets.filter(b => 
-        b.type === 'GOAL' && 
-        (b.targetDate === selectedMonth) // Logic: If current month matches target date, it's a spending phase.
-    );
+    // 3. Identify "Spending Goals" (Goals active for payout this month OR overlapping Event)
+    const spendingGoals = buckets.map(b => {
+        if (b.type !== 'GOAL') return null;
+
+        let monthlyBudget = 0;
+        let isActive = false;
+        let label = '';
+
+        // 1. EVENT MODE (Prioritized)
+        const eventDist = calculateEventDistribution(b, selectedMonth);
+        if (eventDist) {
+            if (eventDist.amount > 0) {
+                isActive = true;
+                monthlyBudget = eventDist.amount;
+                label = eventDist.label || '';
+            }
+        } 
+        // 2. LEGACY GOAL MODE (Target Date)
+        else if (b.targetDate === selectedMonth) {
+            isActive = true;
+            monthlyBudget = b.targetAmount;
+            label = 'Måldatum nått (Hela beloppet)';
+        }
+
+        if (!isActive) return null;
+
+        return { ...b, monthlyBudget, label };
+    }).filter((g): g is NonNullable<typeof g> => g !== null);
 
     // 4. Build Hierarchy per Budget Group
     const groupStats = budgetGroups.map(group => {
@@ -61,6 +123,19 @@ export const OperatingBudgetView: React.FC = () => {
         // CALCULATE FUNDING (Link to Cash Flow)
         const fundingBuckets = buckets.filter(b => group.linkedBucketIds?.includes(b.id));
         const totalFunding = fundingBuckets.reduce((sum, b) => {
+            // Special handling for Payout Buckets (Linked to Goal)
+            if (b.linkedGoalId) {
+                const parentGoal = buckets.find(g => g.id === b.linkedGoalId);
+                if (parentGoal) {
+                    const eventDist = calculateEventDistribution(parentGoal, selectedMonth);
+                    // If event dates exist and overlap, use distributed amount
+                    if (eventDist) {
+                        return sum + eventDist.amount;
+                    }
+                }
+                // Fallthrough to standard fixed cost if no event distribution (e.g. single target date payout)
+            }
+
             if (b.type === 'FIXED') return sum + calculateFixedBucketCost(b, selectedMonth);
             if (b.type === 'DAILY') return sum + calculateDailyBucketCost(b, selectedMonth, settings.payday);
             if (b.type === 'GOAL') return sum + calculateGoalBucketCost(b, selectedMonth);
@@ -75,8 +150,11 @@ export const OperatingBudgetView: React.FC = () => {
         
         // Filter transactions belonging to this group
         const groupTxs = txForMonth.filter(t => {
-            // If explicit bucket/goal link exists, it does NOT belong to a standard operating budget group
-            if (t.bucketId) return false;
+            // Logic for Excluding Events/Buckets
+            if (t.bucketId) {
+                // If "Include Events" is OFF, exclude ALL bucketed expenses (Events/Goals)
+                if (!includeEvents) return false;
+            }
 
             if (t.categorySubId && assignedSubIds.has(t.categorySubId)) return true;
             if (group.isCatchAll) {
@@ -201,7 +279,7 @@ export const OperatingBudgetView: React.FC = () => {
 
     return { groupStats, totalLimit, totalSpent, spendingGoals, txForMonth, dateRangeLabel };
 
-  }, [transactions, selectedMonth, budgetGroups, subCategories, mainCategories, buckets, settings.payday]);
+  }, [transactions, selectedMonth, budgetGroups, subCategories, mainCategories, buckets, settings.payday, includeEvents]);
 
   // --- HANDLERS ---
   const toggleGroup = (id: string) => {
@@ -304,16 +382,30 @@ export const OperatingBudgetView: React.FC = () => {
   return (
     <div className="space-y-6 pb-24 animate-in slide-in-from-right duration-300">
       <header>
-          <div className="flex items-center gap-3 mb-2">
-            <div className="bg-gradient-to-br from-emerald-500 to-teal-600 p-2 rounded-xl text-white">
-                <PieChart className="w-6 h-6" />
-            </div>
-            <div>
-                <h1 className="text-3xl font-bold text-transparent bg-clip-text bg-gradient-to-r from-emerald-400 to-teal-400">Driftbudget</h1>
-                <div className="text-[10px] text-slate-400 font-mono bg-slate-800/50 px-2 py-0.5 rounded-full inline-flex items-center gap-1 mt-1">
-                    <Calendar size={10} /> {data.dateRangeLabel}
+          <div className="flex justify-between items-start">
+              <div className="flex items-center gap-3 mb-2">
+                <div className="bg-gradient-to-br from-emerald-500 to-teal-600 p-2 rounded-xl text-white">
+                    <PieChart className="w-6 h-6" />
                 </div>
-            </div>
+                <div>
+                    <h1 className="text-3xl font-bold text-transparent bg-clip-text bg-gradient-to-r from-emerald-400 to-teal-400">Driftbudget</h1>
+                    <div className="text-[10px] text-slate-400 font-mono bg-slate-800/50 px-2 py-0.5 rounded-full inline-flex items-center gap-1 mt-1">
+                        <Calendar size={10} /> {data.dateRangeLabel}
+                    </div>
+                </div>
+              </div>
+              
+              <button 
+                onClick={() => setIncludeEvents(!includeEvents)}
+                className={cn(
+                    "flex flex-col items-center p-2 rounded-lg text-[10px] font-bold uppercase transition-all",
+                    includeEvents ? "bg-purple-600/20 text-purple-400 border border-purple-600/50" : "bg-slate-800 text-slate-500 border border-slate-700 hover:text-white"
+                )}
+                title="Visa utgifter kopplade till Resor/Events"
+              >
+                  <Plane size={16} className="mb-1" />
+                  {includeEvents ? "Inkl. Resor" : "Exkl. Resor"}
+              </button>
           </div>
           <p className="text-slate-400 text-sm">Uppföljning av kostnader per Budgetgrupp och Kategori.</p>
       </header>
@@ -454,7 +546,10 @@ export const OperatingBudgetView: React.FC = () => {
                                                                 <div className="pl-16 pr-4 pb-3 space-y-1">
                                                                     {sub.transactions.map(t => (
                                                                         <div key={t.id} className="flex justify-between items-center text-[10px] py-1 border-b border-white/5 last:border-0">
-                                                                            <span className="text-slate-400 truncate max-w-[70%]">{t.description}</span>
+                                                                            <div className="flex flex-col max-w-[70%]">
+                                                                                <span className="text-slate-400 truncate">{t.description}</span>
+                                                                                {t.bucketId && <span className="text-[9px] text-purple-400 flex items-center gap-0.5"><Plane size={8}/> Kopplad till event</span>}
+                                                                            </div>
                                                                             <div className="flex gap-2 text-right">
                                                                                 <span className="text-slate-600">{t.date}</span>
                                                                                 <span className="text-slate-300 font-mono">{formatMoney(t.amount)}</span>
@@ -487,13 +582,14 @@ export const OperatingBudgetView: React.FC = () => {
                 <h3 className="text-lg font-bold text-white flex items-center gap-2">
                     <Rocket className="text-purple-400 w-5 h-5" /> Planerade Inköp (Från sparande)
                 </h3>
-                <p className="text-xs text-slate-400">Här visas aktiva sparmål som är redo att användas denna månad.</p>
+                <p className="text-xs text-slate-400">Här visas aktiva sparmål/resor som är redo att användas denna månad.</p>
                 
                 {data.spendingGoals.map(goal => {
                     // Find transactions linked to this goal (Expense with bucketId = goal.id)
                     const goalTxs = data.txForMonth.filter(t => t.bucketId === goal.id);
                     const spent = goalTxs.reduce((sum, t) => sum + Math.abs(t.amount), 0);
-                    const budget = goal.targetAmount;
+                    // Use the calculated proportional budget instead of total target
+                    const budget = goal.monthlyBudget;
                     
                     return (
                         <div key={goal.id} className="bg-slate-800 rounded-xl p-4 border border-purple-500/30 shadow-lg relative overflow-hidden">
@@ -507,7 +603,7 @@ export const OperatingBudgetView: React.FC = () => {
                                     </div>
                                     <div>
                                         <div className="font-bold text-white">{goal.name}</div>
-                                        <div className="text-xs text-purple-300">Sparat kapital används</div>
+                                        <div className="text-xs text-purple-300">{goal.label || "Sparat kapital används"}</div>
                                     </div>
                                 </div>
                                 <div className="text-right relative z-10">
@@ -519,7 +615,7 @@ export const OperatingBudgetView: React.FC = () => {
                             <BudgetProgressBar 
                                 spent={spent} 
                                 total={budget} 
-                                label="Förbrukat av sparmål"
+                                label="Förbrukat av budget"
                                 className="relative z-10"
                             />
                         </div>

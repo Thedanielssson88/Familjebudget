@@ -32,7 +32,11 @@ const BucketSchema = z.object({
   monthlyData: z.record(z.string(), BucketDataSchema),
   targetAmount: z.number().optional().default(0),
   targetDate: z.string().optional().default(''),
-  startSavingDate: z.string().optional().default('')
+  startSavingDate: z.string().optional().default(''),
+  // New Event Fields
+  eventStartDate: z.string().optional(),
+  eventEndDate: z.string().optional(),
+  autoTagEvent: z.boolean().optional()
 });
 
 const UserIncomeDataSchema = z.object({

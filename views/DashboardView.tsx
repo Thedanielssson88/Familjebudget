@@ -3,7 +3,8 @@ import React, { useState, useMemo } from 'react';
 import { useApp } from '../store';
 import { calculateDailyBucketCost, calculateDailyBucketCostSoFar, calculateFixedBucketCost, calculateGoalBucketCost, formatMoney, getLatestDailyDeduction, getTotalFamilyIncome, getUserIncome } from '../utils';
 import { Card, cn } from '../components/components';
-import { ArrowDown, Sliders, Landmark, Calculator, PiggyBank, TrendingUp } from 'lucide-react';
+import { ArrowDown, Sliders, Landmark, Calculator, PiggyBank, LayoutGrid, BarChart3 } from 'lucide-react';
+import { StatsView } from './StatsView';
 
 // Simple SVG Gauge Component
 const SavingsGauge = ({ percentage }: { percentage: number }) => {
@@ -43,7 +44,7 @@ const SavingsGauge = ({ percentage }: { percentage: number }) => {
   );
 };
 
-export const DashboardView: React.FC = () => {
+const WaterfallOverview: React.FC = () => {
   const { users, buckets, selectedMonth, settings } = useApp();
   const [scenarioAdjustment, setScenarioAdjustment] = useState(0);
 
@@ -139,7 +140,7 @@ export const DashboardView: React.FC = () => {
   const balanceAfterTransfers = currentAccountBalance - totalDistributed;
 
   return (
-    <div className="space-y-8 pb-24 animate-in fade-in duration-500">
+    <div className="space-y-8 animate-in fade-in duration-500">
       
       {/* HEADER: FLOW SUMMARY */}
       <div className="text-center space-y-2 py-4">
@@ -312,4 +313,45 @@ export const DashboardView: React.FC = () => {
       </div>
     </div>
   );
+};
+
+export const DashboardView: React.FC = () => {
+    const [activeTab, setActiveTab] = useState<'waterfall' | 'stats'>('waterfall');
+
+    return (
+        <div className="space-y-6 pb-24">
+             {/* Header */}
+            <div className="flex flex-col gap-4">
+                <header>
+                    <h1 className="text-3xl font-bold text-transparent bg-clip-text bg-gradient-to-r from-blue-400 to-emerald-400">Översikt</h1>
+                    <p className="text-slate-400">Totalbild av er ekonomi.</p>
+                </header>
+
+                <div className="bg-slate-800 p-1 rounded-xl flex gap-1 shadow-lg border border-slate-700">
+                    <button 
+                        onClick={() => setActiveTab('waterfall')}
+                        className={cn(
+                            "flex-1 py-3 px-4 rounded-lg text-sm font-bold flex items-center justify-center gap-2 transition-all",
+                            activeTab === 'waterfall' ? "bg-blue-600 text-white shadow-md" : "text-slate-400 hover:text-white hover:bg-slate-700"
+                        )}
+                    >
+                        <LayoutGrid size={16} />
+                        Kassaflöde (Vattenfall)
+                    </button>
+                    <button 
+                        onClick={() => setActiveTab('stats')}
+                        className={cn(
+                            "flex-1 py-3 px-4 rounded-lg text-sm font-bold flex items-center justify-center gap-2 transition-all",
+                            activeTab === 'stats' ? "bg-indigo-600 text-white shadow-md" : "text-slate-400 hover:text-white hover:bg-slate-700"
+                        )}
+                    >
+                        <BarChart3 size={16} />
+                        Statistik & Trender
+                    </button>
+                </div>
+            </div>
+
+            {activeTab === 'waterfall' ? <WaterfallOverview /> : <StatsView />}
+        </div>
+    );
 };
