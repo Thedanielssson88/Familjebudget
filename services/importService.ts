@@ -170,9 +170,19 @@ const applyHistoricalCategories = async (transactions: Transaction[]): Promise<T
 
         try {
             // Find last transaction with same description that was categorized (has verified data)
+            // IMPORTANT: Scoped to the same accountId to prevent cross-contamination between accounts
             const lastMatch = await db.transactions
                 .where({ accountId: t.accountId, description: t.description })
-                .filter(old => !!old.type && (!!old.bucketId || !!old.categoryMainId))
+                .filter(old => {
+                    // Filter: Must have a category/bucket assigned.
+                    if (!old.type || (!old.bucketId && !old.categoryMainId)) return false;
+                    
+                    // STRICT SIGN MATCHING:
+                    // If current tx is negative (expense), history match must also be negative.
+                    // If current tx is positive (income), history match must also be positive.
+                    const sameSign = (t.amount < 0 && old.amount < 0) || (t.amount >= 0 && old.amount >= 0);
+                    return sameSign;
+                })
                 .reverse()
                 .first();
 
@@ -214,7 +224,23 @@ export const runImportPipeline = async (
     // 2. APPLY RULES (Highest Priority)
     processed = processed.map(t => {
         const lowerDesc = t.description.toLowerCase();
+        const txSign = t.amount < 0 ? 'negative' : 'positive';
+
         const matchedRule = rules.find(r => {
+            // Check Account Scope
+            if (r.accountId && r.accountId !== t.accountId) return false;
+
+            // Check Sign Scope
+            // If rule has a 'sign' property, it must match the transaction's sign.
+            if (r.sign && r.sign !== txSign) return false;
+
+            // Fallback for legacy rules without 'sign' property:
+            // Implicitly derive sign from targetType to prevent cross-contamination
+            if (!r.sign) {
+                if (t.amount < 0 && r.targetType === 'INCOME') return false; // Negative amount cannot match Income rule
+                if (t.amount > 0 && r.targetType === 'EXPENSE') return false; // Positive amount cannot match Expense rule
+            }
+
             const kw = r.keyword.toLowerCase();
             if (r.matchType === 'exact') return lowerDesc === kw;
             if (r.matchType === 'starts_with') return lowerDesc.startsWith(kw);
@@ -237,7 +263,7 @@ export const runImportPipeline = async (
             } else {
                 return { 
                     ...t, 
-                    type: 'EXPENSE',
+                    type: type, // 'EXPENSE' or 'INCOME'
                     bucketId: undefined,
                     categoryMainId: matchedRule.targetCategoryMainId,
                     categorySubId: matchedRule.targetCategorySubId,

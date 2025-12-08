@@ -65,7 +65,7 @@ const MainApp = () => {
 
   const handleCreateBackup = async () => {
       setBackupStatus('Creating...');
-      const data = getExportData();
+      const data = await getExportData();
       const filename = `FamilyFlow_Backup_${format(new Date(), 'yyyy-MM-dd_HHmm')}.json`;
       
       try {
@@ -341,7 +341,7 @@ const NavButton = ({ active, onClick, icon, label }: { active: boolean, onClick:
         className={cn("flex flex-col items-center gap-1 transition-all duration-200 w-16", active ? "text-blue-400 scale-110" : "text-slate-500 hover:text-slate-300")}
     >
         <div className={cn("p-1 rounded-xl transition-all", active && "bg-blue-500/10")}>
-            {React.cloneElement(icon as React.ReactElement, { size: 24, strokeWidth: active ? 2.5 : 2 })}
+            {React.cloneElement(icon as React.ReactElement<any>, { size: 24, strokeWidth: active ? 2.5 : 2 })}
         </div>
         <span className="text-[10px] font-medium">{label}</span>
     </button>

@@ -1,13 +1,17 @@
+
 import React, { useState, useRef, useMemo, useEffect } from 'react';
 import { useApp } from '../store';
-import { Transaction, ImportRule, Bucket, MainCategory, SubCategory, AppSettings } from '../types';
+import { Transaction, ImportRule, Bucket, MainCategory, SubCategory, AppSettings, Account } from '../types';
 import { parseBankFile, runImportPipeline } from '../services/importService';
 import { categorizeTransactionsWithAi } from '../services/aiService';
 import { cn, Button, Card, Modal, Input } from '../components/components';
-import { Upload, Check, Wand2, Save, Trash2, Loader2, AlertTriangle, Zap, Clock, ArrowRightLeft, ShoppingCart, ArrowDownLeft, Sparkles, CheckCircle, Target, LayoutList, GalleryHorizontalEnd, ChevronLeft, ChevronRight, Search, Filter } from 'lucide-react';
+import { Upload, Check, Wand2, Save, Trash2, Loader2, AlertTriangle, Zap, Clock, ArrowRightLeft, ShoppingCart, ArrowDownLeft, Sparkles, CheckCircle, Target, LayoutList, GalleryHorizontalEnd, ChevronLeft, ChevronRight, Search, Filter, Link2, CalendarClock, PlusCircle, CheckCircle2, Gavel, Edit2, FileText, X, Plus, XCircle, Smartphone, LayoutGrid } from 'lucide-react';
 import { formatMoney, generateId } from '../utils';
+import { useTransferMatching } from '../hooks/useTransferMatching';
+import { useSubscriptionDetection } from '../hooks/useSubscriptionDetection';
+import { format } from 'date-fns';
 
-// --- SUB-COMPONENT: STAGING ROW ---
+// --- SUB-COMPONENT: STAGING ROW (List View) ---
 
 const TransactionRow: React.FC<{ 
     tx: Transaction; 
@@ -16,10 +20,11 @@ const TransactionRow: React.FC<{
     subCategories: SubCategory[];
     settings: AppSettings;
     onChange: (id: string, field: 'type'|'bucketId'|'categoryMainId'|'categorySubId'|'isManuallyApproved', value: string | boolean) => void;
+    onUnapprove: (id: string) => void;
     onCreateRule: (tx: Transaction) => void;
     onAiGuess: (tx: Transaction) => void;
     isAiLoading: boolean;
-}> = ({ tx, buckets, mainCategories, subCategories, settings, onChange, onCreateRule, onAiGuess, isAiLoading }) => {
+}> = ({ tx, buckets, mainCategories, subCategories, settings, onChange, onUnapprove, onCreateRule, onAiGuess, isAiLoading }) => {
     
     // 1. Check Completeness (Data available?)
     const isTransfer = tx.type === 'TRANSFER';
@@ -93,7 +98,7 @@ const TransactionRow: React.FC<{
                 <div className="font-mono text-right shrink-0">{formatMoney(tx.amount)}</div>
                 
                 {/* Actions Area */}
-                <div className="flex items-center justify-end gap-1 w-20 shrink-0">
+                <div className="flex items-center justify-end gap-1 w-24 shrink-0">
                      {!isReady && (
                         <button 
                             onClick={() => onAiGuess(tx)}
@@ -113,14 +118,25 @@ const TransactionRow: React.FC<{
                             <CheckCircle className="w-4 h-4" />
                         </button>
                     )}
-                    {isReady && matchType !== 'rule' && (
-                        <button 
-                            onClick={() => onCreateRule(tx)}
-                            className="p-1.5 text-slate-400 hover:text-white hover:bg-blue-600 rounded transition-colors"
-                            title="Skapa regel för framtiden"
-                        >
-                            <Save className="w-4 h-4" />
-                        </button>
+                    {isReady && (
+                        <div className="flex items-center gap-1">
+                             {matchType !== 'rule' && (
+                                <button 
+                                    onClick={() => onCreateRule(tx)}
+                                    className="p-1.5 text-slate-400 hover:text-white hover:bg-blue-600 rounded transition-colors"
+                                    title="Skapa regel för framtiden"
+                                >
+                                    <Save className="w-4 h-4" />
+                                </button>
+                             )}
+                             <button
+                                onClick={() => onUnapprove(tx.id)}
+                                className="p-1.5 text-emerald-600 hover:text-rose-500 hover:bg-rose-500/20 rounded transition-colors"
+                                title="Avmarkera / Ångra godkännande"
+                            >
+                                <XCircle className="w-4 h-4" />
+                            </button>
+                        </div>
                     )}
                 </div>
             </div>
@@ -164,12 +180,16 @@ const TransactionRow: React.FC<{
                             onChange={(e) => onChange(tx.id, 'bucketId', e.target.value)}
                             title="Budgetpost (Varifrån tas pengarna?)"
                         >
-                            <option value="">-- Välj Budget (Krävs) --</option>
-                            {buckets
-                                .filter(b => b.accountId === tx.accountId)
-                                .map(b => (
-                                <option key={b.id} value={b.id}>{b.name}</option>
-                            ))}
+                            <option value="">-- Välj Destination --</option>
+                            <option value="INTERNAL">Intern Överföring (Mellan egna konton)</option>
+                            <option value="PAYOUT">Utbetalning (Till annat konto)</option>
+                            <optgroup label="Budgetposter">
+                                {buckets
+                                    .filter(b => b.accountId === tx.accountId)
+                                    .map(b => (
+                                    <option key={b.id} value={b.id}>{b.name}</option>
+                                ))}
+                            </optgroup>
                         </select>
                     )}
 
@@ -219,65 +239,45 @@ const TransactionRow: React.FC<{
     );
 };
 
-// --- SUB-COMPONENT: FOCUS CARD (One by One) ---
+// --- SUB-COMPONENT: CARD VIEW ---
 
-const TransactionFocusCard: React.FC<{ 
-    tx: Transaction; 
-    buckets: Bucket[]; 
+const TransactionCard: React.FC<{
+    tx: Transaction;
+    buckets: Bucket[];
     mainCategories: MainCategory[];
     subCategories: SubCategory[];
     settings: AppSettings;
-    index: number;
-    total: number;
+    accounts: Account[];
     onChange: (id: string, field: 'type'|'bucketId'|'categoryMainId'|'categorySubId'|'isManuallyApproved', value: string | boolean) => void;
+    onApprove: (id: string) => void;
     onNext: () => void;
     onPrev: () => void;
-    onCreateRule: (tx: Transaction) => void;
-    onAiGuess: (tx: Transaction) => void;
-    isAiLoading: boolean;
-}> = ({ tx, buckets, mainCategories, subCategories, settings, index, total, onChange, onNext, onPrev, onCreateRule, onAiGuess, isAiLoading }) => {
+    isFirst: boolean;
+    isLast: boolean;
+}> = ({ tx, buckets, mainCategories, subCategories, settings, accounts, onChange, onApprove, onNext, onPrev, isFirst, isLast }) => {
     
-    // Swipe Handlers
-    const touchStart = useRef<number | null>(null);
-    const touchEnd = useRef<number | null>(null);
+    // Swipe Logic
+    const [touchStart, setTouchStart] = useState<number | null>(null);
+    const [touchEnd, setTouchEnd] = useState<number | null>(null);
+    const minSwipeDistance = 50;
 
     const onTouchStart = (e: React.TouchEvent) => {
-        touchEnd.current = null;
-        touchStart.current = e.targetTouches[0].clientX;
+        setTouchEnd(null);
+        setTouchStart(e.targetTouches[0].clientX);
     };
-
-    const onTouchMove = (e: React.TouchEvent) => {
-        touchEnd.current = e.targetTouches[0].clientX;
-    };
-
+    const onTouchMove = (e: React.TouchEvent) => setTouchEnd(e.targetTouches[0].clientX);
     const onTouchEnd = () => {
-        if (!touchStart.current || !touchEnd.current) return;
-        const distance = touchStart.current - touchEnd.current;
-        const isLeftSwipe = distance > 50;
-        const isRightSwipe = distance < -50;
-
-        if (isLeftSwipe && index < total - 1) onNext();
-        if (isRightSwipe && index > 0) onPrev();
+        if (!touchStart || !touchEnd) return;
+        const distance = touchStart - touchEnd;
+        const isLeftSwipe = distance > minSwipeDistance;
+        const isRightSwipe = distance < -minSwipeDistance;
+        if (isLeftSwipe && !isLast) onNext();
+        if (isRightSwipe && !isFirst) onPrev();
     };
-
-    // Keyboard Handlers
-    useEffect(() => {
-        const handleKeyDown = (e: KeyboardEvent) => {
-            if (e.key === 'ArrowRight') onNext();
-            if (e.key === 'ArrowLeft') onPrev();
-        };
-        window.addEventListener('keydown', handleKeyDown);
-        return () => window.removeEventListener('keydown', handleKeyDown);
-    }, [onNext, onPrev]);
 
     const isTransfer = tx.type === 'TRANSFER';
     const isExpense = tx.type === 'EXPENSE';
     const isIncome = tx.type === 'INCOME';
-
-    const validSubCats = useMemo(() => {
-        if (!tx.categoryMainId) return [];
-        return subCategories.filter(sc => sc.mainCategoryId === tx.categoryMainId);
-    }, [tx.categoryMainId, subCategories]);
 
     const hasRequiredData = 
         (isTransfer && !!tx.bucketId) || 
@@ -285,181 +285,137 @@ const TransactionFocusCard: React.FC<{
         (isIncome && !!tx.categoryMainId);
 
     const isSystemMatch = tx.matchType === 'rule' || tx.matchType === 'history';
-    const settingAllowsAuto = 
-        (isTransfer && settings.autoApproveTransfer) ||
-        (isExpense && settings.autoApproveExpense) ||
-        (isIncome && settings.autoApproveIncome);
-    const autoApproved = isSystemMatch && settingAllowsAuto;
+    const autoApproved = isSystemMatch && ((isTransfer && settings.autoApproveTransfer) || (isExpense && settings.autoApproveExpense) || (isIncome && settings.autoApproveIncome));
     const isReady = hasRequiredData && (tx.isManuallyApproved || autoApproved);
 
-    // Dynamic background based on Type
-    const bgGradient = isExpense ? "from-slate-800 to-rose-950/20" : (isTransfer ? "from-slate-800 to-blue-950/20" : "from-slate-800 to-emerald-950/20");
-    
+    const validSubCats = useMemo(() => {
+        if (!tx.categoryMainId) return [];
+        return subCategories.filter(sc => sc.mainCategoryId === tx.categoryMainId);
+    }, [tx.categoryMainId, subCategories]);
+
+    const handleApproveAndNext = () => {
+        onChange(tx.id, 'isManuallyApproved', true);
+        setTimeout(() => {
+            if (!isLast) onNext();
+        }, 200); // Small delay for visual feedback
+    };
+
     return (
         <div 
-            className="flex flex-col gap-4 animate-in fade-in zoom-in duration-300"
-            onTouchStart={onTouchStart}
-            onTouchMove={onTouchMove}
-            onTouchEnd={onTouchEnd}
+            className="flex flex-col h-full justify-between"
+            onTouchStart={onTouchStart} onTouchMove={onTouchMove} onTouchEnd={onTouchEnd}
         >
-            <div className="flex justify-between items-center text-sm text-slate-400 px-2">
-                <button onClick={onPrev} disabled={index === 0} className="p-2 hover:text-white disabled:opacity-20"><ChevronLeft size={24}/></button>
-                <span className="font-mono">{index + 1} / {total}</span>
-                <button onClick={onNext} disabled={index === total - 1} className="p-2 hover:text-white disabled:opacity-20"><ChevronRight size={24}/></button>
-            </div>
+            <Card className="flex-1 flex flex-col justify-center items-center text-center space-y-6 relative overflow-hidden border-slate-700 bg-slate-800/80 p-6 min-h-[400px]">
+                 {/* Navigation Hints */}
+                 {!isFirst && <div className="absolute left-2 top-1/2 -translate-y-1/2 text-slate-700 pointer-events-none"><ChevronLeft size={32} /></div>}
+                 {!isLast && <div className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-700 pointer-events-none"><ChevronRight size={32} /></div>}
 
-            <div className={cn("bg-gradient-to-br rounded-3xl p-6 border border-slate-700 shadow-2xl flex flex-col gap-6 relative overflow-hidden min-h-[400px]", bgGradient)}>
-                {/* Status Badge */}
-                <div className="absolute top-4 right-4">
-                     {isReady ? (
-                        <div className="flex items-center gap-1 bg-emerald-500/20 text-emerald-300 px-3 py-1 rounded-full text-xs font-bold border border-emerald-500/50 shadow-emerald-500/10 shadow-lg">
-                            <Check size={12} strokeWidth={3} /> KLAR
-                        </div>
-                     ) : (
-                         <div className="flex items-center gap-1 bg-yellow-500/20 text-yellow-300 px-3 py-1 rounded-full text-xs font-bold border border-yellow-500/50">
-                             <div className="w-2 h-2 bg-yellow-400 rounded-full animate-pulse" /> GRANSKA
-                         </div>
-                     )}
-                </div>
+                 {/* Date & Account */}
+                 <div className="text-sm text-slate-400 font-medium uppercase tracking-wider">
+                     {tx.date} • {accounts.find(a => a.id === tx.accountId)?.name}
+                 </div>
 
-                {/* Amount & Desc */}
-                <div className="text-center mt-4">
-                    <div className="text-sm text-slate-400 font-mono mb-1">{tx.date}</div>
-                    <div className={cn("text-4xl font-bold font-mono tracking-tighter mb-2", tx.amount < 0 ? "text-white" : "text-emerald-400")}>
-                        {formatMoney(tx.amount)}
+                 {/* Amount */}
+                 <div className="text-5xl font-bold font-mono text-white tracking-tight">
+                     {formatMoney(tx.amount)}
+                 </div>
+
+                 {/* Description */}
+                 <div className="text-xl text-blue-100 font-medium break-words max-w-full px-4">
+                     {tx.description}
+                 </div>
+
+                 {/* Match Badge */}
+                 {(tx.matchType || tx.isManuallyApproved) && (
+                     <div className={cn("px-3 py-1 rounded-full text-xs font-bold uppercase flex items-center gap-2", 
+                        isReady ? "bg-emerald-500/20 text-emerald-400" : "bg-slate-700 text-slate-400"
+                     )}>
+                         {tx.matchType === 'rule' && <><Zap size={12}/> Regelmatch</>}
+                         {tx.matchType === 'history' && <><Clock size={12}/> Historik</>}
+                         {tx.matchType === 'ai' && <><Wand2 size={12}/> AI Gissning</>}
+                         {tx.isManuallyApproved && <><CheckCircle size={12}/> Manuellt Godkänd</>}
+                     </div>
+                 )}
+
+                 {/* Controls */}
+                 <div className="w-full max-w-sm space-y-4 pt-4 border-t border-slate-700/50">
+                    {/* Type Toggle */}
+                    <div className="flex bg-slate-900 rounded-xl p-1 w-full shadow-inner">
+                        <button onClick={() => onChange(tx.id, 'type', 'EXPENSE')} className={cn("flex-1 py-3 rounded-lg text-xs font-bold transition-all", isExpense ? "bg-rose-600 text-white shadow-lg" : "text-slate-500 hover:text-slate-300")}>Utgift</button>
+                        <button onClick={() => onChange(tx.id, 'type', 'TRANSFER')} className={cn("flex-1 py-3 rounded-lg text-xs font-bold transition-all", isTransfer ? "bg-blue-600 text-white shadow-lg" : "text-slate-500 hover:text-slate-300")}>Överföring</button>
+                        <button onClick={() => onChange(tx.id, 'type', 'INCOME')} className={cn("flex-1 py-3 rounded-lg text-xs font-bold transition-all", isIncome ? "bg-emerald-600 text-white shadow-lg" : "text-slate-500 hover:text-slate-300")}>Inkomst</button>
                     </div>
-                    <div className="text-lg font-medium text-slate-200 leading-snug px-4">
-                        {tx.description}
-                    </div>
-                </div>
 
-                {/* Type Selectors (Large) */}
-                <div className="grid grid-cols-3 gap-2 bg-slate-900/50 p-1 rounded-xl border border-slate-800">
-                    <button 
-                        onClick={() => onChange(tx.id, 'type', 'EXPENSE')}
-                        className={cn("flex flex-col items-center py-3 rounded-lg text-xs font-bold transition-all", isExpense ? "bg-rose-600 text-white shadow-lg" : "text-slate-500 hover:text-white hover:bg-slate-800")}
-                    >
-                        <ShoppingCart size={20} className="mb-1" /> Utgift
-                    </button>
-                    <button 
-                        onClick={() => onChange(tx.id, 'type', 'TRANSFER')}
-                        className={cn("flex flex-col items-center py-3 rounded-lg text-xs font-bold transition-all", isTransfer ? "bg-blue-600 text-white shadow-lg" : "text-slate-500 hover:text-white hover:bg-slate-800")}
-                    >
-                        <ArrowRightLeft size={20} className="mb-1" /> Överföring
-                    </button>
-                    <button 
-                        onClick={() => onChange(tx.id, 'type', 'INCOME')}
-                        className={cn("flex flex-col items-center py-3 rounded-lg text-xs font-bold transition-all", isIncome ? "bg-emerald-600 text-white shadow-lg" : "text-slate-500 hover:text-white hover:bg-slate-800")}
-                    >
-                        <ArrowDownLeft size={20} className="mb-1" /> Inkomst
-                    </button>
-                </div>
-
-                {/* Inputs (Large) */}
-                <div className="space-y-3 flex-1">
-                    {isTransfer && (
-                        <div className="space-y-1">
-                            <label className="text-xs uppercase font-bold text-slate-500 ml-1">Välj Budgetpost</label>
+                    {/* Dropdowns */}
+                    <div className="space-y-3">
+                         {isTransfer && (
                             <select 
-                                className={cn("w-full bg-slate-900 border-2 rounded-xl px-4 py-4 text-base outline-none transition-colors appearance-none", 
-                                !tx.bucketId ? "border-rose-500 text-rose-200" : "border-slate-700 text-blue-200 focus:border-blue-500")}
+                                className="w-full bg-slate-900 border border-slate-600 rounded-xl px-4 py-3 text-white focus:border-blue-500 outline-none"
                                 value={tx.bucketId || ""}
                                 onChange={(e) => onChange(tx.id, 'bucketId', e.target.value)}
                             >
-                                <option value="">Välj Budget...</option>
-                                {buckets.filter(b => b.accountId === tx.accountId).map(b => (
-                                    <option key={b.id} value={b.id}>{b.name}</option>
-                                ))}
+                                <option value="">-- Välj Destination --</option>
+                                <option value="INTERNAL">Intern Överföring</option>
+                                <option value="PAYOUT">Utbetalning</option>
+                                <optgroup label="Budgetposter">
+                                    {buckets.filter(b => b.accountId === tx.accountId).map(b => (
+                                        <option key={b.id} value={b.id}>{b.name}</option>
+                                    ))}
+                                </optgroup>
                             </select>
-                        </div>
-                    )}
-
-                    {isExpense && (
-                        <>
-                            <div className="space-y-1">
-                                <label className="text-xs uppercase font-bold text-slate-500 ml-1">Kategori</label>
+                         )}
+                         
+                         {isExpense && (
+                             <div className="space-y-3">
                                 <select 
-                                    className="w-full bg-slate-900 border border-slate-700 rounded-xl px-4 py-3 text-base text-white focus:border-blue-500 outline-none"
+                                    className="w-full bg-slate-900 border border-slate-600 rounded-xl px-4 py-3 text-white focus:border-blue-500 outline-none"
                                     value={tx.categoryMainId || ""}
                                     onChange={(e) => onChange(tx.id, 'categoryMainId', e.target.value)}
                                 >
-                                    <option value="">Välj Kategori...</option>
+                                    <option value="">-- Huvudkategori --</option>
                                     {mainCategories.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
                                 </select>
-                            </div>
-                            <div className="space-y-1">
-                                <label className="text-xs uppercase font-bold text-slate-500 ml-1">Underkategori</label>
                                 <select 
-                                    className="w-full bg-slate-900 border border-slate-700 rounded-xl px-4 py-3 text-base text-white focus:border-blue-500 outline-none disabled:opacity-50"
+                                    className="w-full bg-slate-900 border border-slate-600 rounded-xl px-4 py-3 text-white focus:border-blue-500 outline-none disabled:opacity-50"
                                     value={tx.categorySubId || ""}
                                     onChange={(e) => onChange(tx.id, 'categorySubId', e.target.value)}
                                     disabled={!tx.categoryMainId}
                                 >
-                                    <option value="">Specificera...</option>
+                                    <option value="">-- Underkategori --</option>
                                     {validSubCats.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
                                 </select>
-                            </div>
-                        </>
-                    )}
+                             </div>
+                         )}
 
-                    {isIncome && (
-                         <div className="space-y-1">
-                            <label className="text-xs uppercase font-bold text-slate-500 ml-1">Typ av inkomst</label>
+                         {isIncome && (
                             <select 
-                                className="w-full bg-slate-900 border border-slate-700 rounded-xl px-4 py-3 text-base text-white focus:border-emerald-500 outline-none"
+                                className="w-full bg-slate-900 border border-slate-600 rounded-xl px-4 py-3 text-white focus:border-emerald-500 outline-none"
                                 value={tx.categoryMainId || ""}
                                 onChange={(e) => onChange(tx.id, 'categoryMainId', e.target.value)}
                             >
-                                <option value="">Välj typ...</option>
+                                <option value="">-- Typ av Inkomst --</option>
                                 {mainCategories.filter(c => c.name.includes('Inkomst')).map(c => (
                                     <option key={c.id} value={c.id}>{c.name}</option>
                                 ))}
                             </select>
-                        </div>
-                    )}
-                </div>
+                         )}
+                    </div>
+                 </div>
+            </Card>
 
-                {/* Bottom Action Bar */}
-                <div className="flex gap-2 mt-auto">
-                    {/* Tools */}
-                    <button 
-                         onClick={() => onAiGuess(tx)}
-                         disabled={isAiLoading}
-                         className="aspect-square h-14 rounded-xl bg-purple-500/10 border border-purple-500/30 text-purple-400 flex flex-col items-center justify-center gap-1 hover:bg-purple-500/20"
-                    >
-                         {isAiLoading ? <Loader2 className="w-5 h-5 animate-spin" /> : <Sparkles className="w-5 h-5" />}
-                         <span className="text-[10px] font-bold">AI</span>
-                    </button>
-
-                    <button 
-                         onClick={() => onCreateRule(tx)}
-                         className="aspect-square h-14 rounded-xl bg-slate-700/50 border border-slate-600 text-slate-400 flex flex-col items-center justify-center gap-1 hover:bg-slate-700 hover:text-white"
-                    >
-                         <Save className="w-5 h-5" />
-                         <span className="text-[10px] font-bold">Regel</span>
-                    </button>
-                    
-                    {/* APPROVE / NEXT */}
-                    {isReady ? (
-                        <button 
-                            onClick={onNext}
-                            className="flex-1 h-14 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl font-bold text-lg shadow-lg shadow-emerald-900/20 flex items-center justify-center gap-2"
-                        >
-                            Nästa <ChevronRight />
-                        </button>
-                    ) : (
-                        <button 
-                            onClick={() => onChange(tx.id, 'isManuallyApproved', true)}
-                            disabled={!hasRequiredData}
-                            className="flex-1 h-14 bg-yellow-500 hover:bg-yellow-400 disabled:bg-slate-700 disabled:text-slate-500 text-slate-900 rounded-xl font-bold text-lg shadow-lg flex items-center justify-center gap-2"
-                        >
-                            <CheckCircle /> Godkänn
-                        </button>
-                    )}
-                </div>
-            </div>
-            <div className="text-center text-xs text-slate-500 animate-pulse">
-                Svep för att bläddra • Piltangenter fungerar också
+            {/* ACTION BUTTONS */}
+            <div className="grid grid-cols-2 gap-4 mt-6">
+                <Button variant="secondary" onClick={onNext} className="py-4">
+                     Hoppa över
+                </Button>
+                <Button 
+                    variant="primary" 
+                    onClick={handleApproveAndNext} 
+                    disabled={!hasRequiredData}
+                    className={cn("py-4 text-lg shadow-xl", isReady ? "bg-emerald-600 hover:bg-emerald-500" : "bg-blue-600 hover:bg-blue-500")}
+                >
+                    {isReady ? "Redan Klar (Nästa)" : "Godkänn & Nästa"}
+                </Button>
             </div>
         </div>
     );
@@ -467,617 +423,748 @@ const TransactionFocusCard: React.FC<{
 
 export const TransactionsView: React.FC = () => {
     const { 
-        accounts, buckets, transactions, importRules, mainCategories, subCategories, settings,
-        addTransactions, addImportRule, deleteTransaction
+        accounts, 
+        buckets, 
+        mainCategories, 
+        subCategories, 
+        settings, 
+        addTransactions, 
+        addImportRule, 
+        importRules,
+        deleteImportRule,
+        updateImportRule,
+        transactions,
+        updateTransaction,
+        addBucket
     } = useApp();
+
+    const [viewMode, setViewMode] = useState<'import' | 'history' | 'smart-transfers' | 'subscriptions' | 'rules'>('import');
     
-    const [viewMode, setViewMode] = useState<'import' | 'history'>('import');
-    const [importViewStyle, setImportViewStyle] = useState<'list' | 'card'>('list'); // New state for toggling views
-    const [stagingTransactions, setStagingTransactions] = useState<Transaction[]>([]);
-    const [currentIndex, setCurrentIndex] = useState(0); // For card view navigation
-
-    const [isProcessing, setIsProcessing] = useState(false);
-    const [isAiAnalysisRunning, setIsAiAnalysisRunning] = useState(false);
-    const [loadingAiId, setLoadingAiId] = useState<string | null>(null);
-    const [selectedAccountId, setSelectedAccountId] = useState(accounts[0]?.id || '');
-
-    // Search / Filter State
-    const [searchTerm, setSearchTerm] = useState('');
+    // View Format for Import Tab (List vs Cards)
+    const [viewFormat, setViewFormat] = useState<'list'|'cards'>('list');
+    
+    // Search States
+    const [importSearch, setImportSearch] = useState('');
+    const [historySearch, setHistorySearch] = useState('');
     const [historyAccountFilter, setHistoryAccountFilter] = useState('');
+
+    const [importedTransactions, setImportedTransactions] = useState<Transaction[]>([]);
+    const [selectedAccount, setSelectedAccount] = useState<string>('');
+    const [isAiLoading, setIsAiLoading] = useState(false);
     
-    // Error Logging State
-    const [errorLog, setErrorLog] = useState<string | null>(null);
+    // For Card View Navigation
+    const [currentCardIndex, setCurrentCardIndex] = useState(0);
     
-    // Rule Creation Modal
+    // Ignore list for subscriptions
+    const [ignoredSubscriptions, setIgnoredSubscriptions] = useState<string[]>([]);
+    
+    // Rule Modal State
     const [ruleModalOpen, setRuleModalOpen] = useState(false);
-    const [ruleDraft, setRuleDraft] = useState<Partial<ImportRule>>({});
-    
-    // File Input
+    const [ruleTransaction, setRuleTransaction] = useState<Transaction | null>(null);
+    const [editingRule, setEditingRule] = useState<ImportRule | null>(null);
+    const [ruleKeyword, setRuleKeyword] = useState('');
+    const [ruleMatchType, setRuleMatchType] = useState<'contains' | 'exact' | 'starts_with'>('contains');
+    const [ruleSign, setRuleSign] = useState<'positive' | 'negative' | undefined>(undefined);
+
     const fileInputRef = useRef<HTMLInputElement>(null);
 
-    // Reset filters when switching views
-    useEffect(() => {
-        setSearchTerm('');
-        setHistoryAccountFilter('');
-    }, [viewMode]);
+    // Filtered transaction list for "Import" tab
+    const filteredImportTransactions = useMemo(() => {
+        if (!importSearch) return importedTransactions;
+        const lower = importSearch.toLowerCase();
+        return importedTransactions.filter(t => t.description.toLowerCase().includes(lower) || formatMoney(t.amount).includes(lower));
+    }, [importedTransactions, importSearch]);
 
-    // DERIVED: Filtered Staging Transactions
-    const filteredStaging = useMemo(() => {
-        if (!searchTerm) return stagingTransactions;
-        return stagingTransactions.filter(t => 
-            t.description.toLowerCase().includes(searchTerm.toLowerCase())
-        );
-    }, [stagingTransactions, searchTerm]);
-
-    // DERIVED: Filtered History Transactions
-    const filteredHistory = useMemo(() => {
+    // Filtered transaction list for "History" tab
+    const historyTransactions = useMemo(() => {
         return transactions
+            .filter(t => t.isVerified)
             .filter(t => {
-                const matchesSearch = !searchTerm || t.description.toLowerCase().includes(searchTerm.toLowerCase());
+                const matchesSearch = !historySearch || t.description.toLowerCase().includes(historySearch.toLowerCase());
                 const matchesAccount = !historyAccountFilter || t.accountId === historyAccountFilter;
                 return matchesSearch && matchesAccount;
             })
-            .sort((a,b) => b.date.localeCompare(a.date))
-            .slice(0, 50); // Limit to 50 results after filter
-    }, [transactions, searchTerm, historyAccountFilter]);
+            .sort((a, b) => b.date.localeCompare(a.date))
+            .slice(0, 100); // Show last 100 (after filter)
+    }, [transactions, historySearch, historyAccountFilter]);
+
+    const transferMatches = useTransferMatching(transactions);
+    const subscriptionsRaw = useSubscriptionDetection(transactions);
+    const subscriptions = useMemo(() => {
+        return subscriptionsRaw.filter(s => !ignoredSubscriptions.includes(s.name));
+    }, [subscriptionsRaw, ignoredSubscriptions]);
 
     const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
-        const file = e.target.files?.[0];
-        if (!file || !selectedAccountId) return;
-
-        setIsProcessing(true);
-        setErrorLog(null); // Clear previous errors
-
+        if (!e.target.files || e.target.files.length === 0 || !selectedAccount) return;
+        
         try {
-            // 1. Parse
-            const raw = await parseBankFile(file, selectedAccountId);
+            const file = e.target.files[0];
+            const rawTxs = await parseBankFile(file, selectedAccount);
             
-            if (raw.length === 0) {
-                throw new Error("Inga giltiga transaktioner hittades i filen. Kontrollera filformatet och rubrikerna.");
-            }
+            // Run Pipeline (De-dupe, Rules, History)
+            const processed = await runImportPipeline(rawTxs, transactions, importRules, buckets);
 
-            // 2. Run Pipeline (Fast: Duplicates, Rules, History only)
-            const processed = await runImportPipeline(raw, transactions, importRules, buckets);
-            
-            setStagingTransactions(processed);
-            setCurrentIndex(0); // Reset index on new import
-        } catch (err: any) {
-            console.error("Import Error:", err);
-            // Capture detailed error info
-            const message = err instanceof Error ? err.message : String(err);
-            const stack = err instanceof Error ? err.stack : '';
-            setErrorLog(`${message}\n\nTechnical Details:\n${stack}`);
-        } finally {
-            setIsProcessing(false);
-            if (fileInputRef.current) fileInputRef.current.value = '';
+            setImportedTransactions(processed);
+            setCurrentCardIndex(0); // Reset card view
+        } catch (error) {
+            alert("Kunde inte läsa filen. Kontrollera formatet.");
+            console.error(error);
         }
-    };
-
-    const handleChange = (txId: string, field: 'type'|'bucketId'|'categoryMainId'|'categorySubId'|'isManuallyApproved', value: string | boolean) => {
-        setStagingTransactions(prev => prev.map(t => {
-            if (t.id !== txId) return t;
-            
-            const updates: any = { [field]: value };
-
-            if (field !== 'isManuallyApproved') {
-                // Changing data resets approval state (force re-verify) and system match flags
-                updates.aiSuggested = false;
-                updates.ruleMatch = false; 
-                updates.matchType = undefined;
-                updates.isManuallyApproved = true; // User interacted, so it's manually approved
-            }
-            
-            // Logic reset when changing type
-            if (field === 'type') {
-                updates.bucketId = undefined;
-                updates.categoryMainId = undefined;
-                updates.categorySubId = undefined;
-            }
-
-            // Reset subcategory if main category changes
-            if (field === 'categoryMainId') {
-                updates.categorySubId = '';
-                // If selecting a category, ensure bucketId is cleared (mutually exclusive)
-                updates.bucketId = undefined;
-            }
-
-            // If selecting a bucket for expense, clear categories
-            if (field === 'bucketId' && t.type === 'EXPENSE' && value) {
-                updates.categoryMainId = undefined;
-                updates.categorySubId = undefined;
-            }
-            
-            return { ...t, ...updates };
-        }));
     };
 
     const handleAiGuess = async (tx: Transaction) => {
-        setLoadingAiId(tx.id);
-        try {
-            // Use static import now
-            const result = await categorizeTransactionsWithAi([tx], buckets, mainCategories, subCategories);
-            const suggestion = result[tx.id];
-
-            if (suggestion) {
-                setStagingTransactions(prev => prev.map(t => {
-                    if (t.id !== tx.id) return t;
-                    
-                    // The AI service returns IDs. If we have categories, assume Expense. If bucket, assume Transfer.
-                    // Prioritize Category if both exist (usually safer)
-                    const newType = suggestion.mainCatId ? 'EXPENSE' : (suggestion.bucketId ? 'TRANSFER' : t.type);
-
-                    return {
-                        ...t,
-                        type: newType,
-                        bucketId: suggestion.bucketId || t.bucketId,
-                        categoryMainId: suggestion.mainCatId || t.categoryMainId,
-                        categorySubId: suggestion.subCatId || t.categorySubId,
-                        matchType: 'ai' as const,
-                        aiSuggested: true
-                    };
-                }));
-            }
-        } catch (e) {
-            console.error("AI Single Guess Failed", e);
-        } finally {
-            setLoadingAiId(null);
+        setIsAiLoading(true);
+        const result = await categorizeTransactionsWithAi([tx], buckets, mainCategories, subCategories);
+        const match = result[tx.id];
+        
+        if (match) {
+            setImportedTransactions(prev => prev.map(t => {
+                if (t.id !== tx.id) return t;
+                return {
+                    ...t,
+                    bucketId: match.bucketId || t.bucketId,
+                    categoryMainId: match.mainCatId || t.categoryMainId,
+                    categorySubId: match.subCatId || t.categorySubId,
+                    type: match.bucketId ? 'TRANSFER' : (match.mainCatId ? 'EXPENSE' : t.type),
+                    matchType: 'ai',
+                    aiSuggested: true
+                };
+            }));
         }
+        setIsAiLoading(false);
     };
 
-    const handleRunAiAnalysis = async () => {
-        const unassigned = stagingTransactions.filter(t => !t.bucketId && !t.categoryMainId);
-        if (unassigned.length === 0) return;
+    // Propagate changes to similar transactions
+    const handleChange = (id: string, field: keyof Transaction, value: any) => {
+        setImportedTransactions(prev => {
+            const targetTx = prev.find(t => t.id === id);
+            if (!targetTx) return prev;
 
-        setIsAiAnalysisRunning(true);
-        try {
-            const aiMapping = await categorizeTransactionsWithAi(unassigned, buckets, mainCategories, subCategories);
+            // Update the target transaction
+            const updatedTx = { ...targetTx, [field]: value };
             
-            setStagingTransactions(prev => prev.map(t => {
-                const suggestion = aiMapping[t.id];
-                if (suggestion && !t.bucketId && !t.categoryMainId) {
-                    const newType = suggestion.mainCatId ? 'EXPENSE' : (suggestion.bucketId ? 'TRANSFER' : t.type);
-                    return {
-                        ...t,
-                        type: newType,
-                        bucketId: suggestion.bucketId,
-                        categoryMainId: suggestion.mainCatId,
-                        categorySubId: suggestion.subCatId,
-                        matchType: 'ai' as const,
-                        aiSuggested: true
-                    };
-                }
-                return t;
-            }));
-        } catch (e) {
-            console.error("Bulk AI Analysis failed", e);
-            setErrorLog(`AI Analysis Failed: ${e}`);
-        } finally {
-            setIsAiAnalysisRunning(false);
-        }
+            // If changing type to TRANSFER, clear category fields
+            if (field === 'type' && value === 'TRANSFER') {
+                updatedTx.categoryMainId = undefined;
+                updatedTx.categorySubId = undefined;
+            }
+            // If changing type to EXPENSE, clear bucketId
+            if (field === 'type' && value === 'EXPENSE') {
+                updatedTx.bucketId = undefined;
+            }
+
+            // --- PROPAGATION LOGIC ---
+            // If we are changing category, bucket or type, update all others with same description
+            if (field === 'bucketId' || field === 'categoryMainId' || field === 'categorySubId' || field === 'type') {
+                 return prev.map(t => {
+                     // 1. Must match description
+                     if (t.description !== targetTx.description) return t.id === id ? updatedTx : t;
+                     // 2. Must match Sign (Positive/Negative)
+                     if ((t.amount < 0) !== (targetTx.amount < 0)) return t.id === id ? updatedTx : t;
+                     
+                     // 3. Prevent overwriting already approved/ready transactions
+                     // Helper check for "Ready" state logic (duplicated from TransactionRow roughly)
+                     const isTransfer = t.type === 'TRANSFER';
+                     const isExpense = t.type === 'EXPENSE';
+                     const isIncome = t.type === 'INCOME';
+                     const hasData = (isTransfer && !!t.bucketId) || (isExpense && !!t.categoryMainId && !!t.categorySubId) || (isIncome && !!t.categoryMainId);
+                     const isSystemMatch = t.matchType === 'rule' || t.matchType === 'history';
+                     const autoApproved = isSystemMatch && ((isTransfer && settings.autoApproveTransfer) || (isExpense && settings.autoApproveExpense) || (isIncome && settings.autoApproveIncome));
+                     const isReady = hasData && (t.isManuallyApproved || autoApproved);
+
+                     // If it's already "Green/Ready" or Verified in DB, DO NOT TOUCH IT.
+                     if (isReady || t.isVerified) return t.id === id ? updatedTx : t;
+
+                     // Apply the same change to pending items
+                     const propagated = { ...t, [field]: value };
+                     if (field === 'type' && value === 'TRANSFER') {
+                         propagated.categoryMainId = undefined;
+                         propagated.categorySubId = undefined;
+                     }
+                     if (field === 'type' && value === 'EXPENSE') {
+                         propagated.bucketId = undefined;
+                     }
+                     
+                     // Mark as "matched by history" effectively so it becomes auto-approved if settings allow
+                     propagated.matchType = 'history';
+                     
+                     return propagated;
+                 });
+            }
+
+            return prev.map(t => t.id === id ? updatedTx : t);
+        });
+    };
+
+    const handleUnapprove = (id: string) => {
+        setImportedTransactions(prev => prev.map(t => {
+            if (t.id !== id) return t;
+            return {
+                ...t,
+                isManuallyApproved: false,
+                matchType: undefined // Remove system match to stop auto-approval
+            };
+        }));
     };
 
     const handleCommit = async () => {
-        // Only commit items that are READY (Green)
-        // We commit from ALL staging transactions, not just filtered ones, to avoid confusion.
-        // OR should we only commit filtered? Usually commit means "Save my work", so saving all valid ones is safer.
-        
-        const toCommit = stagingTransactions.filter(tx => {
-            const isTransfer = tx.type === 'TRANSFER';
-            const isExpense = tx.type === 'EXPENSE';
-            const isIncome = tx.type === 'INCOME';
-
-            const hasRequiredData = 
-                (isTransfer && !!tx.bucketId) || 
-                (isExpense && !!tx.categoryMainId && !!tx.categorySubId) ||
-                (isIncome && !!tx.categoryMainId);
-
-            if (!hasRequiredData) return false;
-
-            const isSystemMatch = tx.matchType === 'rule' || tx.matchType === 'history';
-            const settingAllowsAuto = 
-                (isTransfer && settings.autoApproveTransfer) ||
-                (isExpense && settings.autoApproveExpense) ||
-                (isIncome && settings.autoApproveIncome);
-
-            const autoApproved = isSystemMatch && settingAllowsAuto;
-            const isReady = hasRequiredData && (tx.isManuallyApproved || autoApproved);
+        const ready = importedTransactions.filter(t => {
+            const isTransfer = t.type === 'TRANSFER';
+            const isExpense = t.type === 'EXPENSE';
+            const isIncome = t.type === 'INCOME';
             
-            return isReady;
+            const hasData = (isTransfer && !!t.bucketId) || 
+                            (isExpense && !!t.categoryMainId && !!t.categorySubId) ||
+                            (isIncome && !!t.categoryMainId);
+
+            const isAuto = (isTransfer && settings.autoApproveTransfer) || 
+                           (isExpense && settings.autoApproveExpense) || 
+                           (isIncome && settings.autoApproveIncome);
+            
+            const isSystemMatch = t.matchType === 'rule' || t.matchType === 'history';
+
+            return hasData && (t.isManuallyApproved || (isSystemMatch && isAuto));
         });
 
-        const count = toCommit.length;
-        if (count === 0) return;
+        if (ready.length === 0) return;
 
-        // Mark as verified and remove transient flags
-        const verified = toCommit.map(t => {
-            const { isManuallyApproved, matchType, ruleMatch, aiSuggested, ...rest } = t;
-            return { ...rest, isVerified: true };
-        });
-        
+        const verified = ready.map(t => ({ ...t, isVerified: true }));
         await addTransactions(verified);
         
-        // Remove only the committed ones from staging
-        const committedIds = new Set(verified.map(v => v.id));
-        const remaining = stagingTransactions.filter(t => !committedIds.has(t.id));
-        setStagingTransactions(remaining);
-        setCurrentIndex(0); // Reset focus index
-        setSearchTerm(''); // Clear filter
-        
-        // If everything is done, switch view. Otherwise stay to let user fix the rest.
-        if (remaining.length === 0) {
-            setViewMode('history');
-        }
+        // Remove verified from list
+        const remaining = importedTransactions.filter(t => !ready.find(r => r.id === t.id));
+        setImportedTransactions(remaining);
+        setCurrentCardIndex(0);
     };
 
-    const openRuleModal = (tx: Transaction) => {
-        setRuleDraft({
-            keyword: tx.description,
-            targetType: tx.type,
-            targetBucketId: tx.bucketId,
-            targetCategoryMainId: tx.categoryMainId,
-            targetCategorySubId: tx.categorySubId,
-            matchType: 'contains'
-        });
+    const openRuleModal = (tx: Transaction | null, existingRule?: ImportRule) => {
+        if (existingRule) {
+            setEditingRule(existingRule);
+            setRuleKeyword(existingRule.keyword);
+            setRuleMatchType(existingRule.matchType);
+            setRuleSign(existingRule.sign);
+            setRuleTransaction(null);
+        } else if (tx) {
+            setRuleTransaction(tx);
+            setEditingRule(null);
+            setRuleKeyword(tx.description);
+            setRuleMatchType('contains');
+            setRuleSign(tx.amount < 0 ? 'negative' : 'positive');
+        }
         setRuleModalOpen(true);
     };
 
-    const saveRule = async () => {
-        if (!ruleDraft.keyword) return;
+    const handleSaveRule = async () => {
+        if (!ruleKeyword) return;
         
-        const newRule: ImportRule = {
-            id: generateId(),
-            keyword: ruleDraft.keyword,
-            targetType: ruleDraft.targetType,
-            targetBucketId: ruleDraft.targetBucketId,
-            targetCategoryMainId: ruleDraft.targetCategoryMainId,
-            targetCategorySubId: ruleDraft.targetCategorySubId,
-            matchType: ruleDraft.matchType as any
+        const baseRule: any = {
+            id: editingRule ? editingRule.id : generateId(),
+            keyword: ruleKeyword,
+            accountId: editingRule ? editingRule.accountId : (ruleTransaction ? ruleTransaction.accountId : undefined),
+            matchType: ruleMatchType,
+            sign: ruleSign
         };
 
-        await addImportRule(newRule);
+        if (editingRule) {
+             baseRule.targetType = editingRule.targetType;
+             baseRule.targetBucketId = editingRule.targetBucketId;
+             baseRule.targetCategoryMainId = editingRule.targetCategoryMainId;
+             baseRule.targetCategorySubId = editingRule.targetCategorySubId;
+        } else if (ruleTransaction) {
+             baseRule.targetType = ruleTransaction.type;
+             baseRule.targetBucketId = ruleTransaction.bucketId;
+             baseRule.targetCategoryMainId = ruleTransaction.categoryMainId;
+             baseRule.targetCategorySubId = ruleTransaction.categorySubId;
+        }
+
+        if (editingRule) {
+            await updateImportRule(baseRule);
+        } else {
+            await addImportRule(baseRule);
+        }
+
         setRuleModalOpen(false);
         
-        // Apply new rule to current staging
-        const updatedStaging = stagingTransactions.map(t => {
-            if (t.description.toLowerCase().includes(newRule.keyword!.toLowerCase())) {
-                 return {
-                     ...t,
-                     type: newRule.targetType || t.type,
-                     bucketId: newRule.targetBucketId || t.bucketId,
-                     categoryMainId: newRule.targetCategoryMainId || t.categoryMainId,
-                     categorySubId: newRule.targetCategorySubId || t.categorySubId,
-                     ruleMatch: true,
-                     matchType: 'rule' as const,
-                     isManuallyApproved: false // Reset manual approval since rule changed it, let setting decide
-                 };
-            }
-            return t;
-        });
-        setStagingTransactions(updatedStaging);
+        if (!editingRule && ruleTransaction) {
+            const reProcessed = await runImportPipeline(importedTransactions, transactions, [...importRules, baseRule], buckets);
+            setImportedTransactions(reProcessed);
+        }
+    };
+    
+    const handleDeleteRule = async (id: string) => {
+        if (confirm("Är du säker på att du vill ta bort denna regel?")) {
+            await deleteImportRule(id);
+        }
     };
 
-    // Count valid transactions for commit
-    const validForCommitCount = stagingTransactions.filter(tx => {
-            const isTransfer = tx.type === 'TRANSFER';
-            const isExpense = tx.type === 'EXPENSE';
-            const isIncome = tx.type === 'INCOME';
+    const handleLinkTransactions = async (t1: Transaction, t2: Transaction) => {
+        await updateTransaction({ ...t1, type: 'TRANSFER', linkedTransactionId: t2.id, isVerified: true, categoryMainId: undefined, categorySubId: undefined, bucketId: undefined });
+        await updateTransaction({ ...t2, type: 'TRANSFER', linkedTransactionId: t1.id, isVerified: true, categoryMainId: undefined, categorySubId: undefined, bucketId: undefined });
+    };
 
-            const hasRequiredData = 
-                (isTransfer && !!tx.bucketId) || 
-                (isExpense && !!tx.categoryMainId && !!tx.categorySubId) ||
-                (isIncome && !!tx.categoryMainId);
+    const handleCreateSubscription = async (sub: any) => {
+        const newBucket: Bucket = {
+            id: generateId(),
+            accountId: sub.accountId,
+            name: sub.name,
+            type: 'FIXED',
+            isSavings: false,
+            monthlyData: {
+                [format(new Date(), 'yyyy-MM')]: { amount: sub.avgAmount, dailyAmount: 0, activeDays: [] }
+            },
+            targetAmount: 0,
+            targetDate: '',
+            startSavingDate: ''
+        };
+        await addBucket(newBucket);
+        alert(`Skapade fast utgift för ${sub.name}!`);
+    };
 
-            if (!hasRequiredData) return false;
-
-            const isSystemMatch = tx.matchType === 'rule' || tx.matchType === 'history';
-            const settingAllowsAuto = 
-                (isTransfer && settings.autoApproveTransfer) ||
-                (isExpense && settings.autoApproveExpense) ||
-                (isIncome && settings.autoApproveIncome);
-
-            const autoApproved = isSystemMatch && settingAllowsAuto;
-            const isReady = hasRequiredData && (tx.isManuallyApproved || autoApproved);
-            
-            return isReady;
-    }).length;
+    const isBudgeted = (name: string) => buckets.some(b => b.name.toLowerCase() === name.toLowerCase());
 
     return (
         <div className="space-y-6 pb-24 animate-in slide-in-from-right duration-300">
-            <header className="flex justify-between items-end">
+            <header className="flex flex-col gap-4">
                 <div>
-                    <h1 className="text-3xl font-bold text-white">Transaktioner</h1>
+                    <h1 className="text-3xl font-bold text-transparent bg-clip-text bg-gradient-to-r from-blue-400 to-indigo-400">Transaktioner</h1>
                     <p className="text-slate-400">Importera från bank eller granska historik</p>
                 </div>
                 
-                <div className="flex bg-slate-800 rounded-lg p-1">
-                    <button 
-                        onClick={() => setViewMode('import')}
-                        className={cn("px-4 py-1.5 rounded text-sm font-medium transition-all", viewMode === 'import' ? "bg-blue-600 text-white shadow" : "text-slate-400 hover:text-white")}
-                    >
-                        Importera
-                    </button>
-                    <button 
-                        onClick={() => setViewMode('history')}
-                        className={cn("px-4 py-1.5 rounded text-sm font-medium transition-all", viewMode === 'history' ? "bg-blue-600 text-white shadow" : "text-slate-400 hover:text-white")}
-                    >
-                        Historik
-                    </button>
+                {/* Navigation Buttons below header */}
+                <div className="w-full flex flex-col gap-2">
+                     <div className="flex bg-slate-800 p-1 rounded-lg w-full">
+                        <button 
+                            onClick={() => setViewMode('import')}
+                            className={cn("flex-1 px-4 py-2 rounded text-sm font-medium transition-all", viewMode === 'import' ? "bg-blue-600 text-white shadow" : "text-slate-400 hover:text-white")}
+                        >
+                            Importera
+                        </button>
+                        <button 
+                            onClick={() => setViewMode('history')}
+                            className={cn("flex-1 px-4 py-2 rounded text-sm font-medium transition-all", viewMode === 'history' ? "bg-blue-600 text-white shadow" : "text-slate-400 hover:text-white")}
+                        >
+                            Historik
+                        </button>
+                        <button 
+                             onClick={() => setViewMode('rules')}
+                             className={cn("flex-1 px-4 py-2 rounded text-sm font-medium transition-all", viewMode === 'rules' ? "bg-blue-600 text-white shadow" : "text-slate-400 hover:text-white")}
+                        >
+                             Regler
+                        </button>
+                    </div>
+                    
+                    <div className="flex bg-slate-800 p-1 rounded-lg w-full gap-1">
+                        <button 
+                            onClick={() => setViewMode('smart-transfers')}
+                            className={cn("flex-1 px-4 py-2 rounded text-sm font-medium flex items-center justify-center gap-2", viewMode === 'smart-transfers' ? "bg-indigo-600 text-white" : "text-slate-400 hover:text-white")}
+                        >
+                            <Sparkles size={14} /> Smarta Överföringar
+                            {transferMatches.length > 0 && <span className="bg-indigo-500 text-white text-[10px] px-1.5 rounded-full">{transferMatches.length}</span>}
+                        </button>
+                        <button 
+                            onClick={() => setViewMode('subscriptions')}
+                            className={cn("flex-1 px-4 py-2 rounded text-sm font-medium flex items-center justify-center gap-2", viewMode === 'subscriptions' ? "bg-pink-600 text-white" : "text-slate-400 hover:text-white")}
+                        >
+                            <CalendarClock size={14} /> Prenumerationer
+                            {subscriptions.length > 0 && <span className="bg-pink-500 text-white text-[10px] px-1.5 rounded-full">{subscriptions.length}</span>}
+                        </button>
+                    </div>
                 </div>
             </header>
 
             {viewMode === 'import' && (
-                <div className="space-y-6">
-                    {/* UPLOAD SECTION */}
-                    {stagingTransactions.length === 0 ? (
-                        <Card className="p-8 border-dashed border-2 border-slate-700 bg-slate-800/20 flex flex-col items-center justify-center text-center space-y-4">
-                            <div className="w-16 h-16 bg-blue-500/10 rounded-full flex items-center justify-center text-blue-400 mb-2">
-                                <Upload className="w-8 h-8" />
+                <div className="space-y-4">
+                    {/* Upload Section */}
+                    {importedTransactions.length === 0 ? (
+                        <div className="bg-slate-800/50 border-2 border-dashed border-slate-700 rounded-2xl p-8 flex flex-col items-center justify-center text-center space-y-4">
+                            <div className="bg-slate-800 p-4 rounded-full">
+                                <Upload className="w-8 h-8 text-blue-400" />
                             </div>
                             <div>
-                                <h3 className="text-lg font-bold text-white">Ladda upp bankfil</h3>
-                                <p className="text-slate-400 text-sm max-w-xs mx-auto mt-1">
-                                    Stöder CSV (Swedbank, Handelsbanken, m.fl) och Excel.
-                                </p>
+                                <h3 className="text-lg font-bold text-white">Ladda upp fil</h3>
+                                <p className="text-sm text-slate-400 mt-1">Stödjer CSV och Excel från din bank</p>
                             </div>
                             
-                            <div className="flex gap-2 items-center">
-                                <select 
-                                    className="bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm"
-                                    value={selectedAccountId}
-                                    onChange={e => setSelectedAccountId(e.target.value)}
-                                >
-                                    {accounts.map(a => <option key={a.id} value={a.id}>{a.name}</option>)}
-                                </select>
-                                <label className="cursor-pointer">
-                                    <input 
-                                        type="file" 
-                                        accept=".csv,.xlsx,.xls" 
-                                        className="hidden" 
-                                        onChange={handleFileUpload} 
-                                        ref={fileInputRef}
-                                    />
-                                    <span className={cn("px-4 py-2 rounded-lg text-sm font-bold flex items-center gap-2", isProcessing ? "bg-slate-700 text-slate-500" : "bg-blue-600 hover:bg-blue-500 text-white")}>
-                                        {isProcessing ? <Loader2 className="w-4 h-4 animate-spin" /> : <Upload className="w-4 h-4" />}
-                                        {isProcessing ? 'Bearbetar...' : 'Välj fil'}
-                                    </span>
-                                </label>
-                            </div>
-                            {errorLog && (
-                                <div className="mt-4 p-4 bg-red-950/30 border border-red-500/30 rounded text-left w-full overflow-auto max-h-32">
-                                    <div className="text-red-400 font-bold text-xs mb-1 flex items-center gap-2"><AlertTriangle size={12}/> Fel vid import</div>
-                                    <pre className="text-[10px] text-red-300 whitespace-pre-wrap font-mono">{errorLog}</pre>
-                                </div>
-                            )}
-                        </Card>
+                            <select 
+                                className="bg-slate-900 border border-slate-700 rounded-lg px-4 py-2 text-white w-64"
+                                value={selectedAccount}
+                                onChange={(e) => setSelectedAccount(e.target.value)}
+                            >
+                                <option value="">Välj konto...</option>
+                                {accounts.map(acc => (
+                                    <option key={acc.id} value={acc.id}>{acc.icon} {acc.name}</option>
+                                ))}
+                            </select>
+
+                            <Button 
+                                onClick={() => fileInputRef.current?.click()} 
+                                disabled={!selectedAccount}
+                                className="w-64"
+                            >
+                                Välj fil
+                            </Button>
+                            <input 
+                                type="file" 
+                                ref={fileInputRef} 
+                                className="hidden" 
+                                accept=".csv,.xlsx,.xls"
+                                onChange={handleFileUpload}
+                            />
+                        </div>
                     ) : (
-                        <div className="animate-in slide-in-from-bottom-4 space-y-4">
-                            {/* SEARCH BAR (Import View) */}
-                            <div className="relative">
-                                <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-500" />
-                                <input 
-                                    type="text" 
-                                    placeholder="Sök transaktion..."
-                                    value={searchTerm}
-                                    onChange={(e) => setSearchTerm(e.target.value)}
-                                    className="w-full bg-slate-900 border border-slate-700 rounded-xl pl-10 pr-4 py-3 text-sm focus:outline-none focus:border-blue-500 transition-colors"
-                                />
-                                {filteredStaging.length !== stagingTransactions.length && (
-                                    <div className="absolute right-3 top-1/2 -translate-y-1/2 text-xs text-slate-500">
-                                        Visar {filteredStaging.length} av {stagingTransactions.length}
+                        <div className="space-y-4">
+                            {/* Toolbar: Search, View Mode, Clear */}
+                            <div className="flex flex-col gap-2">
+                                <div className="flex gap-2">
+                                    <div className="flex-1 bg-slate-900 rounded-lg flex items-center px-3 border border-slate-700">
+                                        <Search size={16} className="text-slate-400 mr-2" />
+                                        <input 
+                                            placeholder="Sök transaktion..." 
+                                            className="bg-transparent border-none outline-none text-white text-sm w-full py-2 placeholder-slate-500"
+                                            value={importSearch}
+                                            onChange={(e) => setImportSearch(e.target.value)}
+                                        />
+                                        {importSearch && <button onClick={() => setImportSearch('')}><X size={14} className="text-slate-400"/></button>}
                                     </div>
-                                )}
-                            </div>
-
-                            {/* ACTION BAR */}
-                            <div className="flex flex-col sm:flex-row justify-between items-center bg-slate-800 p-3 rounded-xl border border-slate-700 sticky top-16 z-30 shadow-xl gap-3">
-                                
-                                {/* Left Controls */}
-                                <div className="flex items-center gap-4 w-full sm:w-auto justify-between">
-                                    <button onClick={() => setStagingTransactions([])} className="text-slate-400 hover:text-white text-sm flex items-center gap-1">
-                                        <Trash2 className="w-4 h-4" /> Rensa
-                                    </button>
-                                    
-                                    <div className="h-4 w-px bg-slate-700 hidden sm:block"></div>
-                                    
-                                    {/* View Toggle */}
-                                    <div className="flex bg-slate-900 rounded-lg p-0.5">
+                                    <div className="flex bg-slate-900 rounded-lg p-1 border border-slate-700 shrink-0">
                                         <button 
-                                            onClick={() => setImportViewStyle('list')}
-                                            className={cn("p-1.5 rounded-md transition-all", importViewStyle === 'list' ? "bg-slate-700 text-white" : "text-slate-500 hover:text-slate-300")}
-                                            title="Listvy"
+                                            onClick={() => setViewFormat('list')}
+                                            className={cn("p-1.5 rounded transition-colors", viewFormat === 'list' ? "bg-slate-700 text-white" : "text-slate-400 hover:text-white")}
+                                            title="Lista"
                                         >
-                                            <LayoutList size={16} />
+                                            <LayoutList size={18} />
                                         </button>
                                         <button 
-                                            onClick={() => setImportViewStyle('card')}
-                                            className={cn("p-1.5 rounded-md transition-all", importViewStyle === 'card' ? "bg-slate-700 text-white" : "text-slate-500 hover:text-slate-300")}
-                                            title="Fokusvy (Kort)"
+                                            onClick={() => setViewFormat('cards')}
+                                            className={cn("p-1.5 rounded transition-colors", viewFormat === 'cards' ? "bg-slate-700 text-white" : "text-slate-400 hover:text-white")}
+                                            title="Kort (Swipe)"
                                         >
-                                            <GalleryHorizontalEnd size={16} />
+                                            <Smartphone size={18} />
                                         </button>
                                     </div>
-
-                                    <div className="h-4 w-px bg-slate-700 hidden sm:block"></div>
-
-                                    <button 
-                                        onClick={handleRunAiAnalysis} 
-                                        disabled={isAiAnalysisRunning}
-                                        className="text-purple-400 hover:text-purple-300 text-sm flex items-center gap-1 disabled:opacity-50"
-                                    >
-                                        {isAiAnalysisRunning ? <Loader2 className="w-4 h-4 animate-spin" /> : <Wand2 className="w-4 h-4" />}
-                                        <span className="hidden sm:inline">AI-Analysera alla</span>
-                                        <span className="sm:hidden">AI</span>
-                                    </button>
                                 </div>
-
-                                <Button 
-                                    onClick={handleCommit} 
-                                    disabled={validForCommitCount === 0}
-                                    className={cn("transition-all w-full sm:w-auto", validForCommitCount > 0 ? "bg-emerald-600 hover:bg-emerald-500" : "bg-slate-700 text-slate-500")}
-                                >
-                                    <Check className="w-4 h-4 mr-2" />
-                                    Bokför {validForCommitCount} st
-                                </Button>
+                                <div className="flex justify-between items-center">
+                                    <div className="text-sm text-slate-400">
+                                        Visar {filteredImportTransactions.length} av {importedTransactions.length}
+                                    </div>
+                                    <div className="flex gap-2">
+                                        <Button variant="danger" onClick={() => { setImportedTransactions([]); setImportSearch(''); }} className="px-3 py-1.5 text-xs">
+                                            Rensa
+                                        </Button>
+                                        <Button variant="primary" onClick={handleCommit} className="px-3 py-1.5 text-xs">
+                                            Bokför ({importedTransactions.filter(t => t.isManuallyApproved || ((t.matchType === 'rule' || t.matchType === 'history') && ((t.type === 'TRANSFER' && settings.autoApproveTransfer) || (t.type === 'EXPENSE' && settings.autoApproveExpense)))).length})
+                                        </Button>
+                                    </div>
+                                </div>
                             </div>
 
-                            {/* LIST OR CARD VIEW */}
-                            {importViewStyle === 'list' ? (
-                                <div className="space-y-2 pb-20">
-                                    {filteredStaging.length > 0 ? (
-                                        filteredStaging.map(tx => (
-                                            <TransactionRow 
-                                                key={tx.id} 
-                                                tx={tx} 
-                                                buckets={buckets}
-                                                mainCategories={mainCategories}
-                                                subCategories={subCategories}
-                                                settings={settings}
-                                                onChange={handleChange}
-                                                onCreateRule={openRuleModal}
-                                                onAiGuess={handleAiGuess}
-                                                isAiLoading={loadingAiId === tx.id}
-                                            />
-                                        ))
-                                    ) : (
-                                        <div className="text-center py-10 text-slate-500">Inga transaktioner matchar sökningen.</div>
+                            {/* --- LIST VIEW --- */}
+                            {viewFormat === 'list' && (
+                                <div className="space-y-2">
+                                    {filteredImportTransactions.map((tx) => (
+                                        <TransactionRow 
+                                            key={tx.id} 
+                                            tx={tx} 
+                                            buckets={buckets} 
+                                            mainCategories={mainCategories} 
+                                            subCategories={subCategories}
+                                            settings={settings}
+                                            onChange={handleChange}
+                                            onUnapprove={handleUnapprove}
+                                            onCreateRule={(t) => openRuleModal(t)}
+                                            onAiGuess={handleAiGuess}
+                                            isAiLoading={isAiLoading}
+                                        />
+                                    ))}
+                                    {filteredImportTransactions.length === 0 && (
+                                        <div className="text-center py-10 text-slate-500">Inga transaktioner matchade sökningen.</div>
                                     )}
                                 </div>
-                            ) : (
-                                <div className="pb-20 max-w-md mx-auto">
-                                    {filteredStaging[currentIndex] ? (
-                                        <TransactionFocusCard 
-                                            tx={filteredStaging[currentIndex]}
+                            )}
+
+                            {/* --- CARD VIEW (SWIPE) --- */}
+                            {viewFormat === 'cards' && (
+                                <div className="relative h-[600px] w-full max-w-md mx-auto">
+                                    {filteredImportTransactions.length > 0 ? (
+                                        <TransactionCard 
+                                            tx={filteredImportTransactions[currentCardIndex]}
                                             buckets={buckets}
                                             mainCategories={mainCategories}
                                             subCategories={subCategories}
                                             settings={settings}
-                                            index={currentIndex}
-                                            total={filteredStaging.length}
+                                            accounts={accounts}
                                             onChange={handleChange}
-                                            onNext={() => setCurrentIndex(prev => Math.min(prev + 1, filteredStaging.length - 1))}
-                                            onPrev={() => setCurrentIndex(prev => Math.max(prev - 1, 0))}
-                                            onCreateRule={openRuleModal}
-                                            onAiGuess={handleAiGuess}
-                                            isAiLoading={loadingAiId === filteredStaging[currentIndex].id}
+                                            onApprove={(id) => handleChange(id, 'isManuallyApproved', true)}
+                                            onNext={() => setCurrentCardIndex(prev => Math.min(prev + 1, filteredImportTransactions.length - 1))}
+                                            onPrev={() => setCurrentCardIndex(prev => Math.max(prev - 1, 0))}
+                                            isFirst={currentCardIndex === 0}
+                                            isLast={currentCardIndex === filteredImportTransactions.length - 1}
                                         />
                                     ) : (
                                         <div className="text-center py-10 text-slate-500">Inga transaktioner att visa.</div>
                                     )}
+                                    <div className="text-center mt-4 text-sm text-slate-400">
+                                        Kort {currentCardIndex + 1} av {filteredImportTransactions.length}
+                                    </div>
                                 </div>
                             )}
                         </div>
                     )}
                 </div>
             )}
-            
+
             {viewMode === 'history' && (
-                <div className="space-y-4 animate-in slide-in-from-right">
-                    
-                    {/* HISTORY FILTERS */}
-                    <div className="flex gap-2">
-                        <div className="relative flex-1">
-                            <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-500" />
+                 <div className="space-y-4">
+                     {/* History Search & Filter */}
+                     <div className="flex flex-col gap-2">
+                         <div className="bg-slate-900 rounded-lg flex items-center px-3 border border-slate-700">
+                            <Search size={16} className="text-slate-400 mr-2" />
                             <input 
-                                type="text" 
-                                placeholder="Sök..."
-                                value={searchTerm}
-                                onChange={(e) => setSearchTerm(e.target.value)}
-                                className="w-full bg-slate-900 border border-slate-700 rounded-xl pl-10 pr-4 py-3 text-sm focus:outline-none focus:border-blue-500 transition-colors"
+                                placeholder="Sök i historik..." 
+                                className="bg-transparent border-none outline-none text-white text-sm w-full py-2 placeholder-slate-500"
+                                value={historySearch}
+                                onChange={(e) => setHistorySearch(e.target.value)}
                             />
-                        </div>
-                        <div className="relative w-1/3">
-                            <Filter className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-500" />
-                             <select 
-                                className="w-full bg-slate-900 border border-slate-700 rounded-xl pl-9 pr-4 py-3 text-sm focus:outline-none focus:border-blue-500 transition-colors appearance-none"
+                            {historySearch && <button onClick={() => setHistorySearch('')}><X size={14} className="text-slate-400"/></button>}
+                         </div>
+                         
+                         <div className="bg-slate-900 rounded-lg flex items-center px-3 border border-slate-700">
+                            <Filter size={16} className="text-slate-400 mr-2" />
+                            <select 
+                                className="bg-transparent border-none outline-none text-white text-sm w-full py-2 cursor-pointer"
                                 value={historyAccountFilter}
                                 onChange={(e) => setHistoryAccountFilter(e.target.value)}
                             >
-                                <option value="">Alla Konton</option>
-                                {accounts.map(a => <option key={a.id} value={a.id}>{a.name}</option>)}
+                                <option value="">Alla konton</option>
+                                {accounts.map(acc => (
+                                    <option key={acc.id} value={acc.id}>{acc.name}</option>
+                                ))}
                             </select>
-                        </div>
-                    </div>
+                         </div>
+                     </div>
 
-                    <div className="bg-slate-800/50 p-4 rounded-xl border border-slate-700 text-center text-sm text-slate-400">
-                        Visar {filteredHistory.length} träffar (av totalt {transactions.length})
-                    </div>
-                    
-                    {filteredHistory.length > 0 ? (
-                        filteredHistory.map(tx => (
-                        <div key={tx.id} className="bg-slate-800 p-3 rounded-lg border border-slate-700 flex justify-between items-center">
-                            <div>
-                                <div className="font-bold text-white text-sm mb-1">{tx.description}</div>
-                                <div className="text-[10px] text-slate-500 mb-2 flex items-center gap-2">
-                                    <span>{tx.date}</span>
-                                    <span>•</span>
-                                    <span>{accounts.find(a=>a.id===tx.accountId)?.name}</span>
-                                </div>
-                                
-                                {/* CATEGORIES DISPLAY */}
-                                <div className="flex flex-wrap gap-2">
-                                    {tx.categoryMainId && (
-                                        <div className="flex items-center gap-1 px-2 py-1 rounded bg-slate-700 text-xs text-slate-300 border border-slate-600">
-                                            <span className="font-bold">{mainCategories.find(c => c.id === tx.categoryMainId)?.name}</span>
-                                        </div>
-                                    )}
-                                    {tx.categorySubId && (
-                                        <div className="flex items-center gap-1 px-2 py-1 rounded bg-slate-700 text-xs text-slate-300 border border-slate-600">
-                                            <span>{subCategories.find(s => s.id === tx.categorySubId)?.name}</span>
-                                        </div>
-                                    )}
-                                    {tx.bucketId && (
-                                        <span className="px-2 py-1 rounded bg-blue-900/50 text-xs text-blue-300 border border-blue-500/30">
-                                            ➡ {buckets.find(b => b.id === tx.bucketId)?.name}
-                                        </span>
-                                    )}
-                                </div>
-                            </div>
-                            <div className="text-right">
-                                <div className={cn("font-mono font-bold", tx.amount < 0 ? "text-white" : "text-emerald-400")}>{formatMoney(tx.amount)}</div>
-                                <button onClick={() => deleteTransaction(tx.id)} className="text-xs text-rose-400 hover:text-white mt-1 opacity-50 hover:opacity-100">Ta bort</button>
-                            </div>
-                        </div>
-                    ))
+                     <div className="space-y-2">
+                         {historyTransactions.map(tx => (
+                             <div key={tx.id} className="bg-slate-800 p-3 rounded-lg border border-slate-700 flex justify-between items-center">
+                                 <div>
+                                     <div className="text-white font-medium">{tx.description}</div>
+                                     <div className="text-xs text-slate-500">{tx.date} • {accounts.find(a => a.id === tx.accountId)?.name}</div>
+                                 </div>
+                                 <div className="text-right">
+                                     <div className="font-mono font-bold text-white">{formatMoney(tx.amount)}</div>
+                                     <div className="text-xs text-slate-400">
+                                         {tx.type === 'EXPENSE' ? 'Utgift' : (tx.type === 'TRANSFER' ? 'Överföring' : 'Inkomst')}
+                                     </div>
+                                 </div>
+                             </div>
+                         ))}
+                         {historyTransactions.length === 0 && (
+                             <div className="text-center text-slate-500 py-10">Ingen historik matchade filtret.</div>
+                         )}
+                     </div>
+                 </div>
+            )}
+
+            {viewMode === 'smart-transfers' && (
+                <div className="space-y-4">
+                    {transferMatches.length === 0 ? (
+                        <div className="text-center text-slate-500 py-10">Inga matchande överföringar hittades just nu.</div>
                     ) : (
-                        <div className="text-center py-10 text-slate-500">Inga historiska transaktioner matchar sökningen.</div>
+                        transferMatches.map((match, idx) => (
+                            <div key={idx} className="bg-slate-800/50 border border-indigo-500/30 rounded-xl p-4 flex flex-col md:flex-row items-center gap-4 animate-in fade-in">
+                                <div className="flex-1 bg-slate-900/50 p-3 rounded-lg border border-slate-700 w-full opacity-75">
+                                    <div className="text-xs text-slate-400 mb-1">{match.from.date} • {accounts.find(a => a.id === match.from.accountId)?.name}</div>
+                                    <div className="font-bold text-white">{match.from.description}</div>
+                                    <div className="text-rose-400 font-mono font-bold">{formatMoney(match.from.amount)}</div>
+                                </div>
+                                <div className="flex flex-col items-center text-indigo-400">
+                                    <ArrowRightLeft size={24} />
+                                    <span className="text-[10px] uppercase font-bold mt-1">Matchar?</span>
+                                </div>
+                                <div className="flex-1 bg-slate-900/50 p-3 rounded-lg border border-slate-700 w-full opacity-75">
+                                    <div className="text-xs text-slate-400 mb-1">{match.to.date} • {accounts.find(a => a.id === match.to.accountId)?.name}</div>
+                                    <div className="font-bold text-white">{match.to.description}</div>
+                                    <div className="text-emerald-400 font-mono font-bold">+{formatMoney(Math.abs(match.to.amount))}</div>
+                                </div>
+                                <div className="flex flex-row md:flex-col gap-2 min-w-[120px]">
+                                    <Button 
+                                        onClick={() => handleLinkTransactions(match.from, match.to)}
+                                        className="bg-indigo-600 hover:bg-indigo-500 text-white w-full"
+                                    >
+                                        <Link2 size={16} className="mr-2" /> Koppla
+                                    </Button>
+                                </div>
+                            </div>
+                        ))
                     )}
                 </div>
             )}
-            
-            {/* Rule Modal */}
-            <Modal isOpen={ruleModalOpen} onClose={() => setRuleModalOpen(false)} title="Skapa importregel">
-                <div className="space-y-4">
-                    <div>
-                         <label className="text-xs font-bold text-slate-400 uppercase tracking-wider block mb-1">Innehåller text</label>
-                         <Input 
-                            value={ruleDraft.keyword || ''} 
-                            onChange={e => setRuleDraft({...ruleDraft, keyword: e.target.value})} 
-                         />
-                    </div>
-                    
-                    <div>
-                         <label className="text-xs font-bold text-slate-400 uppercase tracking-wider block mb-1">Åtgärd</label>
-                         <div className="bg-slate-800 p-3 rounded-xl border border-slate-700 text-sm space-y-2">
-                             <div>
-                                 <span className="text-slate-400">Typ:</span> <span className="text-white font-bold">{ruleDraft.targetType === 'EXPENSE' ? 'Utgift' : (ruleDraft.targetType === 'TRANSFER' ? 'Överföring' : 'Inkomst')}</span>
-                             </div>
-                             {ruleDraft.targetType === 'TRANSFER' && (
-                                 <div>
-                                     <span className="text-slate-400">Budgetpost:</span> <span className="text-white">{buckets.find(b => b.id === ruleDraft.targetBucketId)?.name || 'Ingen vald'}</span>
-                                 </div>
-                             )}
-                             {(ruleDraft.targetType === 'EXPENSE' || ruleDraft.targetType === 'INCOME') && (
-                                 <div>
-                                     <span className="text-slate-400">Kategori:</span> <span className="text-white">
-                                         {mainCategories.find(c => c.id === ruleDraft.targetCategoryMainId)?.name} 
-                                         {ruleDraft.targetCategorySubId && ` > ${subCategories.find(s => s.id === ruleDraft.targetCategorySubId)?.name}`}
-                                     </span>
-                                 </div>
-                             )}
-                         </div>
+
+            {viewMode === 'subscriptions' && (
+                <div className="space-y-6 animate-in fade-in">
+                    <div className="bg-gradient-to-br from-pink-900/40 to-slate-900 border border-pink-500/30 p-5 rounded-2xl flex justify-between items-center">
+                        <div>
+                            <h3 className="text-pink-300 font-bold uppercase text-xs tracking-wider mb-1">Månatliga Fasta Utgifter</h3>
+                            <p className="text-2xl font-mono font-bold text-white">
+                                {formatMoney(subscriptions.reduce((sum, s) => sum + s.avgAmount, 0))}
+                                <span className="text-sm text-slate-400 font-sans font-normal"> / mån (uppskattat)</span>
+                            </p>
+                        </div>
+                        <div className="h-10 w-10 bg-pink-500/20 rounded-full flex items-center justify-center">
+                            <CalendarClock className="text-pink-400" />
+                        </div>
                     </div>
 
-                    <Button onClick={saveRule} disabled={!ruleDraft.keyword}>Spara Regel</Button>
+                    <div className="space-y-3">
+                        {subscriptions.map((sub) => {
+                            const alreadyAdded = isBudgeted(sub.name);
+                            return (
+                                <div key={sub.id} className="bg-slate-800/50 border border-slate-700 rounded-xl p-4 flex justify-between items-center hover:bg-slate-800 transition-colors group">
+                                    <div className="flex items-center gap-4">
+                                        <div className="h-10 w-10 rounded-full bg-slate-700 flex items-center justify-center text-lg font-bold text-slate-300">
+                                            {sub.name.charAt(0).toUpperCase()}
+                                        </div>
+                                        <div>
+                                            <div className="font-bold text-white flex items-center gap-2">
+                                                {sub.name}
+                                                {alreadyAdded && <span className="text-[10px] bg-emerald-500/20 text-emerald-400 px-2 py-0.5 rounded-full flex items-center gap-1"><CheckCircle2 size={10}/> Budgeterad</span>}
+                                                {sub.confidence === 'medium' && <span className="text-[10px] bg-yellow-500/20 text-yellow-400 px-2 py-0.5 rounded-full flex items-center gap-1" title="Varierande belopp men återkommande datum">⚠️ Varierande</span>}
+                                            </div>
+                                            <div className="text-xs text-slate-400 mt-0.5">
+                                                {sub.frequency === 'monthly' ? 'Månadsvis' : 'Återkommande'} • {sub.occurrences} betalningar hittade
+                                            </div>
+                                            <div className="text-xs text-slate-500 mt-0.5">
+                                                Senast: {sub.lastDate}
+                                            </div>
+                                        </div>
+                                    </div>
+                                    <div className="flex items-center gap-4">
+                                        <div className="flex flex-col items-end gap-2">
+                                            <span className="font-mono font-bold text-white text-lg">
+                                                {formatMoney(sub.avgAmount)}
+                                            </span>
+                                            {!alreadyAdded ? (
+                                                <button 
+                                                    onClick={() => handleCreateSubscription(sub)}
+                                                    className="text-xs bg-blue-600 hover:bg-blue-500 text-white px-3 py-1.5 rounded-lg flex items-center gap-1 transition-colors"
+                                                >
+                                                    <PlusCircle size={14} /> Skapa Budgetpost
+                                                </button>
+                                            ) : (
+                                                <span className="text-xs text-slate-500 italic">Redan tillagd</span>
+                                            )}
+                                        </div>
+                                        <button 
+                                            onClick={() => setIgnoredSubscriptions(prev => [...prev, sub.name])}
+                                            className="p-2 text-slate-600 hover:text-rose-400 opacity-0 group-hover:opacity-100 transition-opacity"
+                                            title="Dölj detta förslag"
+                                        >
+                                            <X size={16} />
+                                        </button>
+                                    </div>
+                                </div>
+                            );
+                        })}
+                        {subscriptions.length === 0 && (
+                            <div className="text-center text-slate-500 py-10">Inga prenumerationer hittades.</div>
+                        )}
+                    </div>
+                </div>
+            )}
+
+            {viewMode === 'rules' && (
+                <div className="space-y-4">
+                    {/* Rules List */}
+                    <div className="space-y-2">
+                        {importRules.map(rule => {
+                            const account = accounts.find(a => a.id === rule.accountId);
+                            return (
+                                <div key={rule.id} className="bg-slate-800 p-3 rounded-lg border border-slate-700 flex justify-between items-center group">
+                                    <div className="flex items-center gap-3">
+                                        {rule.sign && (
+                                            <div className={cn("w-6 h-6 rounded flex items-center justify-center text-xs font-bold", rule.sign === 'negative' ? "bg-rose-500/20 text-rose-400" : "bg-emerald-500/20 text-emerald-400")}>
+                                                {rule.sign === 'negative' ? '-' : '+'}
+                                            </div>
+                                        )}
+                                        <div>
+                                            <div className="font-bold text-white flex items-center gap-2">
+                                                {rule.keyword}
+                                                <span className="text-[10px] bg-slate-700 text-slate-300 px-1.5 rounded">{rule.matchType}</span>
+                                                {rule.accountId && <span className="text-[10px] bg-blue-900 text-blue-300 px-1.5 rounded flex items-center gap-1">{accounts.find(a => a.id === rule.accountId)?.icon} {accounts.find(a => a.id === rule.accountId)?.name}</span>}
+                                            </div>
+                                            <div className="text-xs text-slate-400">
+                                                {rule.targetType === 'TRANSFER' 
+                                                    ? `Överföring till ${buckets.find(b => b.id === rule.targetBucketId)?.name || 'Okänd'}` 
+                                                    : `Utgift: ${mainCategories.find(c => c.id === rule.targetCategoryMainId)?.name || 'Okänd'} ${rule.targetCategorySubId ? ' / ' + (subCategories.find(s => s.id === rule.targetCategorySubId)?.name || 'Okänd') : ''}`
+                                                }
+                                            </div>
+                                        </div>
+                                    </div>
+                                    <div className="flex gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
+                                        <button 
+                                            onClick={() => openRuleModal(null, rule)}
+                                            className="p-1.5 text-slate-400 hover:text-white hover:bg-slate-700 rounded"
+                                        >
+                                            <Edit2 size={14} />
+                                        </button>
+                                        <button 
+                                            onClick={() => handleDeleteRule(rule.id)}
+                                            className="p-1.5 text-slate-400 hover:text-rose-400 hover:bg-rose-500/10 rounded"
+                                        >
+                                            <Trash2 size={14} />
+                                        </button>
+                                    </div>
+                                </div>
+                            );
+                        })}
+                        {importRules.length === 0 && (
+                            <div className="text-center text-slate-500 py-10">Inga regler skapade än.</div>
+                        )}
+                    </div>
+                    
+                    <Button variant="secondary" onClick={() => {
+                        setEditingRule(null);
+                        setRuleTransaction(null);
+                        setRuleKeyword('');
+                        setRuleModalOpen(true);
+                    }} className="w-full">
+                        <Plus className="w-4 h-4 mr-2" /> Skapa ny regel manuellt
+                    </Button>
+                </div>
+            )}
+
+            {/* RULE MODAL */}
+            <Modal isOpen={ruleModalOpen} onClose={() => setRuleModalOpen(false)} title={editingRule ? "Redigera Regel" : "Skapa Ny Regel"}>
+                <div className="space-y-4">
+                    <Input label="Nyckelord / Text" value={ruleKeyword} onChange={(e) => setRuleKeyword(e.target.value)} />
+                    
+                    <div>
+                        <label className="text-xs font-medium text-slate-400 uppercase tracking-wider block mb-1">Matchningstyp</label>
+                        <div className="flex bg-slate-900 rounded-lg p-1">
+                            <button onClick={() => setRuleMatchType('contains')} className={cn("flex-1 text-xs py-2 rounded transition-all", ruleMatchType === 'contains' ? "bg-blue-600 text-white" : "text-slate-400 hover:text-white")}>Innehåller</button>
+                            <button onClick={() => setRuleMatchType('starts_with')} className={cn("flex-1 text-xs py-2 rounded transition-all", ruleMatchType === 'starts_with' ? "bg-blue-600 text-white" : "text-slate-400 hover:text-white")}>Börjar med</button>
+                            <button onClick={() => setRuleMatchType('exact')} className={cn("flex-1 text-xs py-2 rounded transition-all", ruleMatchType === 'exact' ? "bg-blue-600 text-white" : "text-slate-400 hover:text-white")}>Exakt</button>
+                        </div>
+                    </div>
+
+                    <div>
+                        <label className="text-xs font-medium text-slate-400 uppercase tracking-wider block mb-1">Gäller för tecken</label>
+                        <div className="flex bg-slate-900 rounded-lg p-1">
+                            <button onClick={() => setRuleSign('negative')} className={cn("flex-1 text-xs py-2 rounded transition-all", ruleSign === 'negative' ? "bg-rose-600 text-white" : "text-slate-400 hover:text-white")}>Utgifter (-)</button>
+                            <button onClick={() => setRuleSign('positive')} className={cn("flex-1 text-xs py-2 rounded transition-all", ruleSign === 'positive' ? "bg-emerald-600 text-white" : "text-slate-400 hover:text-white")}>Inkomster (+)</button>
+                            <button onClick={() => setRuleSign(undefined)} className={cn("flex-1 text-xs py-2 rounded transition-all", !ruleSign ? "bg-slate-600 text-white" : "text-slate-400 hover:text-white")}>Båda</button>
+                        </div>
+                    </div>
+                    
+                    {ruleTransaction && (
+                        <div className="bg-slate-800 p-3 rounded-lg text-xs text-slate-300">
+                             Baserat på: <span className="font-bold text-white">{ruleTransaction.description}</span>
+                        </div>
+                    )}
+
+                    <Button onClick={handleSaveRule} disabled={!ruleKeyword} className="w-full">
+                        Spara Regel
+                    </Button>
                 </div>
             </Modal>
         </div>

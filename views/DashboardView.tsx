@@ -111,10 +111,10 @@ export const DashboardView: React.FC = () => {
   // 4. Distribution Logic
   const { distribution, totalDistributed } = useMemo(() => {
     const userCalculations = users.map(user => {
-        const data = user.incomeData[selectedMonth] || {};
+        const data = user.incomeData[selectedMonth];
         const actualIncome = getUserIncome(user, selectedMonth);
-        const days = data.vabDays || 0;
-        const rate = data.dailyDeduction !== undefined ? data.dailyDeduction : getLatestDailyDeduction(user, selectedMonth);
+        const days = data?.vabDays || 0;
+        const rate = data?.dailyDeduction !== undefined ? data.dailyDeduction : getLatestDailyDeduction(user, selectedMonth);
         const incomeLoss = days * rate;
         const theoreticalIncome = actualIncome + incomeLoss;
     

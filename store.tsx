@@ -101,6 +101,7 @@ const TransactionSchema = z.object({
     amount: z.number(),
     description: z.string(),
     type: z.enum(['EXPENSE', 'TRANSFER', 'INCOME']).optional(),
+    linkedTransactionId: z.string().optional(),
     bucketId: z.string().optional(),
     categoryMainId: z.string().optional(),
     categorySubId: z.string().optional(),
@@ -111,11 +112,13 @@ const TransactionSchema = z.object({
 const ImportRuleSchema = z.object({
     id: z.string(),
     keyword: z.string(),
+    accountId: z.string().optional(),
     targetType: z.enum(['EXPENSE', 'TRANSFER', 'INCOME']).optional(),
     targetBucketId: z.string().optional(),
     targetCategoryMainId: z.string().optional(),
     targetCategorySubId: z.string().optional(),
-    matchType: z.enum(['contains', 'exact', 'starts_with'])
+    matchType: z.enum(['contains', 'exact', 'starts_with']),
+    sign: z.enum(['positive', 'negative']).optional()
 });
 
 const GlobalStateSchema = z.object({
@@ -151,6 +154,8 @@ interface AppContextType extends GlobalState {
   addTransactions: (txs: Transaction[]) => Promise<void>;
   updateTransaction: (tx: Transaction) => Promise<void>;
   addImportRule: (rule: ImportRule) => Promise<void>;
+  updateImportRule: (rule: ImportRule) => Promise<void>;
+  deleteImportRule: (id: string) => Promise<void>;
   deleteTransaction: (id: string) => Promise<void>;
   deleteAllTransactions: () => Promise<void>;
   // Category Methods
@@ -636,6 +641,16 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       setImportRules(prev => [...prev, rule]);
   };
 
+  const updateImportRule = async (rule: ImportRule) => {
+      await db.importRules.put(rule);
+      setImportRules(prev => prev.map(r => r.id === rule.id ? rule : r));
+  };
+
+  const deleteImportRule = async (id: string) => {
+      await db.importRules.delete(id);
+      setImportRules(prev => prev.filter(r => r.id !== id));
+  };
+
   // --- BACKUP ---
   const getExportData = async () => {
       const data = {
@@ -680,7 +695,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     settings, setPayday: (day) => updateSettings({ payday: day }), updateSettings,
     selectedMonth, setMonth: setSelectedMonth,
     transactions, addTransactions, updateTransaction, deleteTransaction, deleteAllTransactions,
-    importRules, addImportRule,
+    importRules, addImportRule, updateImportRule, deleteImportRule,
     // Categories
     mainCategories, addMainCategory, deleteMainCategory,
     subCategories, addSubCategory, updateSubCategory, deleteSubCategory, resetCategoriesToDefault,

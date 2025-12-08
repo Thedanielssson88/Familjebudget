@@ -92,7 +92,7 @@ const TransfersViewContent: React.FC = () => {
   const [accountName, setAccountName] = useState('');
   const [accountIcon, setAccountIcon] = useState('🏠');
 
-  const accountIcons = ['🏠', '🚗', '💰', '🍔', '✈️', '👶', '🐶', '💊', '🎓', '🎁', '🔧', '🧥', '💳', '🏦', '📉', '🏖️', '💡', '🛒', '🚲', '🎮'];
+  const accountIcons = ['🏠', '🚗', '💰', '✈️', '🍔', '👶', '🐶', '💊', '🎓', '🎁', '🔧', '🧥', '💳', '🏦', '📉', '🏖️', '💡', '🛒', '🚲', '🎮'];
 
   const openAccountModal = (account?: Account) => {
       if (account) {
@@ -627,7 +627,7 @@ const TransfersViewContent: React.FC = () => {
                                     </button>
                                     <button 
                                     onClick={() => setType('GOAL')}
-                                    className={cn("p-3 rounded-xl border text-sm font-medium transition-colors col-span-2 flex items-center justify-center gap-2", editingBucket.type === 'GOAL' ? "bg-blue-600 border-blue-500 text-white" : "border-slate-700 text-slate-400")}
+                                    className={cn("p-3 rounded-xl border text-sm font-medium transition-colors col-span-2 flex items-center justify-center gap-2 border-slate-700 text-slate-400")}
                                     >
                                     <Target className="w-5 h-5" />
                                     Byt till Dröm & Målsparande

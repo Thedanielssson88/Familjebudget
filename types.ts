@@ -94,6 +94,8 @@ export interface Transaction {
   description: string;
   
   type?: TransactionType; // New: Distinguish between consumption (Expense) and movement (Transfer)
+  
+  linkedTransactionId?: string; // If matched with another transaction (e.g. internal transfer)
 
   // Funding / Budgeting (Used if type == TRANSFER)
   bucketId?: string; // Where the money comes from (Budget Post).
@@ -118,12 +120,16 @@ export interface ImportRule {
   id: string;
   keyword: string;
   matchType: 'contains' | 'exact' | 'starts_with';
+  accountId?: string; // Optional: If set, rule only applies to this account
   
   // Rule actions
   targetType?: TransactionType;
   targetBucketId?: string;
   targetCategoryMainId?: string;
   targetCategorySubId?: string;
+  
+  // Sign constraint
+  sign?: 'positive' | 'negative'; // Only match transactions with this sign
 }
 
 export interface AppSettings {
