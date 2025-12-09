@@ -1,8 +1,7 @@
 
-
 import React, { useMemo, useState } from 'react';
 import { useApp } from '../store';
-import { formatMoney, getEffectiveBudgetGroupData, getBudgetInterval, calculateFixedBucketCost, calculateDailyBucketCost, calculateGoalBucketCost, getEffectiveBucketData } from '../utils';
+import { formatMoney, getEffectiveBudgetGroupData, getBudgetInterval } from '../utils';
 import { 
     PieChart, Pie, Cell, Tooltip, ResponsiveContainer, 
     ComposedChart, Bar, XAxis, YAxis, CartesianGrid, Area, Legend
@@ -11,7 +10,7 @@ import { ChevronRight, ChevronDown, Edit2, Check, AlertTriangle, TrendingUp, Tre
 import { BudgetProgressBar } from '../components/BudgetProgressBar';
 import { cn, Button } from '../components/components';
 import { BudgetGroup, Bucket } from '../types';
-import { format, subMonths, parseISO, differenceInDays, startOfDay, endOfDay, areIntervalsOverlapping, addDays, isValid, startOfMonth, endOfMonth, addMonths } from 'date-fns';
+import { format, subMonths, parseISO, differenceInDays, startOfDay, endOfDay, areIntervalsOverlapping, addDays, isValid } from 'date-fns';
 import { sv } from 'date-fns/locale';
 
 // --- SUB-COMPONENT: MONTHLY SNAPSHOT (Enhanced) ---
@@ -26,42 +25,12 @@ const MonthlySnapshot = ({ selectedMonth }: { selectedMonth: string }) => {
     const [timeframe, setTimeframe] = useState<1 | 3 | 6 | 12>(1);
     const [excludeDreams, setExcludeDreams] = useState(false);
 
-    // --- HELPER: Calculate Budget Limit Logic (Same as OperatingBudgetView) ---
-    // Recalculates the dynamic budget limit for a specific group in a specific month
-    const calculateGroupLimitForMonth = (group: BudgetGroup, monthKey: string) => {
-        const explicitData = group.monthlyData?.[monthKey];
-        
-        // 1. Explicit Manual Override
-        if (explicitData && !explicitData.isExplicitlyDeleted) {
-            return explicitData.limit;
-        }
-
-        // 2. Auto-Calculated from Linked Buckets
-        if (group.linkedBucketIds && group.linkedBucketIds.length > 0) {
-            const fundingBuckets = buckets.filter(b => group.linkedBucketIds?.includes(b.id));
-            const totalFunding = fundingBuckets.reduce((sum, b) => {
-                // Handle Goal Event Distribution logic if needed (simplified here for stats: usually just monthly cost)
-                // For Operating Budget accuracy, we should probably check event distribution too, but let's stick to base cost for performance in loop
-                if (b.type === 'FIXED') return sum + calculateFixedBucketCost(b, monthKey);
-                if (b.type === 'DAILY') return sum + calculateDailyBucketCost(b, monthKey, settings.payday);
-                if (b.type === 'GOAL') return sum + calculateGoalBucketCost(b, monthKey);
-                return sum;
-            }, 0);
-            return totalFunding;
-        }
-
-        // 3. Inherited Manual Limit
-        const { data: inheritedData } = getEffectiveBudgetGroupData(group, monthKey);
-        if (inheritedData && !inheritedData.isExplicitlyDeleted) {
-            return inheritedData.limit;
-        }
-
-        return 0;
-    };
-
     // --- HELPER: Calculate Travel Overlap ---
+    // Returns a Set of date strings (YYYY-MM-DD) that were spent on trips
     const calculateDreamOverlapDays = (startDate: Date, endDate: Date) => {
         const tripDays = new Set<string>();
+        
+        // Find all active GOAL buckets (Dreams) that have dates
         const activeDreams = buckets.filter(b => b.type === 'GOAL' && b.eventStartDate && b.eventEndDate);
 
         activeDreams.forEach(dream => {
@@ -71,44 +40,34 @@ const MonthlySnapshot = ({ selectedMonth }: { selectedMonth: string }) => {
 
             if (!isValid(dreamStart) || !isValid(dreamEnd)) return;
 
+            // Check overlap with analysis period
             if (areIntervalsOverlapping({ start: startDate, end: endDate }, { start: dreamStart, end: dreamEnd })) {
+                // Iterate through dream days and add to Set if they are within analysis period
                 let iter = dreamStart < startDate ? startDate : dreamStart;
                 const limit = dreamEnd > endDate ? endDate : dreamEnd;
+
                 while (iter <= limit) {
                     tripDays.add(format(iter, 'yyyy-MM-dd'));
                     iter = addDays(iter, 1);
                 }
             }
         });
+
         return tripDays;
     };
 
     // --- DATA CALCULATION ---
     const data = useMemo(() => {
         // 1. Determine Date Range based on Timeframe & Payday
-        // Logic: If timeframe > 1, we look at COMPLETED months previous to selected month.
-        // If selected is July, and timeframe is 3, we look at April, May, June.
-        
-        let targetEndMonth = selectedMonth; 
-        
-        if (timeframe > 1) {
-            targetEndMonth = format(subMonths(parseISO(`${selectedMonth}-01`), 1), 'yyyy-MM');
-        }
-        
-        const endDateObj = getBudgetInterval(targetEndMonth, settings.payday).end;
-        
-        // Start date is X months back from the END month
+        const endDateObj = getBudgetInterval(selectedMonth, settings.payday).end;
+        // Start date is X months back from the END of the current budget month
+        // We use the start of the budget interval X months ago.
         const monthsBack = timeframe - 1;
-        const startMonthKey = format(subMonths(parseISO(`${targetEndMonth}-01`), monthsBack), 'yyyy-MM');
+        const startMonthKey = format(subMonths(parseISO(`${selectedMonth}-01`), monthsBack), 'yyyy-MM');
         const startDateObj = getBudgetInterval(startMonthKey, settings.payday).start;
 
         const startStr = format(startDateObj, 'yyyy-MM-dd');
         const endStr = format(endDateObj, 'yyyy-MM-dd');
-        
-        // Label for UI
-        const rangeLabel = timeframe === 1 
-            ? format(parseISO(`${selectedMonth}-01`), 'MMMM yyyy', { locale: sv })
-            : `${format(startDateObj, 'MMM', { locale: sv })} - ${format(endDateObj, 'MMM yyyy', { locale: sv })}`;
 
         // 2. Calculate Scaling Factors (Smart Normalization)
         let scalingFactor = 1;
@@ -119,7 +78,11 @@ const MonthlySnapshot = ({ selectedMonth }: { selectedMonth: string }) => {
         if (excludeDreams) {
             const tripDaysSet = calculateDreamOverlapDays(startDateObj, endDateObj);
             tripDaysCount = tripDaysSet.size;
-            homeDaysCount = Math.max(1, totalDays - tripDaysCount);
+            homeDaysCount = Math.max(1, totalDays - tripDaysCount); // Avoid division by zero
+            
+            // We scale up variable costs based on "Home Days".
+            // If I was home 20 days out of 30, my food cost should be x1.5 to represent a full month.
+            // Cap scaling to avoid extreme skew if home days are very few (e.g. < 5 days).
             if (homeDaysCount > 5) {
                 scalingFactor = totalDays / homeDaysCount;
             }
@@ -127,11 +90,14 @@ const MonthlySnapshot = ({ selectedMonth }: { selectedMonth: string }) => {
 
         // 3. Filter Transactions
         const relevantTx = transactions.filter(t => {
+            // Date Check
             if (t.date < startStr || t.date > endStr) return false;
+            
+            // Type Check (Expenses only)
             const isExpense = t.type === 'EXPENSE' || (!t.type && t.amount < 0);
             if (!isExpense) return false;
 
-            // Strict Dream Exclusion: Only if toggle is ON
+            // Dream Exclusion Check
             if (excludeDreams && t.bucketId) {
                 const bucket = buckets.find(b => b.id === t.bucketId);
                 if (bucket?.type === 'GOAL') return false;
@@ -141,18 +107,21 @@ const MonthlySnapshot = ({ selectedMonth }: { selectedMonth: string }) => {
         });
 
         // 4. Aggregate by Group
+        const catchAllGroup = budgetGroups.find(g => g.isCatchAll);
+
         const groupStats = budgetGroups.map(group => {
             const assignedSubs = subCategories.filter(s => s.budgetGroupId === group.id);
             const assignedSubIds = new Set(assignedSubs.map(s => s.id));
             
             const groupTxs = relevantTx.filter(t => {
-                // If "Include Dreams" is ON (excludeDreams is OFF), we allow dream transactions
-                // to fall into their categories.
-                if (excludeDreams) {
-                     if (t.bucketId) {
-                        const b = buckets.find(b => b.id === t.bucketId);
-                        if (b?.type === 'GOAL') return false; 
-                    }
+                // If it belongs to a dream (and we haven't excluded it above), don't count it in regular groups
+                // (Unless specific logic requires it, but standard operating budget usually excludes trips)
+                // However, "relevantTx" already filtered out Dreams if excludeDreams is ON.
+                // If excludeDreams is OFF, we might still want to exclude them from "Mat" if they are linked to "Thailand".
+                // Current OperatingBudget logic excludes Dream-linked TXs from groups. Let's stick to that for consistency.
+                if (t.bucketId) {
+                    const b = buckets.find(b => b.id === t.bucketId);
+                    if (b?.type === 'GOAL') return false; 
                 }
 
                 if (t.categorySubId && assignedSubIds.has(t.categorySubId)) return true;
@@ -164,29 +133,45 @@ const MonthlySnapshot = ({ selectedMonth }: { selectedMonth: string }) => {
             let spent = 0;
             
             if (excludeDreams) {
+                // SMART SCALING:
+                // Fixed Costs (Rent, Netflix) do NOT drop when we travel. They should NOT be scaled.
+                // Variable Costs (Food, Transport) DO drop. They SHOULD be scaled.
                 groupTxs.forEach(t => {
                     const amount = Math.abs(t.amount);
                     let shouldScale = true;
+
+                    // Check if transaction comes from a FIXED bucket (rare for expenses, but possible)
+                    // Or check Category nature? Hard to know category nature.
+                    // Fallback: Check if the group itself seems fixed? No, groups are mixed.
+                    // Check Bucket Type if linked?
                     if (t.bucketId) {
                         const b = buckets.find(b => b.id === t.bucketId);
                         if (b?.type === 'FIXED') shouldScale = false;
                     } 
+                    // HEURISTIC: Housing (Boende) is usually fixed.
+                    // If group Name contains "Boende" or "Fast", don't scale.
+                    // This is a bit magic-stringy, but effective.
                     if (group.name.toLowerCase().includes('boende') || group.name.toLowerCase().includes('fast')) {
                         shouldScale = false;
                     }
+
                     spent += shouldScale ? (amount * scalingFactor) : amount;
                 });
             } else {
                 spent = groupTxs.reduce((sum, t) => sum + Math.abs(t.amount), 0);
             }
 
+            // Divide by number of months to get Monthly Average
             const avgSpent = spent / timeframe;
             
-            // Breakdown
+            // Breakdown (Sub Categories) - Also averaged
             const breakdown = assignedSubs.map(sub => {
                 let subSpent = 0;
                 groupTxs.filter(t => t.categorySubId === sub.id).forEach(t => {
                     const amount = Math.abs(t.amount);
+                    // Apply same scaling logic per transaction or per sub? 
+                    // Simplify: Use group scaling factor logic or generic.
+                    // For breakdown, apply generic scaling if active
                     const isFixedCat = sub.name.toLowerCase().includes('hyra') || sub.name.toLowerCase().includes('avgift') || sub.name.toLowerCase().includes('försäkring');
                     const factor = (excludeDreams && !isFixedCat) ? scalingFactor : 1;
                     subSpent += amount * factor;
@@ -197,28 +182,15 @@ const MonthlySnapshot = ({ selectedMonth }: { selectedMonth: string }) => {
             const totalSubSpent = breakdown.reduce((sum, s) => sum + s.spent, 0);
             const unclassifiedSpent = avgSpent - totalSubSpent;
 
-            // AVERAGE BUDGET LIMIT CALCULATION
-            // We need to calculate the limit for EACH month in the timeframe and average it.
-            let totalLimitOverPeriod = 0;
-            
-            // Iterate months from startMonthKey to targetEndMonth
-            let iterDate = startDateObj; // use the calculated start date object
-            // Just iterate month by month
-            for (let i = 0; i < timeframe; i++) {
-                // Correct iteration:
-                const mDate = addMonths(parseISO(`${startMonthKey}-01`), i);
-                const mKey = format(mDate, 'yyyy-MM');
-                
-                totalLimitOverPeriod += calculateGroupLimitForMonth(group, mKey);
-            }
-            
-            const avgLimit = totalLimitOverPeriod / timeframe;
+            // Budget Limit (Take current month's limit as the benchmark)
+            const { data } = getEffectiveBudgetGroupData(group, selectedMonth);
+            const limit = data ? data.limit : 0;
 
             return {
                 ...group,
                 spent: avgSpent,
-                limit: avgLimit,
-                remaining: avgLimit - avgSpent,
+                limit,
+                remaining: limit - avgSpent,
                 breakdown,
                 unclassifiedSpent
             };
@@ -230,11 +202,10 @@ const MonthlySnapshot = ({ selectedMonth }: { selectedMonth: string }) => {
 
         return { 
             groupStats, totalLimit, totalSpent, totalRemaining, 
-            isScaled: excludeDreams && scalingFactor > 1.05, 
+            isScaled: excludeDreams && scalingFactor > 1.05, // Only show if scale is significant (>5%)
             homeDays: homeDaysCount,
             totalDays,
-            scalingFactor,
-            rangeLabel
+            scalingFactor
         };
     }, [budgetGroups, subCategories, transactions, selectedMonth, timeframe, excludeDreams, buckets, settings.payday]);
 
@@ -264,39 +235,32 @@ const MonthlySnapshot = ({ selectedMonth }: { selectedMonth: string }) => {
         <div className="space-y-6 animate-in fade-in">
              
              {/* CONTROLS */}
-             <div className="flex flex-col gap-2">
-                 <div className="flex flex-wrap gap-2 items-center justify-between bg-slate-900/50 p-3 rounded-xl border border-slate-700">
-                     <div className="flex gap-1 bg-slate-800 rounded-lg p-1">
-                         {[1, 3, 6, 12].map(m => (
-                             <button 
-                                key={m}
-                                onClick={() => setTimeframe(m as any)}
-                                className={cn(
-                                    "px-3 py-1.5 text-xs font-bold rounded-md transition-all",
-                                    timeframe === m ? "bg-blue-600 text-white shadow" : "text-slate-400 hover:text-white hover:bg-slate-700"
-                                )}
-                             >
-                                 {m === 1 ? 'Denna månad' : `Snitt ${m} mån`}
-                             </button>
-                         ))}
-                     </div>
+             <div className="flex flex-wrap gap-2 items-center justify-between bg-slate-900/50 p-3 rounded-xl border border-slate-700">
+                 <div className="flex gap-1 bg-slate-800 rounded-lg p-1">
+                     {[1, 3, 6, 12].map(m => (
+                         <button 
+                            key={m}
+                            onClick={() => setTimeframe(m as any)}
+                            className={cn(
+                                "px-3 py-1.5 text-xs font-bold rounded-md transition-all",
+                                timeframe === m ? "bg-blue-600 text-white shadow" : "text-slate-400 hover:text-white hover:bg-slate-700"
+                            )}
+                         >
+                             {m === 1 ? 'Denna månad' : `Snitt ${m} mån`}
+                         </button>
+                     ))}
+                 </div>
 
-                     <button 
-                        onClick={() => setExcludeDreams(!excludeDreams)}
-                        className={cn(
-                            "px-3 py-2 text-xs font-bold rounded-lg flex items-center gap-2 border transition-all",
-                            excludeDreams ? "bg-purple-500/20 border-purple-500 text-purple-300" : "bg-slate-800 border-slate-700 text-slate-400 hover:text-white"
-                        )}
-                     >
-                         <Plane size={14} />
-                         {excludeDreams ? 'Resor Exkluderade' : 'Inkludera Resor'}
-                     </button>
-                 </div>
-                 
-                 {/* DATE RANGE INFO */}
-                 <div className="text-center text-xs text-slate-400 bg-slate-800/30 rounded-lg py-1 border border-slate-700/50">
-                     Beräkningsperiod: <span className="text-white font-medium">{data.rangeLabel}</span>
-                 </div>
+                 <button 
+                    onClick={() => setExcludeDreams(!excludeDreams)}
+                    className={cn(
+                        "px-3 py-2 text-xs font-bold rounded-lg flex items-center gap-2 border transition-all",
+                        excludeDreams ? "bg-purple-500/20 border-purple-500 text-purple-300" : "bg-slate-800 border-slate-700 text-slate-400 hover:text-white"
+                    )}
+                 >
+                     <Plane size={14} />
+                     {excludeDreams ? 'Resor Exkluderade' : 'Inkludera Resor'}
+                 </button>
              </div>
 
              {/* NORMALIZATION INFO */}

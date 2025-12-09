@@ -137,25 +137,12 @@ export interface ImportRule {
   sign?: 'positive' | 'negative'; // Only match transactions with this sign
 }
 
-export interface IgnoredSubscription {
-    id: string; // Usually the description
-}
-
 export interface AppSettings {
   payday: number; // Day of month (e.g., 25)
   // Auto-approval settings for import
   autoApproveIncome?: boolean;
   autoApproveTransfer?: boolean;
   autoApproveExpense?: boolean;
-}
-
-export interface ImportLog {
-  id: string;
-  date: string; // ISO Timestamp
-  fileName: string;
-  transactionCount: number;
-  status: 'SUCCESS' | 'ERROR' | 'PARTIAL';
-  errors?: string[]; // List of specific error messages
 }
 
 export interface GlobalState {
@@ -172,6 +159,4 @@ export interface GlobalState {
   selectedMonth: string; // YYYY-MM
   transactions: Transaction[];
   importRules: ImportRule[];
-  ignoredSubscriptions: IgnoredSubscription[];
-  importLogs: ImportLog[]; // New log state
 }

@@ -6,16 +6,15 @@ import { DashboardView } from './views/DashboardView';
 import { StatsView } from './views/StatsView';
 import { DreamsView } from './views/DreamsView';
 import { TransactionsView } from './views/TransactionsView';
-import { LogView } from './views/LogView';
 import { SettingsCategories } from './views/SettingsCategories';
 import { OperatingBudgetView } from './views/OperatingBudgetView';
-import { LayoutGrid, Wallet, PieChart, ArrowLeftRight, Calendar, Settings, Sparkles, Cloud, RefreshCw, Trash2, Download, Receipt, Database, AlertTriangle, FileText } from 'lucide-react';
+import { LayoutGrid, Wallet, PieChart, ArrowLeftRight, Calendar, Settings, Sparkles, Cloud, RefreshCw, Trash2, Download, Receipt, Database, AlertTriangle } from 'lucide-react';
 import { cn, Button } from './components/components';
 import { format, subMonths, addMonths } from 'date-fns';
 import { sv } from 'date-fns/locale';
 import { initGoogleDrive, loginToGoogle, listBackups, createBackupFile, loadBackupFile, deleteBackupFile, DriveFile } from './services/googleDrive';
 
-type View = 'income' | 'budget' | 'dashboard' | 'dreams' | 'transactions' | 'logs';
+type View = 'income' | 'budget' | 'dashboard' | 'dreams' | 'transactions';
 
 const MainApp = () => {
   const [currentView, setCurrentView] = useState<View>('dashboard');
@@ -86,12 +85,10 @@ const MainApp = () => {
       setBackupStatus('Återställer...');
       try {
           const jsonContent = await loadBackupFile(fileId);
-          // CRITICAL FIX: Await the import process to finish DB writes before reloading
-          const success = await importData(jsonContent); 
+          const success = importData(jsonContent);
           if (success) {
               setBackupStatus('Återställd!');
-              // Small delay to ensure IndexedDB flush
-              setTimeout(() => window.location.reload(), 100);
+              window.location.reload(); // Reload to refresh state cleanly
           } else {
               setBackupStatus('Filen var ogiltig');
           }
@@ -143,7 +140,6 @@ const MainApp = () => {
       case 'dashboard': return <DashboardView />;
       case 'dreams': return <DreamsView />;
       case 'transactions': return <TransactionsView />;
-      case 'logs': return <LogView />;
       default: return <DashboardView />;
     }
   };
@@ -333,7 +329,6 @@ const MainApp = () => {
             <NavButton active={currentView === 'dashboard'} onClick={() => setCurrentView('dashboard')} icon={<LayoutGrid />} label="Översikt" />
             <NavButton active={currentView === 'dreams'} onClick={() => setCurrentView('dreams')} icon={<Sparkles />} label="Drömmar" />
             <NavButton active={currentView === 'transactions'} onClick={() => setCurrentView('transactions')} icon={<Receipt />} label="Import" />
-            <NavButton active={currentView === 'logs'} onClick={() => setCurrentView('logs')} icon={<FileText />} label="Logg" />
         </div>
       </nav>
     </div>
@@ -343,7 +338,7 @@ const MainApp = () => {
 const NavButton = ({ active, onClick, icon, label }: { active: boolean, onClick: () => void, icon: React.ReactNode, label: string }) => (
     <button 
         onClick={onClick}
-        className={cn("flex flex-col items-center gap-1 transition-all duration-200 w-12", active ? "text-blue-400 scale-110" : "text-slate-500 hover:text-slate-300")}
+        className={cn("flex flex-col items-center gap-1 transition-all duration-200 w-16", active ? "text-blue-400 scale-110" : "text-slate-500 hover:text-slate-300")}
     >
         <div className={cn("p-1 rounded-xl transition-all", active && "bg-blue-500/10")}>
             {React.cloneElement(icon as React.ReactElement<any>, { size: 24, strokeWidth: active ? 2.5 : 2 })}
