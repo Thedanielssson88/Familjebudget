@@ -2,7 +2,7 @@
 import React, { useMemo, useState } from 'react';
 import { useApp } from '../store';
 import { formatMoney, getEffectiveBudgetGroupData, calculateFixedBucketCost, calculateDailyBucketCost, calculateGoalBucketCost, getBudgetInterval } from '../utils';
-import { ChevronRight, ChevronDown, Check, AlertTriangle, PieChart, Edit2, Plus, Wallet, Trash2, X, Settings, ArrowRightLeft, Rocket, Calendar, Plane } from 'lucide-react';
+import { ChevronRight, ChevronDown, Check, AlertTriangle, PieChart, Edit2, Plus, Trash2, X, Settings, ArrowRightLeft, Rocket, Calendar, Plane, RefreshCw, Lock, ChevronUp } from 'lucide-react';
 import { BudgetProgressBar } from '../components/BudgetProgressBar';
 import { cn, Button, Modal, Input } from '../components/components';
 import { BudgetGroup, SubCategory, Bucket } from '../types';
@@ -16,17 +16,26 @@ export const OperatingBudgetView: React.FC = () => {
   const [expandedMains, setExpandedMains] = useState<Set<string>>(new Set());
   const [expandedSubs, setExpandedSubs] = useState<Set<string>>(new Set());
   
+  // Expanded state for Spending Goals (Drilldown)
+  const [expandedGoals, setExpandedGoals] = useState<Set<string>>(new Set());
+
   // Modal State
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [editingGroup, setEditingGroup] = useState<BudgetGroup | null>(null);
   const [editingLimit, setEditingLimit] = useState<number>(0);
+  const [useAutoLimit, setUseAutoLimit] = useState(false); // New state for Auto Mode
+  const [calculatedFunding, setCalculatedFunding] = useState(0); // Store funding for modal display
   const [deleteMode, setDeleteMode] = useState(false);
+  
+  // New State for collapsing/expanding details
+  const [showDetails, setShowDetails] = useState(false);
   
   // New Category State (inside modal)
   const [newSubName, setNewSubName] = useState('');
   const [selectedMainId, setSelectedMainId] = useState('');
 
-  // Toggle for Events
+  // Toggle for Events - Note: This now only affects the 'Overview' calculation/summary, 
+  // but deduping logic ensures dreams don't appear in regular groups regardless of this toggle.
   const [includeEvents, setIncludeEvents] = useState(false);
 
   // --- HELPER: Event Distribution Logic ---
@@ -75,8 +84,6 @@ export const OperatingBudgetView: React.FC = () => {
     // 2. Filter Transactions (Expenses Only for this Month Interval)
     const txForMonth = transactions.filter(t => {
         const isExpense = t.type === 'EXPENSE' || (!t.type && t.amount < 0);
-        // Date check: inclusive of start and end
-        // Simple string comparison works for ISO dates yyyy-MM-dd
         const inRange = t.date >= startStr && t.date <= endStr;
         return isExpense && inRange;
     });
@@ -107,66 +114,127 @@ export const OperatingBudgetView: React.FC = () => {
 
         if (!isActive) return null;
 
-        return { ...b, monthlyBudget, label };
+        // Build Hierarchy for this Goal (Duplicate logic from groupStats, but specific to this Goal's bucketId)
+        const goalTxs = txForMonth.filter(t => t.bucketId === b.id);
+        const goalSpent = goalTxs.reduce((sum, t) => sum + Math.abs(t.amount), 0);
+
+        // Group by Main -> Sub
+        const relevantMainIds = new Set<string>();
+        goalTxs.forEach(t => { if(t.categoryMainId) relevantMainIds.add(t.categoryMainId) });
+
+        const mains = Array.from(relevantMainIds).map(mainId => {
+            const mainCat = mainCategories.find(m => m.id === mainId);
+            const mainTxs = goalTxs.filter(t => t.categoryMainId === mainId);
+            const mainSpent = mainTxs.reduce((sum, t) => sum + Math.abs(t.amount), 0);
+
+            // Group by Sub
+            const relevantSubIds = new Set<string>();
+            mainTxs.forEach(t => { if(t.categorySubId) relevantSubIds.add(t.categorySubId) });
+
+            const subs = Array.from(relevantSubIds).map(subId => {
+                const subCat = subCategories.find(s => s.id === subId);
+                const subTxs = mainTxs.filter(t => t.categorySubId === subId);
+                const subSpent = subTxs.reduce((sum, t) => sum + Math.abs(t.amount), 0);
+                return { id: subId, name: subCat?.name || 'Okänd', spent: subSpent, transactions: subTxs };
+            });
+
+            // Handle unassigned subs within main
+            const unassignedTxs = mainTxs.filter(t => !t.categorySubId);
+            if (unassignedTxs.length > 0) {
+                const unSpent = unassignedTxs.reduce((sum, t) => sum + Math.abs(t.amount), 0);
+                subs.push({ id: 'unassigned', name: 'Övrigt', spent: unSpent, transactions: unassignedTxs });
+            }
+
+            return { id: mainId, name: mainCat?.name || 'Okänd', spent: mainSpent, subs };
+        });
+
+        // Handle completely uncategorized within goal
+        const uncategorizedGoalTxs = goalTxs.filter(t => !t.categoryMainId);
+        if (uncategorizedGoalTxs.length > 0) {
+            const unSpent = uncategorizedGoalTxs.reduce((sum, t) => sum + Math.abs(t.amount), 0);
+            mains.push({ 
+                id: 'orphan', 
+                name: 'Okategoriserat', 
+                spent: unSpent, 
+                subs: [{ id: 'orphan', name: 'Övrigt', spent: unSpent, transactions: uncategorizedGoalTxs }] 
+            });
+        }
+
+        return { ...b, monthlyBudget, label, spent: goalSpent, mains };
     }).filter((g): g is NonNullable<typeof g> => g !== null);
 
     // 4. Build Hierarchy per Budget Group
     const groupStats = budgetGroups.map(group => {
-        // Resolve limit for current month
-        const { data: monthlyData } = getEffectiveBudgetGroupData(group, selectedMonth);
-        const monthlyLimit = monthlyData?.limit || 0;
-        const isDeleted = monthlyData?.isExplicitlyDeleted;
-
-        // Skip if deleted for this month (unless CatchAll)
-        if (isDeleted && !group.isCatchAll) return null;
-
-        // CALCULATE FUNDING (Link to Cash Flow)
+        
+        // A. Calculate Total Funding from Cash Flow (Transfers)
         const fundingBuckets = buckets.filter(b => group.linkedBucketIds?.includes(b.id));
         const totalFunding = fundingBuckets.reduce((sum, b) => {
-            // Special handling for Payout Buckets (Linked to Goal)
             if (b.linkedGoalId) {
                 const parentGoal = buckets.find(g => g.id === b.linkedGoalId);
                 if (parentGoal) {
                     const eventDist = calculateEventDistribution(parentGoal, selectedMonth);
-                    // If event dates exist and overlap, use distributed amount
-                    if (eventDist) {
-                        return sum + eventDist.amount;
-                    }
+                    if (eventDist) return sum + eventDist.amount;
                 }
-                // Fallthrough to standard fixed cost if no event distribution (e.g. single target date payout)
             }
-
             if (b.type === 'FIXED') return sum + calculateFixedBucketCost(b, selectedMonth);
             if (b.type === 'DAILY') return sum + calculateDailyBucketCost(b, selectedMonth, settings.payday);
             if (b.type === 'GOAL') return sum + calculateGoalBucketCost(b, selectedMonth);
             return sum;
         }, 0);
+
+        // B. Determine Budget Limit
+        // Logic: 
+        // 1. If explicit override for THIS month exists -> Use it (Manual).
+        // 2. Else if has Linked Buckets -> Use totalFunding (Auto).
+        // 3. Else -> Use inherited limit (Legacy Manual).
+        
+        const explicitData = group.monthlyData?.[selectedMonth];
+        let monthlyLimit = 0;
+        let isAutoCalculated = false;
+        let isExplicitlyDeleted = false;
+
+        if (explicitData) {
+            isExplicitlyDeleted = !!explicitData.isExplicitlyDeleted;
+            if (!isExplicitlyDeleted) {
+                monthlyLimit = explicitData.limit;
+            }
+        } else if (group.linkedBucketIds && group.linkedBucketIds.length > 0) {
+            monthlyLimit = totalFunding;
+            isAutoCalculated = true;
+        } else {
+            const { data: inheritedData } = getEffectiveBudgetGroupData(group, selectedMonth);
+            if (inheritedData) {
+                isExplicitlyDeleted = !!inheritedData.isExplicitlyDeleted;
+                monthlyLimit = inheritedData.limit;
+            }
+        }
+
+        if (isExplicitlyDeleted && !group.isCatchAll) return null;
         
         const fundingGap = totalFunding - monthlyLimit;
-
-        // Find all subcategories explicitly assigned to this group
         const assignedSubs = subCategories.filter(s => s.budgetGroupId === group.id);
         const assignedSubIds = new Set(assignedSubs.map(s => s.id));
         
         // Filter transactions belonging to this group
         const groupTxs = txForMonth.filter(t => {
-            // Logic for Excluding Events/Buckets
+            // STRICT EXCLUSION: If a transaction is linked to a Dream/Goal bucket, 
+            // it MUST NOT appear in regular budget groups. It belongs to "Spending Goals".
             if (t.bucketId) {
-                // If "Include Events" is OFF, exclude ALL bucketed expenses (Events/Goals)
-                if (!includeEvents) return false;
+                const bucket = buckets.find(b => b.id === t.bucketId);
+                if (bucket && bucket.type === 'GOAL') {
+                    return false; // Skip dream transactions here
+                }
             }
 
             if (t.categorySubId && assignedSubIds.has(t.categorySubId)) return true;
             if (group.isCatchAll) {
                 if (!t.categorySubId) return true;
                 const sub = subCategories.find(s => s.id === t.categorySubId);
-                // Matches orphan subcategories (not linked to any group)
                 if (!sub || !sub.budgetGroupId) return true;
             }
             return false;
         });
 
-        // Sum total spent for Group
         const groupSpent = groupTxs.reduce((sum, t) => sum + Math.abs(t.amount), 0);
 
         // Group by Main Category within this Budget Group
@@ -185,82 +253,54 @@ export const OperatingBudgetView: React.FC = () => {
                 return false;
             });
             
-            // 1. Identify subcategories explicitly linked to this group (via Settings)
             const assignedInMain = assignedSubs.filter(s => s.mainCategoryId === mainId);
-
-            // 2. Identify subcategories present in the transactions (Active)
             const txSubIds = new Set(mainTxs.map(t => t.categorySubId).filter(id => !!id));
             const activeSubs = subCategories.filter(s => s.mainCategoryId === mainId && txSubIds.has(s.id));
 
-            // 3. Combine them unique by ID
             const combinedSubsMap = new Map<string, SubCategory>();
             assignedInMain.forEach(s => combinedSubsMap.set(s.id, s));
             activeSubs.forEach(s => combinedSubsMap.set(s.id, s));
 
             const relevantSubs = Array.from(combinedSubsMap.values());
-            
-            // Track covered transactions to find orphans later
             const coveredTxIds = new Set<string>();
             
             const subStats = relevantSubs.map(sub => {
                 const subTxs = mainTxs.filter(t => t.categorySubId === sub.id);
                 subTxs.forEach(t => coveredTxIds.add(t.id));
-                
                 const subSpent = subTxs.reduce((sum, t) => sum + Math.abs(t.amount), 0);
-                return {
-                    id: sub.id,
-                    name: sub.name,
-                    spent: subSpent,
-                    transactions: subTxs
-                };
-            }).filter(s => s.spent > 0 || assignedInMain.some(as => as.id === s.id)) // Keep if spent > 0 OR if it is an assigned category (to show 0 if needed, though usually we sort out 0s later)
+                return { id: sub.id, name: sub.name, spent: subSpent, transactions: subTxs };
+            }).filter(s => s.spent > 0 || assignedInMain.some(as => as.id === s.id))
               .sort((a,b) => b.spent - a.spent);
 
-            // 4. Handle remaining transactions (No subcategory OR deleted subcategory)
             const remainingTxs = mainTxs.filter(t => !coveredTxIds.has(t.id));
             const remainingSpent = remainingTxs.reduce((sum, t) => sum + Math.abs(t.amount), 0);
             
             if (remainingSpent > 0.01) {
-                subStats.push({
-                    id: `unassigned-${mainId}`,
-                    name: 'Ospecificerat / Övrigt',
-                    spent: remainingSpent,
-                    transactions: remainingTxs
-                });
+                subStats.push({ id: `unassigned-${mainId}`, name: 'Ospecificerat / Övrigt', spent: remainingSpent, transactions: remainingTxs });
             }
 
             const mainSpent = mainTxs.reduce((sum, t) => sum + Math.abs(t.amount), 0);
 
-            return {
-                id: mainId,
-                name: mainName,
-                spent: mainSpent,
-                subs: subStats
-            };
+            return { id: mainId, name: mainName, spent: mainSpent, subs: subStats };
         }).filter(m => m.subs.length > 0 || m.spent > 0).sort((a,b) => b.spent - a.spent);
           
         const totalAllocatedToMains = mainStats.reduce((sum, m) => sum + m.spent, 0);
         const orphanSpent = groupSpent - totalAllocatedToMains;
         
-        // Handle transactions that have no main category (pure orphans)
         if (orphanSpent > 0.01) {
              const orphanTxs = groupTxs.filter(t => !t.categoryMainId);
              mainStats.push({
                  id: 'orphan',
                  name: 'Helt okategoriserat',
                  spent: orphanSpent,
-                 subs: [{
-                     id: 'orphan-sub',
-                     name: 'Transaktioner utan kategori',
-                     spent: orphanSpent,
-                     transactions: orphanTxs
-                 }]
+                 subs: [{ id: 'orphan-sub', name: 'Transaktioner utan kategori', spent: orphanSpent, transactions: orphanTxs }]
              });
         }
 
         return {
             ...group,
-            monthlyLimit, // Resolved monthly limit
+            monthlyLimit,
+            isAutoCalculated,
             spent: groupSpent,
             mains: mainStats,
             totalFunding,
@@ -300,12 +340,53 @@ export const OperatingBudgetView: React.FC = () => {
       setExpandedSubs(next);
   };
 
+  const toggleGoal = (id: string) => {
+      const next = new Set(expandedGoals);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      setExpandedGoals(next);
+  };
+
   const openModal = (group?: BudgetGroup) => {
       setDeleteMode(false);
       if (group) {
           setEditingGroup(group);
-          const { data } = getEffectiveBudgetGroupData(group, selectedMonth);
-          setEditingLimit(data?.limit || 0);
+          setShowDetails(false);
+          
+          // Determine logic for Limit Field
+          const explicitData = group.monthlyData?.[selectedMonth];
+          const hasLinks = group.linkedBucketIds && group.linkedBucketIds.length > 0;
+          
+          // Re-calculate funding for display/logic
+          const fundingBuckets = buckets.filter(b => group.linkedBucketIds?.includes(b.id));
+          const funding = fundingBuckets.reduce((sum, b) => {
+                if (b.linkedGoalId) {
+                    const parentGoal = buckets.find(g => g.id === b.linkedGoalId);
+                    if (parentGoal) {
+                        const eventDist = calculateEventDistribution(parentGoal, selectedMonth);
+                        if (eventDist) return sum + eventDist.amount;
+                    }
+                }
+                if (b.type === 'FIXED') return sum + calculateFixedBucketCost(b, selectedMonth);
+                if (b.type === 'DAILY') return sum + calculateDailyBucketCost(b, selectedMonth, settings.payday);
+                if (b.type === 'GOAL') return sum + calculateGoalBucketCost(b, selectedMonth);
+                return sum;
+          }, 0);
+          setCalculatedFunding(funding);
+
+          // If no explicit override for this month AND we have links -> Auto Mode
+          if (!explicitData && hasLinks) {
+              setUseAutoLimit(true);
+              setEditingLimit(funding);
+          } else {
+              setUseAutoLimit(false);
+              // Fallback to inheritance or explicit value
+              if (explicitData) {
+                  setEditingLimit(explicitData.limit);
+              } else {
+                  const { data } = getEffectiveBudgetGroupData(group, selectedMonth);
+                  setEditingLimit(data?.limit || 0);
+              }
+          }
       } else {
           setEditingGroup({
               id: '',
@@ -315,6 +396,9 @@ export const OperatingBudgetView: React.FC = () => {
               linkedBucketIds: []
           });
           setEditingLimit(0);
+          setUseAutoLimit(false);
+          setCalculatedFunding(0);
+          setShowDetails(true); // Auto expand for new groups
       }
       setIsModalOpen(true);
   };
@@ -327,12 +411,19 @@ export const OperatingBudgetView: React.FC = () => {
           await addBudgetGroup(editingGroup.name || 'Ny Grupp', editingLimit, editingGroup.icon || '📁');
       } else {
           // Update Existing
+          const newMonthlyData = { ...editingGroup.monthlyData };
+          
+          if (useAutoLimit) {
+              // If Auto: REMOVE explicit entry for this month so it falls back to auto calculation in the view
+              delete newMonthlyData[selectedMonth];
+          } else {
+              // If Manual: SET explicit entry
+              newMonthlyData[selectedMonth] = { limit: editingLimit, isExplicitlyDeleted: false };
+          }
+
           const updatedGroup = {
               ...editingGroup,
-              monthlyData: {
-                  ...editingGroup.monthlyData,
-                  [selectedMonth]: { limit: editingLimit, isExplicitlyDeleted: false }
-              }
+              monthlyData: newMonthlyData
           };
           await updateBudgetGroup(updatedGroup);
       }
@@ -348,23 +439,12 @@ export const OperatingBudgetView: React.FC = () => {
 
   const handleAddSubCategory = async () => {
       if (!newSubName.trim() || !selectedMainId || !editingGroup?.id) return;
-      
       const newId = await addSubCategory(selectedMainId, newSubName);
-      
-      // Fetch the object to ensure we have the full SubCategory structure (though we know the defaults)
-      const sub: SubCategory = { 
-          id: newId, 
-          mainCategoryId: selectedMainId, 
-          name: newSubName 
-      };
-      
-      // Link it to current budget group
+      const sub: SubCategory = { id: newId, mainCategoryId: selectedMainId, name: newSubName };
       await updateSubCategory({ ...sub, budgetGroupId: editingGroup.id });
-      
       setNewSubName('');
   };
 
-  // Helper to remove category from group
   const handleRemoveCategory = (sub: SubCategory) => {
       updateSubCategory({ ...sub, budgetGroupId: undefined });
   };
@@ -376,7 +456,22 @@ export const OperatingBudgetView: React.FC = () => {
         ? currentIds.filter(id => id !== bucketId)
         : [...currentIds, bucketId];
       
-      setEditingGroup({ ...editingGroup, linkedBucketIds: newIds });
+      const newGroup = { ...editingGroup, linkedBucketIds: newIds };
+      setEditingGroup(newGroup);
+
+      // Re-calc funding dynamically when toggling
+      const funding = buckets.filter(b => newIds.includes(b.id)).reduce((sum, b) => {
+            if (b.type === 'FIXED') return sum + calculateFixedBucketCost(b, selectedMonth);
+            if (b.type === 'DAILY') return sum + calculateDailyBucketCost(b, selectedMonth, settings.payday);
+            if (b.type === 'GOAL') return sum + calculateGoalBucketCost(b, selectedMonth);
+            return sum;
+      }, 0);
+      setCalculatedFunding(funding);
+      
+      // If in Auto Mode, update limit immediately
+      if (useAutoLimit) {
+          setEditingLimit(funding);
+      }
   };
 
   return (
@@ -394,18 +489,6 @@ export const OperatingBudgetView: React.FC = () => {
                     </div>
                 </div>
               </div>
-              
-              <button 
-                onClick={() => setIncludeEvents(!includeEvents)}
-                className={cn(
-                    "flex flex-col items-center p-2 rounded-lg text-[10px] font-bold uppercase transition-all",
-                    includeEvents ? "bg-purple-600/20 text-purple-400 border border-purple-600/50" : "bg-slate-800 text-slate-500 border border-slate-700 hover:text-white"
-                )}
-                title="Visa utgifter kopplade till Resor/Events"
-              >
-                  <Plane size={16} className="mb-1" />
-                  {includeEvents ? "Inkl. Resor" : "Exkl. Resor"}
-              </button>
           </div>
           <p className="text-slate-400 text-sm">Uppföljning av kostnader per Budgetgrupp och Kategori.</p>
       </header>
@@ -459,14 +542,20 @@ export const OperatingBudgetView: React.FC = () => {
                                       {/* FUNDING STATUS INDICATOR */}
                                       <div className="text-xs mt-1">
                                           {hasFundingSource ? (
-                                              isUnderFunded ? (
-                                                  <span className="text-amber-500 flex items-center gap-1 font-medium animate-pulse" title={`Du behöver föra över ${formatMoney(Math.abs(group.fundingGap))} mer till kopplade konton.`}>
-                                                      <AlertTriangle size={12} /> Underfinansierad ({formatMoney(group.fundingGap)})
+                                              group.isAutoCalculated ? (
+                                                  <span className="text-blue-400 flex items-center gap-1 font-medium bg-blue-500/10 px-1.5 py-0.5 rounded">
+                                                      <RefreshCw size={10} /> Auto ({formatMoney(group.monthlyLimit)})
                                                   </span>
                                               ) : (
-                                                  <span className="text-emerald-500 flex items-center gap-1 font-medium">
-                                                      <Check size={12} /> Finansiering säkrad ({formatMoney(group.totalFunding)})
-                                                  </span>
+                                                  isUnderFunded ? (
+                                                      <span className="text-amber-500 flex items-center gap-1 font-medium animate-pulse" title={`Du behöver föra över ${formatMoney(Math.abs(group.fundingGap))} mer till kopplade konton.`}>
+                                                          <AlertTriangle size={12} /> Underfinansierad ({formatMoney(group.fundingGap)})
+                                                      </span>
+                                                  ) : (
+                                                      <span className="text-emerald-500 flex items-center gap-1 font-medium">
+                                                          <Check size={12} /> Finansiering säkrad ({formatMoney(group.totalFunding)})
+                                                      </span>
+                                                  )
                                               )
                                           ) : (
                                               !group.isCatchAll && <span className="text-slate-500 italic flex items-center gap-1"><ArrowRightLeft size={10}/> Ingen finansieringskälla kopplad</span>
@@ -533,7 +622,7 @@ export const OperatingBudgetView: React.FC = () => {
                                                                     {isSubExpanded ? <ChevronDown className="w-3 h-3 text-slate-500"/> : <ChevronRight className="w-3 h-3 text-slate-500"/>}
                                                                     <div className="flex flex-col">
                                                                         <span className="text-slate-400 font-medium">{sub.name}</span>
-                                                                        <span className="text-[10px] text-slate-600">{sub.transactions.length} transaktioner</span>
+                                                                        <span className="text-slate-600 text-[10px]">{sub.transactions.length} transaktioner</span>
                                                                     </div>
                                                                 </div>
                                                                 <div className="text-right">
@@ -585,39 +674,99 @@ export const OperatingBudgetView: React.FC = () => {
                 <p className="text-xs text-slate-400">Här visas aktiva sparmål/resor som är redo att användas denna månad.</p>
                 
                 {data.spendingGoals.map(goal => {
-                    // Find transactions linked to this goal (Expense with bucketId = goal.id)
-                    const goalTxs = data.txForMonth.filter(t => t.bucketId === goal.id);
-                    const spent = goalTxs.reduce((sum, t) => sum + Math.abs(t.amount), 0);
+                    const isExpanded = expandedGoals.has(goal.id);
                     // Use the calculated proportional budget instead of total target
                     const budget = goal.monthlyBudget;
-                    
+                    const spent = goal.spent;
+
                     return (
-                        <div key={goal.id} className="bg-slate-800 rounded-xl p-4 border border-purple-500/30 shadow-lg relative overflow-hidden">
-                            <div className="absolute top-0 right-0 p-4 opacity-10 pointer-events-none">
-                                <Rocket className="w-24 h-24 text-purple-500" />
-                            </div>
-                            <div className="flex justify-between items-center mb-2 relative z-10">
-                                <div className="flex items-center gap-3">
-                                    <div className="bg-purple-500/20 p-2 rounded-lg">
-                                        <span className="text-xl">🎯</span>
+                        <div key={goal.id} className="bg-slate-800 rounded-xl overflow-hidden border border-purple-500/30 shadow-lg">
+                            <div 
+                                className="p-4 relative cursor-pointer hover:bg-slate-700/50 transition-colors"
+                                onClick={() => toggleGoal(goal.id)}
+                            >
+                                <div className="absolute top-0 right-0 p-4 opacity-10 pointer-events-none">
+                                    <Rocket className="w-24 h-24 text-purple-500" />
+                                </div>
+                                <div className="flex justify-between items-center mb-2 relative z-10">
+                                    <div className="flex items-center gap-3">
+                                        {isExpanded ? <ChevronDown className="w-5 h-5 text-purple-400"/> : <ChevronRight className="w-5 h-5 text-slate-500"/>}
+                                        <div className="bg-purple-500/20 p-2 rounded-lg">
+                                            <span className="text-xl">🎯</span>
+                                        </div>
+                                        <div>
+                                            <div className="font-bold text-white">{goal.name}</div>
+                                            <div className="text-xs text-purple-300">{goal.label || "Sparat kapital används"}</div>
+                                        </div>
                                     </div>
-                                    <div>
-                                        <div className="font-bold text-white">{goal.name}</div>
-                                        <div className="text-xs text-purple-300">{goal.label || "Sparat kapital används"}</div>
+                                    <div className="text-right relative z-10">
+                                        <div className="text-xl font-mono font-bold text-white">{formatMoney(spent)}</div>
+                                        <div className="text-xs text-slate-400">av {formatMoney(budget)}</div>
                                     </div>
                                 </div>
-                                <div className="text-right relative z-10">
-                                    <div className="text-xl font-mono font-bold text-white">{formatMoney(spent)}</div>
-                                    <div className="text-xs text-slate-400">av {formatMoney(budget)}</div>
-                                </div>
+                                
+                                <BudgetProgressBar 
+                                    spent={spent} 
+                                    total={budget} 
+                                    label="Förbrukat av budget"
+                                    className="relative z-10"
+                                />
                             </div>
-                            
-                            <BudgetProgressBar 
-                                spent={spent} 
-                                total={budget} 
-                                label="Förbrukat av budget"
-                                className="relative z-10"
-                            />
+
+                            {/* GOAL BREAKDOWN (Categories for the trip) */}
+                            {isExpanded && (
+                                <div className="bg-slate-900/50 border-t border-purple-500/20">
+                                    {goal.mains.length === 0 && (
+                                        <div className="p-4 text-center text-sm text-slate-500 italic">Inga utgifter registrerade för denna dröm.</div>
+                                    )}
+                                    {goal.mains.map(main => {
+                                        const mainKey = `${goal.id}-${main.id}`;
+                                        const isMainExpanded = expandedMains.has(mainKey);
+                                        return (
+                                            <div key={mainKey} className="border-b border-purple-900/30 last:border-0">
+                                                <div 
+                                                    className="px-4 py-3 flex justify-between items-center cursor-pointer hover:bg-purple-900/10"
+                                                    onClick={() => toggleMain(mainKey)}
+                                                >
+                                                    <div className="flex items-center gap-2 pl-4">
+                                                        {isMainExpanded ? <ChevronDown className="w-4 h-4 text-slate-400"/> : <ChevronRight className="w-4 h-4 text-slate-600"/>}
+                                                        <span className="text-sm font-medium text-purple-100">{main.name}</span>
+                                                    </div>
+                                                    <div className="text-sm font-mono text-purple-200">
+                                                        {formatMoney(main.spent)}
+                                                    </div>
+                                                </div>
+
+                                                {/* Sub Categories inside Goal */}
+                                                {isMainExpanded && (
+                                                    <div className="bg-slate-950/30 pb-2">
+                                                        {main.subs.map(sub => (
+                                                            <div key={`${mainKey}-${sub.id}`} className="flex flex-col">
+                                                                <div className="pl-12 pr-4 py-2 flex justify-between items-center text-xs">
+                                                                    <span className="text-slate-400 font-medium">{sub.name}</span>
+                                                                    <span className="text-slate-300 font-mono">{formatMoney(sub.spent)}</span>
+                                                                </div>
+                                                                {/* Transactions List */}
+                                                                <div className="pl-16 pr-4 pb-1 space-y-1">
+                                                                    {sub.transactions.map(t => (
+                                                                        <div key={t.id} className="flex justify-between items-center text-[10px] py-1 border-b border-white/5 last:border-0">
+                                                                            <span className="text-slate-500 truncate max-w-[70%]">{t.description}</span>
+                                                                            <div className="flex gap-2">
+                                                                                <span className="text-slate-600">{t.date}</span>
+                                                                                <span className="text-slate-400 font-mono">{formatMoney(t.amount)}</span>
+                                                                            </div>
+                                                                        </div>
+                                                                    ))}
+                                                                </div>
+                                                            </div>
+                                                        ))}
+                                                    </div>
+                                                )}
+                                            </div>
+                                        );
+                                    })}
+                                </div>
+                            )}
                         </div>
                     );
                 })}
@@ -630,179 +779,269 @@ export const OperatingBudgetView: React.FC = () => {
           {editingGroup && (
               <div className="space-y-6">
                   {/* Basic Info */}
-                  <div className="space-y-4">
-                      <Input label="Namn" value={editingGroup.name} onChange={e => setEditingGroup({...editingGroup, name: e.target.value})} autoFocus={!editingGroup.id} />
+                  <div className="space-y-0">
                       
-                      <div className="bg-slate-800/50 p-4 rounded-xl border border-slate-700">
-                          <label className="text-xs font-bold text-slate-400 uppercase tracking-wider block mb-2 text-center">
-                              Budget för månaden (Limit)
-                          </label>
-                          <div className="flex items-center justify-center gap-2">
-                              <input 
-                                type="number" 
-                                value={editingLimit || ''} 
-                                onChange={e => setEditingLimit(Number(e.target.value))} 
-                                className="bg-transparent text-4xl font-mono font-bold text-center text-white w-full focus:outline-none placeholder-slate-700"
-                                placeholder="0"
-                              />
-                              <span className="text-slate-500">kr</span>
-                          </div>
-                      </div>
-
-                      {/* Icon */}
-                      <div>
-                          <label className="text-xs font-bold text-slate-400 uppercase tracking-wider block mb-2">Ikon</label>
-                          <div className="flex gap-2 overflow-x-auto pb-2 no-scrollbar">
-                              {['🏠','🚗','🍔','💊','🎉','👶','🔧','🧥','🛒','✈️','🐶'].map(icon => (
-                                  <button 
-                                    key={icon}
-                                    onClick={() => setEditingGroup({...editingGroup, icon})}
-                                    className={cn("w-10 h-10 rounded-lg flex items-center justify-center text-xl transition-all", editingGroup.icon === icon ? "bg-indigo-600 text-white" : "bg-slate-800 text-slate-400 hover:bg-slate-700")}
-                                  >
-                                      {icon}
-                                  </button>
-                              ))}
-                          </div>
-                      </div>
-                  </div>
-
-                  {/* FUNDING SOURCE (Link to Buckets) */}
-                  {!editingGroup.isCatchAll && (
-                      <div className="border-t border-slate-700 pt-4 space-y-3">
-                          <h3 className="text-sm font-bold text-white flex items-center gap-2">
-                              <ArrowRightLeft size={16} /> Finansiering / Källa
-                          </h3>
-                          <p className="text-xs text-slate-400">Välj vilka överföringar (Kassaflöde) som finansierar denna grupp. Detta hjälper dig se om du har täckning för budgeten.</p>
-                          
-                          <div className="bg-slate-800/50 border border-slate-700 rounded-xl p-3 max-h-48 overflow-y-auto no-scrollbar space-y-4">
-                              {accounts.map(acc => {
-                                  const accBuckets = buckets.filter(b => b.accountId === acc.id);
-                                  if (accBuckets.length === 0) return null;
-                                  return (
-                                      <div key={acc.id}>
-                                          <div className="text-[10px] text-slate-500 font-bold uppercase mb-1 flex items-center gap-1">
-                                              <span>{acc.icon}</span> {acc.name}
-                                          </div>
-                                          <div className="space-y-1">
-                                              {accBuckets.map(bucket => {
-                                                  const isChecked = editingGroup.linkedBucketIds?.includes(bucket.id);
-                                                  
-                                                  // CHECK IF BUCKET IS USED BY ANOTHER GROUP
-                                                  const ownerGroup = budgetGroups.find(g => g.id !== editingGroup.id && g.linkedBucketIds?.includes(bucket.id));
-                                                  const isDisabled = !!ownerGroup;
-
-                                                  return (
-                                                      <label key={bucket.id} className={cn(
-                                                          "flex items-center gap-2 p-2 rounded transition-colors border border-transparent",
-                                                          isDisabled ? "opacity-50 cursor-not-allowed bg-slate-900/50" : "hover:bg-slate-700/50 cursor-pointer"
-                                                      )}>
-                                                          <div className={cn("w-4 h-4 rounded border flex items-center justify-center transition-colors", 
-                                                              isChecked ? "bg-emerald-500 border-emerald-500" : "border-slate-600",
-                                                              isDisabled && "border-slate-700 bg-slate-800"
-                                                          )}>
-                                                              {isChecked && <Check size={10} className="text-white" />}
-                                                          </div>
-                                                          <div className="flex-1 min-w-0">
-                                                              <div className="flex justify-between items-center">
-                                                                  <span className="text-sm text-slate-300 truncate">{bucket.name}</span>
-                                                                  <span className="text-xs font-mono text-slate-500 ml-2">
-                                                                      {bucket.type === 'FIXED' ? formatMoney(calculateFixedBucketCost(bucket, selectedMonth)) : 
-                                                                       (bucket.type === 'DAILY' ? 'Rörlig' : 'Mål')}
-                                                                  </span>
-                                                              </div>
-                                                              {isDisabled && (
-                                                                  <div className="text-[10px] text-orange-400 mt-0.5">
-                                                                      Redan kopplad till: {ownerGroup.name}
-                                                                  </div>
-                                                              )}
-                                                          </div>
-                                                          <input 
-                                                            type="checkbox" 
-                                                            className="hidden" 
-                                                            checked={!!isChecked} 
-                                                            disabled={isDisabled}
-                                                            onChange={() => !isDisabled && toggleLinkedBucket(bucket.id)}
-                                                          />
-                                                      </label>
-                                                  );
-                                              })}
-                                          </div>
-                                      </div>
-                                  )
-                              })}
-                          </div>
-                      </div>
-                  )}
-
-                  {/* Subcategory Management (Only for existing groups) */}
-                  {editingGroup.id && !editingGroup.isCatchAll && (
-                      <div className="border-t border-slate-700 pt-4 space-y-4">
-                          <h3 className="text-sm font-bold text-white">Kopplade Kategorier</h3>
-                          
-                          <div className="flex flex-wrap gap-2">
-                              {subCategories.filter(s => s.budgetGroupId === editingGroup.id).map(sub => (
-                                  <div key={sub.id} className="bg-slate-800 border border-slate-600 rounded px-2 py-1 text-xs text-slate-300 flex items-center gap-2 group">
-                                      {sub.name}
-                                      <button 
-                                        onClick={() => handleRemoveCategory(sub)}
-                                        className="text-slate-500 hover:text-red-300"
-                                        title="Ta bort från grupp"
-                                      >
-                                          ×
-                                      </button>
+                      <div className={cn(
+                          "bg-slate-800/50 border border-slate-700 transition-all",
+                          showDetails ? "p-3 rounded-xl flex items-center justify-between gap-4" : "p-4 rounded-2xl"
+                      )}>
+                          <div className={showDetails ? "text-left" : "text-center w-full"}>
+                              <label className={cn("text-xs font-bold text-slate-400 uppercase tracking-wider block transition-all", showDetails ? "mb-0" : "mb-2")}>
+                                  Budget (Limit)
+                              </label>
+                              {showDetails && useAutoLimit && (
+                                  <div className="text-[10px] text-blue-400 flex items-center gap-1 mt-0.5">
+                                      <Lock size={10} /> Auto
                                   </div>
-                              ))}
-                              {subCategories.filter(s => s.budgetGroupId === editingGroup.id).length === 0 && (
-                                  <span className="text-xs text-slate-500 italic">Inga kategorier kopplade än.</span>
                               )}
                           </div>
 
-                          <div className="bg-slate-900/50 p-3 rounded-lg border border-slate-800">
-                              <label className="text-xs font-bold text-slate-400 uppercase tracking-wider block mb-2">Koppla befintlig kategori</label>
-                              <select 
-                                className="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white"
-                                onChange={(e) => {
-                                    const sub = subCategories.find(s => s.id === e.target.value);
-                                    if (sub) updateSubCategory({ ...sub, budgetGroupId: editingGroup.id });
-                                }}
-                                value=""
-                              >
-                                  <option value="">-- Välj kategori --</option>
-                                  {subCategories.filter(s => !s.budgetGroupId).map(s => (
-                                      <option key={s.id} value={s.id}>{s.name} (Okopplad)</option>
-                                  ))}
-                                  <optgroup label="Redan kopplade (Flytta hit)">
-                                      {subCategories.filter(s => s.budgetGroupId && s.budgetGroupId !== editingGroup.id).map(s => (
-                                          <option key={s.id} value={s.id}>{s.name}</option>
-                                      ))}
-                                  </optgroup>
-                              </select>
-                          </div>
-
-                          {/* CREATE NEW SUB CATEGORY */}
-                          <div className="bg-slate-900/50 p-3 rounded-lg border border-slate-800 flex gap-2 items-center">
-                              <select 
-                                className="w-1/3 bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-xs text-white"
-                                value={selectedMainId}
-                                onChange={(e) => setSelectedMainId(e.target.value)}
-                              >
-                                  <option value="">Huvudkategori</option>
-                                  {mainCategories.map(m => (
-                                      <option key={m.id} value={m.id}>{m.name}</option>
-                                  ))}
-                              </select>
+                          <div className={cn("flex items-center gap-2", showDetails ? "justify-end w-auto" : "justify-center w-full")}>
                               <input 
-                                placeholder="Ny underkategori..." 
-                                className="flex-1 bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-xs text-white"
-                                value={newSubName}
-                                onChange={(e) => setNewSubName(e.target.value)}
+                                type="number" 
+                                value={editingLimit || ''} 
+                                onChange={e => {
+                                    setEditingLimit(Number(e.target.value));
+                                    if (useAutoLimit) setUseAutoLimit(false);
+                                }} 
+                                disabled={useAutoLimit}
+                                className={cn("bg-transparent font-mono font-bold focus:outline-none placeholder-slate-700 transition-all", 
+                                    useAutoLimit ? "text-blue-400" : "text-white",
+                                    showDetails ? "text-2xl text-right w-32" : "text-5xl text-center w-full"
+                                )}
+                                placeholder="0"
+                                autoFocus={!editingGroup.name}
                               />
-                              <Button onClick={handleAddSubCategory} disabled={!newSubName || !selectedMainId} className="px-3 py-2">
-                                  <Plus className="w-4 h-4" />
-                              </Button>
+                              {!showDetails && <span className="text-slate-500 text-xl">kr</span>}
                           </div>
+                          
+                          {/* AUTO Toggle in Collapsed Mode */}
+                          {!showDetails && calculatedFunding > 0 && (
+                              <div className="mt-4 pt-3 border-t border-slate-700/50 flex flex-col items-center gap-2 animate-in slide-in-from-top-1">
+                                  <div className="text-xs text-slate-400">
+                                      Finansiering (Kassaflöde): <span className="font-mono text-white font-bold">{formatMoney(calculatedFunding)}</span>
+                                  </div>
+                                  
+                                  {useAutoLimit ? (
+                                      <button 
+                                        onClick={() => setUseAutoLimit(false)}
+                                        className="text-xs bg-slate-700 hover:bg-slate-600 text-white px-3 py-1.5 rounded-full flex items-center gap-1 transition-colors"
+                                      >
+                                          <Edit2 size={12} /> Ändra manuellt
+                                      </button>
+                                  ) : (
+                                      <button 
+                                        onClick={() => {
+                                            setUseAutoLimit(true);
+                                            setEditingLimit(calculatedFunding);
+                                        }}
+                                        className="text-xs bg-blue-600/20 hover:bg-blue-600/30 text-blue-300 border border-blue-500/30 px-3 py-1.5 rounded-full flex items-center gap-1 transition-colors"
+                                      >
+                                          <RefreshCw size={12} /> Återställ till Auto
+                                      </button>
+                                  )}
+                              </div>
+                          )}
                       </div>
-                  )}
+
+                      <div className="border-t border-slate-700 pt-2 mt-4">
+                        <button 
+                            onClick={() => setShowDetails(!showDetails)}
+                            className="flex items-center justify-between w-full p-2 text-sm text-slate-400 hover:text-white transition-colors"
+                        >
+                            <span className="flex items-center gap-2"><Settings className="w-4 h-4" /> Inställningar (Namn, Källa, etc)</span>
+                            {showDetails ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
+                        </button>
+                        
+                        {showDetails && (
+                            <div className="space-y-4 pt-4 animate-in slide-in-from-top-2">
+                                <Input label="Namn" value={editingGroup.name} onChange={e => setEditingGroup({...editingGroup, name: e.target.value})} />
+                                
+                                {/* Auto Logic in Expanded Mode */}
+                                {calculatedFunding > 0 && (
+                                   <div className="bg-slate-800/50 p-3 rounded-xl border border-slate-700 flex justify-between items-center">
+                                       <div className="text-xs text-slate-400">
+                                          <div>Finansiering (Kassaflöde)</div>
+                                          <div className="font-mono text-white font-bold">{formatMoney(calculatedFunding)}</div>
+                                       </div>
+                                       {useAutoLimit ? (
+                                          <button 
+                                            onClick={() => setUseAutoLimit(false)}
+                                            className="text-xs bg-slate-700 hover:bg-slate-600 text-white px-3 py-1.5 rounded-full flex items-center gap-1 transition-colors"
+                                          >
+                                              <Edit2 size={12} /> Ändra
+                                          </button>
+                                      ) : (
+                                          <button 
+                                            onClick={() => {
+                                                setUseAutoLimit(true);
+                                                setEditingLimit(calculatedFunding);
+                                            }}
+                                            className="text-xs bg-blue-600/20 hover:bg-blue-600/30 text-blue-300 border border-blue-500/30 px-3 py-1.5 rounded-full flex items-center gap-1 transition-colors"
+                                          >
+                                              <RefreshCw size={12} /> Auto
+                                          </button>
+                                      )}
+                                   </div>
+                                )}
+
+                                {/* Icon */}
+                                <div>
+                                    <label className="text-xs font-bold text-slate-400 uppercase tracking-wider block mb-2">Ikon</label>
+                                    <div className="flex gap-2 overflow-x-auto pb-2 no-scrollbar">
+                                        {['🏠','🚗','🍔','💊','🎉','👶','🔧','🧥','🛒','✈️','🐶'].map(icon => (
+                                            <button 
+                                                key={icon}
+                                                onClick={() => setEditingGroup({...editingGroup, icon})}
+                                                className={cn("w-10 h-10 rounded-lg flex items-center justify-center text-xl transition-all", editingGroup.icon === icon ? "bg-indigo-600 text-white" : "bg-slate-800 text-slate-400 hover:bg-slate-700")}
+                                            >
+                                                {icon}
+                                            </button>
+                                        ))}
+                                    </div>
+                                </div>
+                                
+                                {/* FUNDING SOURCE (Link to Buckets) */}
+                                {!editingGroup.isCatchAll && (
+                                    <div className="border-t border-slate-700 pt-4 space-y-3">
+                                        <h3 className="text-sm font-bold text-white flex items-center gap-2">
+                                            <ArrowRightLeft size={16} /> Finansiering / Källa
+                                        </h3>
+                                        <p className="text-xs text-slate-400">Välj vilka överföringar (Kassaflöde) som finansierar denna grupp.</p>
+                                        
+                                        <div className="bg-slate-800/50 border border-slate-700 rounded-xl p-3 max-h-48 overflow-y-auto no-scrollbar space-y-4">
+                                            {accounts.map(acc => {
+                                                const accBuckets = buckets.filter(b => b.accountId === acc.id);
+                                                if (accBuckets.length === 0) return null;
+                                                return (
+                                                    <div key={acc.id}>
+                                                        <div className="text-[10px] text-slate-500 font-bold uppercase mb-1 flex items-center gap-1">
+                                                            <span>{acc.icon}</span> {acc.name}
+                                                        </div>
+                                                        <div className="space-y-1">
+                                                            {accBuckets.map(bucket => {
+                                                                const isChecked = editingGroup.linkedBucketIds?.includes(bucket.id);
+                                                                
+                                                                // CHECK IF BUCKET IS USED BY ANOTHER GROUP
+                                                                const ownerGroup = budgetGroups.find(g => g.id !== editingGroup.id && g.linkedBucketIds?.includes(bucket.id));
+                                                                const isDisabled = !!ownerGroup;
+
+                                                                return (
+                                                                    <label key={bucket.id} className={cn(
+                                                                        "flex items-center gap-2 p-2 rounded transition-colors border border-transparent",
+                                                                        isDisabled ? "opacity-50 cursor-not-allowed bg-slate-900/50" : "hover:bg-slate-700/50 cursor-pointer"
+                                                                    )}>
+                                                                        <div className={cn("w-4 h-4 rounded border flex items-center justify-center transition-colors", 
+                                                                            isChecked ? "bg-emerald-500 border-emerald-500" : "border-slate-600",
+                                                                            isDisabled && "border-slate-700 bg-slate-800"
+                                                                        )}>
+                                                                            {isChecked && <Check size={10} className="text-white" />}
+                                                                        </div>
+                                                                        <div className="flex-1 min-w-0">
+                                                                            <div className="flex justify-between items-center">
+                                                                                <span className="text-sm text-slate-300 truncate">{bucket.name}</span>
+                                                                                <span className="text-xs font-mono text-slate-500 ml-2">
+                                                                                    {bucket.type === 'FIXED' ? formatMoney(calculateFixedBucketCost(bucket, selectedMonth)) : 
+                                                                                    (bucket.type === 'DAILY' ? 'Rörlig' : 'Mål')}
+                                                                                </span>
+                                                                            </div>
+                                                                            {isDisabled && (
+                                                                                <div className="text-[10px] text-orange-400 mt-0.5">
+                                                                                    Redan kopplad till: {ownerGroup.name}
+                                                                                </div>
+                                                                            )}
+                                                                        </div>
+                                                                        <input 
+                                                                            type="checkbox" 
+                                                                            className="hidden" 
+                                                                            checked={!!isChecked} 
+                                                                            disabled={isDisabled}
+                                                                            onChange={() => !isDisabled && toggleLinkedBucket(bucket.id)}
+                                                                        />
+                                                                    </label>
+                                                                );
+                                                            })}
+                                                        </div>
+                                                    </div>
+                                                )
+                                            })}
+                                        </div>
+                                    </div>
+                                )}
+
+                                {/* Subcategory Management (Only for existing groups) */}
+                                {editingGroup.id && !editingGroup.isCatchAll && (
+                                    <div className="border-t border-slate-700 pt-4 space-y-4">
+                                        <h3 className="text-sm font-bold text-white">Kopplade Kategorier</h3>
+                                        
+                                        <div className="flex flex-wrap gap-2">
+                                            {subCategories.filter(s => s.budgetGroupId === editingGroup.id).map(sub => (
+                                                <div key={sub.id} className="bg-slate-800 border border-slate-600 rounded px-2 py-1 text-xs text-slate-300 flex items-center gap-2 group">
+                                                    {sub.name}
+                                                    <button 
+                                                        onClick={() => handleRemoveCategory(sub)}
+                                                        className="text-slate-500 hover:text-red-300"
+                                                        title="Ta bort från grupp"
+                                                    >
+                                                        ×
+                                                    </button>
+                                                </div>
+                                            ))}
+                                            {subCategories.filter(s => s.budgetGroupId === editingGroup.id).length === 0 && (
+                                                <span className="text-xs text-slate-500 italic">Inga kategorier kopplade än.</span>
+                                            )}
+                                        </div>
+
+                                        <div className="bg-slate-900/50 p-3 rounded-lg border border-slate-800">
+                                            <label className="text-xs font-bold text-slate-400 uppercase tracking-wider block mb-2">Koppla befintlig kategori</label>
+                                            <select 
+                                                className="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white"
+                                                onChange={(e) => {
+                                                    const sub = subCategories.find(s => s.id === e.target.value);
+                                                    if (sub) updateSubCategory({ ...sub, budgetGroupId: editingGroup.id });
+                                                }}
+                                                value=""
+                                            >
+                                                <option value="">-- Välj kategori --</option>
+                                                {subCategories.filter(s => !s.budgetGroupId).map(s => (
+                                                    <option key={s.id} value={s.id}>{s.name} (Okopplad)</option>
+                                                ))}
+                                                <optgroup label="Redan kopplade (Flytta hit)">
+                                                    {subCategories.filter(s => s.budgetGroupId && s.budgetGroupId !== editingGroup.id).map(s => (
+                                                        <option key={s.id} value={s.id}>{s.name}</option>
+                                                    ))}
+                                                </optgroup>
+                                            </select>
+                                        </div>
+
+                                        {/* CREATE NEW SUB CATEGORY */}
+                                        <div className="bg-slate-900/50 p-3 rounded-lg border border-slate-800 flex gap-2 items-center">
+                                            <select 
+                                                className="w-1/3 bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-xs text-white"
+                                                value={selectedMainId}
+                                                onChange={(e) => setSelectedMainId(e.target.value)}
+                                            >
+                                                <option value="">Huvudkategori</option>
+                                                {mainCategories.map(m => (
+                                                    <option key={m.id} value={m.id}>{m.name}</option>
+                                                ))}
+                                            </select>
+                                            <input 
+                                                placeholder="Ny underkategori..." 
+                                                className="flex-1 bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-xs text-white"
+                                                value={newSubName}
+                                                onChange={(e) => setNewSubName(e.target.value)}
+                                            />
+                                            <Button onClick={handleAddSubCategory} disabled={!newSubName || !selectedMainId} className="px-3 py-2">
+                                                <Plus className="w-4 h-4" />
+                                            </Button>
+                                        </div>
+                                    </div>
+                                )}
+                            </div>
+                        )}
+                      </div>
+                  </div>
 
                   {!deleteMode ? (
                       <div className="flex gap-3 pt-2">

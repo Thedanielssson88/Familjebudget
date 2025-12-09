@@ -1,5 +1,5 @@
 import React, { createContext, useContext, useEffect, useState } from 'react';
-import { Account, AppSettings, Bucket, GlobalState, User, MonthKey, Transaction, ImportRule, MainCategory, SubCategory, BudgetGroup, BudgetGroupData } from './types';
+import { Account, AppSettings, Bucket, GlobalState, User, MonthKey, Transaction, ImportRule, MainCategory, SubCategory, BudgetGroup, BudgetGroupData, IgnoredSubscription } from './types';
 import { format, addMonths, parseISO } from 'date-fns';
 import { getEffectiveBucketData, generateId, isBucketActiveInMonth, calculateFixedBucketCost, calculateDailyBucketCost, calculateGoalBucketCost, getEffectiveBudgetGroupData } from './utils';
 import { z } from 'zod';
@@ -7,7 +7,6 @@ import { db } from './db';
 import { DEFAULT_MAIN_CATEGORIES, DEFAULT_SUB_CATEGORIES } from './constants/defaultCategories';
 
 // --- ZOD SCHEMAS FOR VALIDATION (Still used for Import/Backup) ---
-// ... (keep existing schemas unchanged)
 
 const BucketDataSchema = z.object({
   amount: z.number().optional().default(0),
@@ -92,7 +91,6 @@ const BudgetGroupDataSchema = z.object({
 const BudgetGroupSchema = z.object({
     id: z.string(),
     name: z.string(),
-    // monthlyLimit: z.number(), // REMOVED
     monthlyData: z.record(z.string(), BudgetGroupDataSchema).optional().default({}),
     isCatchAll: z.boolean().optional(),
     icon: z.string().optional()
@@ -125,6 +123,10 @@ const ImportRuleSchema = z.object({
     sign: z.enum(['positive', 'negative']).optional()
 });
 
+const IgnoredSubscriptionSchema = z.object({
+    id: z.string()
+});
+
 const GlobalStateSchema = z.object({
   users: z.array(UserSchema).optional().default([]),
   accounts: z.array(AccountSchema).optional().default([]),
@@ -134,7 +136,8 @@ const GlobalStateSchema = z.object({
   importRules: z.array(ImportRuleSchema).optional().default([]),
   mainCategories: z.array(MainCategorySchema).optional().default([]),
   subCategories: z.array(SubCategorySchema).optional().default([]),
-  budgetGroups: z.array(BudgetGroupSchema).optional().default([])
+  budgetGroups: z.array(BudgetGroupSchema).optional().default([]),
+  ignoredSubscriptions: z.array(IgnoredSubscriptionSchema).optional().default([])
 });
 
 // --- END SCHEMAS ---
@@ -174,6 +177,9 @@ interface AppContextType extends GlobalState {
   updateBudgetGroup: (group: BudgetGroup) => Promise<void>;
   deleteBudgetGroup: (id: string, month?: MonthKey, scope?: 'THIS_MONTH' | 'THIS_AND_FUTURE' | 'ALL') => Promise<void>;
   
+  // Subscription Ignore
+  addIgnoredSubscription: (name: string) => Promise<void>;
+
   // Backup features
   getExportData: () => Promise<string>; 
   importData: (json: string) => Promise<boolean>; 
@@ -201,6 +207,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const [mainCategories, setMainCategories] = useState<MainCategory[]>([]);
   const [subCategories, setSubCategories] = useState<SubCategory[]>([]);
   const [budgetGroups, setBudgetGroups] = useState<BudgetGroup[]>([]);
+  const [ignoredSubscriptions, setIgnoredSubscriptions] = useState<IgnoredSubscription[]>([]);
 
   // Initial Load & Migration Logic
   useEffect(() => {
@@ -218,7 +225,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
                 if (result.success) {
                     const data = result.data;
-                    await (db as any).transaction('rw', db.users, db.accounts, db.buckets, db.settings, db.transactions, db.importRules, db.mainCategories, db.subCategories, db.budgetGroups, async () => {
+                    await (db as any).transaction('rw', db.users, db.accounts, db.buckets, db.settings, db.transactions, db.importRules, db.mainCategories, db.subCategories, db.budgetGroups, db.ignoredSubscriptions, async () => {
                         await db.users.bulkAdd(data.users);
                         await db.accounts.bulkAdd(data.accounts);
                         await db.buckets.bulkAdd(data.buckets);
@@ -228,6 +235,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
                         if (data.mainCategories) await db.mainCategories.bulkAdd(data.mainCategories);
                         if (data.subCategories) await db.subCategories.bulkAdd(data.subCategories);
                         if (data.budgetGroups) await db.budgetGroups.bulkAdd(data.budgetGroups);
+                        if (data.ignoredSubscriptions) await db.ignoredSubscriptions.bulkAdd(data.ignoredSubscriptions);
                     });
                 }
             } else {
@@ -287,6 +295,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         const dbMainCats = await db.mainCategories.toArray();
         const dbSubCats = await db.subCategories.toArray();
         const dbGroups = await db.budgetGroups.toArray();
+        const dbIgnored = await db.ignoredSubscriptions.toArray();
 
         setUsers(dbUsers);
         setAccounts(dbAccounts);
@@ -349,6 +358,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
         setTransactions(migratedTransactions);
         setImportRules(migratedRules);
+        setIgnoredSubscriptions(dbIgnored);
 
         if (dbSettings) {
             const { id, ...cleanSettings } = dbSettings;
@@ -654,25 +664,58 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       await db.importRules.delete(id);
       setImportRules(prev => prev.filter(r => r.id !== id));
   };
+  
+  const addIgnoredSubscription = async (name: string) => {
+      const ignored = { id: name };
+      await db.ignoredSubscriptions.add(ignored);
+      setIgnoredSubscriptions(prev => [...prev, ignored]);
+  };
 
   // --- BACKUP ---
   const getExportData = async () => {
+      // Fetch directly from DB to ensure complete dataset, ignoring current state filters
+      const [
+          users, accounts, buckets, settingsArr, transactions,
+          importRules, mainCategories, subCategories, budgetGroups, ignoredSubscriptions
+      ] = await Promise.all([
+          db.users.toArray(),
+          db.accounts.toArray(),
+          db.buckets.toArray(),
+          db.settings.toArray(),
+          db.transactions.toArray(),
+          db.importRules.toArray(),
+          db.mainCategories.toArray(),
+          db.subCategories.toArray(),
+          db.budgetGroups.toArray(),
+          db.ignoredSubscriptions.toArray()
+      ]);
+
+      const settings = settingsArr.find(s => s.id === 1) || defaultSettings;
+
       const data = {
-          users, accounts, buckets, settings, transactions, importRules, mainCategories, subCategories, budgetGroups
+          users, accounts, buckets, settings, transactions,
+          importRules, mainCategories, subCategories, budgetGroups, ignoredSubscriptions,
+          meta: {
+              version: 1,
+              date: new Date().toISOString()
+          }
       };
       return JSON.stringify(data, null, 2);
   };
 
   const importData = async (json: string): Promise<boolean> => {
       try {
-          const data = JSON.parse(json);
-          const result = GlobalStateSchema.safeParse(data);
+          const rawData = JSON.parse(json);
+          const result = GlobalStateSchema.safeParse(rawData);
+          
           if (!result.success) {
               console.error("Invalid backup format", result.error);
               return false;
           }
           
-          await (db as any).transaction('rw', db.users, db.accounts, db.buckets, db.settings, db.transactions, db.importRules, db.mainCategories, db.subCategories, db.budgetGroups, async () => {
+          const data = result.data; // Use validated data with default fallbacks
+
+          await (db as any).transaction('rw', db.users, db.accounts, db.buckets, db.settings, db.transactions, db.importRules, db.mainCategories, db.subCategories, db.budgetGroups, db.ignoredSubscriptions, async () => {
               await db.users.clear(); await db.users.bulkAdd(data.users);
               await db.accounts.clear(); await db.accounts.bulkAdd(data.accounts);
               await db.buckets.clear(); await db.buckets.bulkAdd(data.buckets);
@@ -683,6 +726,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
               if (data.mainCategories) { await db.mainCategories.clear(); await db.mainCategories.bulkAdd(data.mainCategories); }
               if (data.subCategories) { await db.subCategories.clear(); await db.subCategories.bulkAdd(data.subCategories); }
               if (data.budgetGroups) { await db.budgetGroups.clear(); await db.budgetGroups.bulkAdd(data.budgetGroups); }
+              if (data.ignoredSubscriptions) { await db.ignoredSubscriptions.clear(); await db.ignoredSubscriptions.bulkAdd(data.ignoredSubscriptions); }
           });
           
           return true;
@@ -706,6 +750,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     // Budget Groups
     budgetGroups, addBudgetGroup, updateBudgetGroup, deleteBudgetGroup,
     
+    // Subscriptions
+    ignoredSubscriptions, addIgnoredSubscription,
+
     getExportData, importData
   };
 

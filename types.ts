@@ -137,6 +137,10 @@ export interface ImportRule {
   sign?: 'positive' | 'negative'; // Only match transactions with this sign
 }
 
+export interface IgnoredSubscription {
+    id: string; // Usually the description
+}
+
 export interface AppSettings {
   payday: number; // Day of month (e.g., 25)
   // Auto-approval settings for import
@@ -159,4 +163,5 @@ export interface GlobalState {
   selectedMonth: string; // YYYY-MM
   transactions: Transaction[];
   importRules: ImportRule[];
+  ignoredSubscriptions: IgnoredSubscription[];
 }

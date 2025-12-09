@@ -527,11 +527,21 @@ const TransfersViewContent: React.FC = () => {
             
             {editingBucket.type !== 'GOAL' && (
                 <>
-                    <div className="bg-slate-800/50 p-4 rounded-2xl border border-slate-700 shadow-inner">
-                        <label className="text-xs font-bold text-slate-400 uppercase tracking-wider block mb-2 text-center">
-                            {editingBucket.type === 'DAILY' ? 'Daglig Kostnad' : 'Belopp denna månad'}
-                        </label>
-                        <div className="flex items-center justify-center gap-2">
+                    <div className={cn(
+                        "bg-slate-800/50 border border-slate-700 shadow-inner transition-all",
+                        showRegularDetails ? "p-3 rounded-xl flex items-center justify-between gap-4" : "p-4 rounded-2xl"
+                    )}>
+                        <div className={showRegularDetails ? "text-left" : "text-center w-full"}>
+                            <label className={cn("text-xs font-bold text-slate-400 uppercase tracking-wider block transition-all", showRegularDetails ? "mb-0" : "mb-2")}>
+                                {editingBucket.type === 'DAILY' ? 'Daglig Kostnad' : 'Belopp denna månad'}
+                            </label>
+                            {editingBucket.type === 'DAILY' && showRegularDetails && (
+                                <div className="text-[10px] text-slate-500 mt-1">
+                                    {editingMonthData.activeDays?.length || 0} aktiva dagar ({formatMoney(calculateDailyBucketCost({...editingBucket, monthlyData: {[selectedMonth]: editingMonthData}}, selectedMonth, settings.payday))}/mån)
+                                </div>
+                            )}
+                        </div>
+                        <div className={cn("flex items-center gap-2", showRegularDetails ? "justify-end w-auto" : "justify-center w-full")}>
                             <input 
                                 type="number" 
                                 value={editingBucket.type === 'DAILY' ? (editingMonthData.dailyAmount || '') : (editingMonthData.amount || '')} 
@@ -543,13 +553,16 @@ const TransfersViewContent: React.FC = () => {
                                         setEditingMonthData({...editingMonthData, amount: val});
                                     }
                                 }}
-                                className="bg-transparent text-5xl font-mono font-bold text-center text-white w-full focus:outline-none placeholder-slate-700"
+                                className={cn(
+                                    "bg-transparent font-mono font-bold text-white focus:outline-none placeholder-slate-700 transition-all",
+                                    showRegularDetails ? "text-2xl text-right w-32" : "text-5xl text-center w-full"
+                                )}
                                 placeholder="0"
                                 autoFocus={!editingBucket.name}
                             />
                         </div>
 
-                        {editingBucket.type === 'DAILY' && (
+                        {editingBucket.type === 'DAILY' && !showRegularDetails && (
                             <div className="mt-4 border-t border-slate-700/50 pt-3">
                                 <label className="text-[10px] font-bold text-slate-500 uppercase tracking-wider block mb-2 text-center">
                                     Aktiva dagar ({editingMonthData.activeDays?.length || 0})
@@ -574,7 +587,7 @@ const TransfersViewContent: React.FC = () => {
                             </div>
                         )}
                         
-                        {editingBucket.type === 'DAILY' && (
+                        {editingBucket.type === 'DAILY' && !showRegularDetails && (
                              <div className="text-center mt-3 text-sm text-slate-400">
                                  Totalt ca: <span className="text-white font-mono">{formatMoney(calculateDailyBucketCost({...editingBucket, monthlyData: {[selectedMonth]: editingMonthData}}, selectedMonth, settings.payday))}</span> / mån
                              </div>
@@ -675,37 +688,69 @@ const TransfersViewContent: React.FC = () => {
 
             {editingBucket.type === 'GOAL' && (
               <div className="space-y-6">
-                 <div className="bg-slate-800/50 p-4 rounded-2xl border border-indigo-500/20 shadow-inner">
-                     <label className="text-xs font-bold text-indigo-300 uppercase tracking-wider block mb-2 text-center">
-                         Insättning {format(new Date(selectedMonth), 'MMMM', {locale: sv})}
-                     </label>
-                     <div className="flex items-center justify-center gap-2">
-                         <input 
-                            type="number" 
-                            value={editingMonthData.amount || ''} 
-                            onChange={e => setEditingMonthData({...editingMonthData, amount: Number(e.target.value)})} 
-                            className="bg-transparent text-5xl font-mono font-bold text-center text-white w-full focus:outline-none placeholder-slate-700"
-                            placeholder="0"
-                         />
-                     </div>
-                     
-                     <div className="flex justify-center mt-3">
-                         {isOverride ? (
-                             <button 
-                                onClick={() => setEditingMonthData({...editingMonthData, amount: recommendedAmount})}
-                                className="text-xs text-orange-400 hover:text-orange-300 flex items-center gap-1 bg-orange-500/10 px-3 py-1.5 rounded-full border border-orange-500/20"
-                             >
-                                 <Repeat className="w-3 h-3" />
-                                 Återställ till plan: {formatMoney(recommendedAmount)}
-                             </button>
-                         ) : (
-                             <div className="text-xs text-slate-500 flex items-center gap-1">
-                                 <Check className="w-3 h-3 text-emerald-500" />
-                                 Följer plan ({formatMoney(recommendedAmount)})
+                 {editingBucket.paymentSource !== 'BALANCE' ? (
+                     <div className={cn(
+                         "bg-slate-800/50 border border-indigo-500/20 shadow-inner transition-all",
+                         showGoalDetails ? "p-3 rounded-xl flex items-center justify-between" : "p-4 rounded-2xl"
+                     )}>
+                         <div className={showGoalDetails ? "text-left" : "text-center w-full"}>
+                             <label className={cn("text-xs font-bold text-indigo-300 uppercase tracking-wider block transition-all", showGoalDetails ? "mb-0" : "mb-2")}>
+                                 Insättning {format(new Date(selectedMonth), 'MMMM', {locale: sv})}
+                             </label>
+                             {showGoalDetails && (
+                                <div className="text-[10px] text-slate-500 mt-0.5">
+                                   Plan: {formatMoney(recommendedAmount)}
+                                </div>
+                             )}
+                         </div>
+                         <div className={cn("flex items-center gap-2", showGoalDetails ? "justify-end w-auto" : "justify-center w-full")}>
+                             <input 
+                                type="number" 
+                                value={editingMonthData.amount || ''} 
+                                onChange={e => setEditingMonthData({...editingMonthData, amount: Number(e.target.value)})} 
+                                className={cn(
+                                    "bg-transparent font-mono font-bold text-white focus:outline-none placeholder-slate-700 transition-all",
+                                    showGoalDetails ? "text-2xl text-right w-32" : "text-5xl text-center w-full"
+                                )}
+                                placeholder="0"
+                             />
+                         </div>
+                         
+                         {!showGoalDetails && (
+                             <div className="flex justify-center mt-3">
+                                 {isOverride ? (
+                                     <button 
+                                        onClick={() => setEditingMonthData({...editingMonthData, amount: recommendedAmount})}
+                                        className="text-xs text-orange-400 hover:text-orange-300 flex items-center gap-1 bg-orange-500/10 px-3 py-1.5 rounded-full border border-orange-500/20"
+                                     >
+                                         <Repeat className="w-3 h-3" />
+                                         Återställ till plan: {formatMoney(recommendedAmount)}
+                                     </button>
+                                 ) : (
+                                     <div className="text-xs text-slate-500 flex items-center gap-1">
+                                         <Check className="w-3 h-3 text-emerald-500" />
+                                         Följer plan ({formatMoney(recommendedAmount)})
+                                     </div>
+                                 )}
                              </div>
                          )}
                      </div>
-                 </div>
+                 ) : (
+                     <div className={cn(
+                         "bg-amber-900/20 border border-amber-500/30 rounded-xl transition-all",
+                         showGoalDetails ? "p-3 flex items-center gap-3 text-left" : "p-4 text-center"
+                     )}>
+                         <PiggyBank className={cn("text-amber-400 transition-all", showGoalDetails ? "w-5 h-5" : "w-8 h-8 mx-auto mb-2")} />
+                         <div>
+                            <h3 className={cn("text-amber-300 font-bold", showGoalDetails ? "text-sm" : "")}>Finansieras via Saldo</h3>
+                            {!showGoalDetails && (
+                                <p className="text-xs text-slate-400 mt-1">
+                                    Ingen månatlig budget skapas. Pengarna förväntas finnas på kontot.
+                                </p>
+                            )}
+                         </div>
+                     </div>
+                 )}
 
                  <div className="border-t border-slate-700 pt-2">
                      <button 
@@ -733,6 +778,33 @@ const TransfersViewContent: React.FC = () => {
                                         </option>
                                     ))}
                                 </select>
+                            </div>
+
+                             {/* Funding Source Selector inside Goal Edit */}
+                             <div className="space-y-3">
+                                <div className="text-xs font-medium text-slate-400 uppercase">Finansiering</div>
+                                <div className="flex flex-col gap-2">
+                                    <button 
+                                    onClick={() => setEditingBucket({...editingBucket, paymentSource: 'INCOME'})}
+                                    className={cn("p-3 rounded-xl border text-left flex items-center gap-3", (!editingBucket.paymentSource || editingBucket.paymentSource === 'INCOME') ? "bg-emerald-500/20 border-emerald-500 text-white" : "border-slate-700 text-slate-400")}
+                                    >
+                                        <Wallet className="w-5 h-5" />
+                                        <div>
+                                            <div className="font-bold text-sm">Från Månadslön (Budget)</div>
+                                            <div className="text-[10px] opacity-70">Skapar ett månadssparande som minskar fickpengar</div>
+                                        </div>
+                                    </button>
+                                    <button 
+                                    onClick={() => setEditingBucket({...editingBucket, paymentSource: 'BALANCE'})}
+                                    className={cn("p-3 rounded-xl border text-left flex items-center gap-3", editingBucket.paymentSource === 'BALANCE' ? "bg-amber-500/20 border-amber-500 text-white" : "border-slate-700 text-slate-400")}
+                                    >
+                                        <PiggyBank className="w-5 h-5" />
+                                        <div>
+                                            <div className="font-bold text-sm">Från Kontosaldo / Sparade Medel</div>
+                                            <div className="text-[10px] opacity-70">Påverkar ej månadens utrymme. Enbart för uppföljning av spenderande.</div>
+                                        </div>
+                                    </button>
+                                </div>
                             </div>
 
                              <Input label="Totalt målbelopp" type="number" value={editingBucket.targetAmount} onChange={e => setEditingBucket({...editingBucket, targetAmount: Number(e.target.value)})} />
