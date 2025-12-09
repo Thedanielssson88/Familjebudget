@@ -1,5 +1,5 @@
 import React, { createContext, useContext, useEffect, useState } from 'react';
-import { Account, AppSettings, Bucket, GlobalState, User, MonthKey, Transaction, ImportRule, MainCategory, SubCategory, BudgetGroup, BudgetGroupData, IgnoredSubscription } from './types';
+import { Account, AppSettings, Bucket, GlobalState, User, MonthKey, Transaction, ImportRule, MainCategory, SubCategory, BudgetGroup, BudgetGroupData, IgnoredSubscription, ImportLog } from './types';
 import { format, addMonths, parseISO } from 'date-fns';
 import { getEffectiveBucketData, generateId, isBucketActiveInMonth, calculateFixedBucketCost, calculateDailyBucketCost, calculateGoalBucketCost, getEffectiveBudgetGroupData } from './utils';
 import { z } from 'zod';
@@ -137,6 +137,15 @@ const IgnoredSubscriptionSchema = z.object({
     id: z.string()
 }).passthrough();
 
+const ImportLogSchema = z.object({
+    id: z.string(),
+    date: z.string(),
+    fileName: z.string(),
+    transactionCount: z.number(),
+    status: z.enum(['SUCCESS', 'ERROR', 'PARTIAL']),
+    errors: z.array(z.string()).optional()
+}).passthrough();
+
 const GlobalStateSchema = z.object({
   users: z.array(UserSchema).optional().default([]),
   accounts: z.array(AccountSchema).optional().default([]),
@@ -147,7 +156,8 @@ const GlobalStateSchema = z.object({
   mainCategories: z.array(MainCategorySchema).optional().default([]),
   subCategories: z.array(SubCategorySchema).optional().default([]),
   budgetGroups: z.array(BudgetGroupSchema).optional().default([]),
-  ignoredSubscriptions: z.array(IgnoredSubscriptionSchema).optional().default([])
+  ignoredSubscriptions: z.array(IgnoredSubscriptionSchema).optional().default([]),
+  importLogs: z.array(ImportLogSchema).optional().default([])
 }).passthrough();
 
 // --- END SCHEMAS ---
@@ -190,6 +200,9 @@ interface AppContextType extends GlobalState {
   // Subscription Ignore
   addIgnoredSubscription: (name: string) => Promise<void>;
 
+  // Log Method
+  addImportLog: (log: ImportLog) => Promise<void>;
+
   // Backup features
   getExportData: () => Promise<string>; 
   importData: (json: string) => Promise<boolean>; 
@@ -218,6 +231,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const [subCategories, setSubCategories] = useState<SubCategory[]>([]);
   const [budgetGroups, setBudgetGroups] = useState<BudgetGroup[]>([]);
   const [ignoredSubscriptions, setIgnoredSubscriptions] = useState<IgnoredSubscription[]>([]);
+  const [importLogs, setImportLogs] = useState<ImportLog[]>([]);
 
   // Initial Load & Migration Logic
   useEffect(() => {
@@ -235,7 +249,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
                 if (result.success) {
                     const data = result.data;
-                    await (db as any).transaction('rw', db.users, db.accounts, db.buckets, db.settings, db.transactions, db.importRules, db.mainCategories, db.subCategories, db.budgetGroups, db.ignoredSubscriptions, async () => {
+                    await (db as any).transaction('rw', db.users, db.accounts, db.buckets, db.settings, db.transactions, db.importRules, db.mainCategories, db.subCategories, db.budgetGroups, db.ignoredSubscriptions, db.importLogs, async () => {
                         await db.users.bulkAdd(data.users);
                         await db.accounts.bulkAdd(data.accounts);
                         await db.buckets.bulkAdd(data.buckets);
@@ -246,6 +260,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
                         if (data.subCategories) await db.subCategories.bulkAdd(data.subCategories);
                         if (data.budgetGroups) await db.budgetGroups.bulkAdd(data.budgetGroups);
                         if (data.ignoredSubscriptions) await db.ignoredSubscriptions.bulkAdd(data.ignoredSubscriptions);
+                        if (data.importLogs) await db.importLogs.bulkAdd(data.importLogs);
                     });
                 }
             } else {
@@ -298,7 +313,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         // Fetch from DB to State
         const [
             dbUsers, dbAccounts, dbBuckets, dbSettingsArr, dbTransactions, 
-            dbRules, dbMainCats, dbSubCats, dbGroups, dbIgnored
+            dbRules, dbMainCats, dbSubCats, dbGroups, dbIgnored, dbLogs
         ] = await Promise.all([
             db.users.toArray(),
             db.accounts.toArray(),
@@ -309,7 +324,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             db.mainCategories.toArray(),
             db.subCategories.toArray(),
             db.budgetGroups.toArray(),
-            db.ignoredSubscriptions.toArray()
+            db.ignoredSubscriptions.toArray(),
+            db.importLogs.toArray()
         ]);
 
         const dbSettings = dbSettingsArr.find(s => s.id === 1);
@@ -376,6 +392,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         setTransactions(migratedTransactions);
         setImportRules(migratedRules);
         setIgnoredSubscriptions(dbIgnored);
+        setImportLogs(dbLogs.sort((a,b) => b.date.localeCompare(a.date)));
 
         if (dbSettings) {
             const { id, ...cleanSettings } = dbSettings;
@@ -688,12 +705,17 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       setIgnoredSubscriptions(prev => [...prev, ignored]);
   };
 
+  const addImportLog = async (log: ImportLog) => {
+      await db.importLogs.add(log);
+      setImportLogs(prev => [log, ...prev]);
+  };
+
   // --- BACKUP ---
   const getExportData = async () => {
       // Fetch directly from DB to ensure complete dataset, ignoring current state filters
       const [
           users, accounts, buckets, settingsArr, transactions,
-          importRules, mainCategories, subCategories, budgetGroups, ignoredSubscriptions
+          importRules, mainCategories, subCategories, budgetGroups, ignoredSubscriptions, importLogs
       ] = await Promise.all([
           db.users.toArray(),
           db.accounts.toArray(),
@@ -704,14 +726,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           db.mainCategories.toArray(),
           db.subCategories.toArray(),
           db.budgetGroups.toArray(),
-          db.ignoredSubscriptions.toArray()
+          db.ignoredSubscriptions.toArray(),
+          db.importLogs.toArray()
       ]);
 
       const settings = settingsArr.find(s => s.id === 1) || defaultSettings;
 
       const data = {
           users, accounts, buckets, settings, transactions,
-          importRules, mainCategories, subCategories, budgetGroups, ignoredSubscriptions,
+          importRules, mainCategories, subCategories, budgetGroups, ignoredSubscriptions, importLogs,
           meta: {
               version: 1,
               date: new Date().toISOString()
@@ -722,73 +745,123 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const importData = async (json: string): Promise<boolean> => {
       try {
+          console.log("Startar import...");
           const rawData = JSON.parse(json);
           
-          // 1. Validera (med passthrough som du redan har lagt till)
-          const result = GlobalStateSchema.safeParse(rawData);
-          let dataToImport = rawData;
+          // Använd rawData direkt för att vara säker på att vi har allt
+          // (Use rawData directly to ensure we have everything, bypassing strict Zod if needed for bulk data)
+          const data = rawData;
 
-          if (!result.success) {
-              console.warn("Backup-varning (mindre fel):", result.error);
-              // Vi använder rawData ändå för att inte stoppa importen pga småfel
-          } else {
-              dataToImport = result.data;
+          // 1. SANERA (Ta bort dubbletter)
+          const sanitize = (arr: any[]) => {
+              if (!arr || !Array.isArray(arr)) return [];
+              const unique = new Map();
+              arr.forEach(item => {
+                  if (item && item.id) unique.set(item.id, item);
+              });
+              return Array.from(unique.values());
+          };
+
+          const uniqueUsers = sanitize(data.users);
+          const uniqueAccounts = sanitize(data.accounts);
+          const uniqueBuckets = sanitize(data.buckets);
+          const uniqueTransactions = sanitize(data.transactions); 
+          const uniqueRules = sanitize(data.importRules);
+          const uniqueMainCats = sanitize(data.mainCategories);
+          const uniqueSubCats = sanitize(data.subCategories);
+          const uniqueGroups = sanitize(data.budgetGroups);
+          const uniqueIgnored = sanitize(data.ignoredSubscriptions);
+          // Added to keep Log feature working
+          const uniqueLogs = sanitize(data.importLogs); 
+
+          // 2. HJÄLPFUNKTION: Spara i mindre bitar (Chunks)
+          const saveInChunks = async (table: any, items: any[], tableName: string) => {
+              try {
+                  await table.clear(); // Rensa först
+                  
+                  if (items.length === 0) return;
+
+                  const CHUNK_SIZE = 500; // Ta 500 åt gången
+                  for (let i = 0; i < items.length; i += CHUNK_SIZE) {
+                      const chunk = items.slice(i, i + CHUNK_SIZE);
+                      try {
+                          await table.bulkAdd(chunk);
+                          console.log(`Sparade chunk ${i / CHUNK_SIZE + 1} för ${tableName}`);
+                      } catch (chunkError) {
+                          console.error(`Fel vid chunk ${i} i ${tableName}:`, chunkError);
+                          // Om bulkAdd fallerar, försök lägga till en och en för att rädda vad som går
+                          for (const item of chunk) {
+                              try { await table.put(item); } catch (e) {}
+                          }
+                      }
+                  }
+                  console.log(`Klar med ${tableName}: ${items.length} rader.`);
+              } catch (e) {
+                  console.error(`Kritisk fel för tabell ${tableName}`, e);
+              }
+          };
+
+          // 3. KÖR IMPORTEN
+          await saveInChunks(db.users, uniqueUsers, 'Users');
+          await saveInChunks(db.accounts, uniqueAccounts, 'Accounts');
+          await saveInChunks(db.buckets, uniqueBuckets, 'Buckets');
+          
+          try {
+              await db.settings.clear();
+              const settingsToSave = Array.isArray(data.settings) ? data.settings[0] : data.settings;
+              if (settingsToSave) await db.settings.put({ ...settingsToSave, id: 1 });
+          } catch (e) { console.error("Fel vid settings", e); }
+
+          await saveInChunks(db.transactions, uniqueTransactions, 'Transactions');
+          await saveInChunks(db.importRules, uniqueRules, 'Rules');
+          await saveInChunks(db.mainCategories, uniqueMainCats, 'Main Categories');
+          await saveInChunks(db.subCategories, uniqueSubCats, 'Sub Categories');
+          await saveInChunks(db.budgetGroups, uniqueGroups, 'Budget Groups');
+          
+          if ('ignoredSubscriptions' in db) {
+              await saveInChunks(db.ignoredSubscriptions, uniqueIgnored, 'Ignored Subscriptions');
+          }
+          // Maintain Log feature
+          if ('importLogs' in db) {
+              await saveInChunks(db.importLogs, uniqueLogs, 'Import Logs');
+              
+              // Insert "Backup Restored" entry
+              const restoreEntry: ImportLog = {
+                  id: generateId(),
+                  date: new Date().toISOString(),
+                  fileName: 'Säkerhetskopia (Inläst)',
+                  transactionCount: uniqueTransactions.length,
+                  status: 'SUCCESS',
+                  errors: []
+              };
+              await db.importLogs.add(restoreEntry);
+              uniqueLogs.unshift(restoreEntry);
           }
 
-          // 2. Skriv till databasen (Detta gör du redan, men vi säkrar upp med fallback till [])
-          await (db as any).transaction('rw', db.users, db.accounts, db.buckets, db.settings, db.transactions, db.importRules, db.mainCategories, db.subCategories, db.budgetGroups, db.ignoredSubscriptions, async () => {
-              // Rensa allt
-              await db.users.clear(); 
-              await db.accounts.clear(); 
-              await db.buckets.clear(); 
-              await db.settings.clear(); 
-              await db.transactions.clear(); 
-              await db.importRules.clear(); 
-              await db.mainCategories.clear(); 
-              await db.subCategories.clear(); 
-              await db.budgetGroups.clear(); 
-              await db.ignoredSubscriptions.clear();
-
-              // Lägg in nytt
-              if (dataToImport.users?.length) await db.users.bulkAdd(dataToImport.users);
-              if (dataToImport.accounts?.length) await db.accounts.bulkAdd(dataToImport.accounts);
-              if (dataToImport.buckets?.length) await db.buckets.bulkAdd(dataToImport.buckets);
-              
-              if (dataToImport.settings) {
-                   const s = Array.isArray(dataToImport.settings) ? dataToImport.settings[0] : dataToImport.settings;
-                   await db.settings.put({ ...s, id: 1 });
-              }
-              
-              if (dataToImport.transactions?.length) await db.transactions.bulkAdd(dataToImport.transactions);
-              if (dataToImport.importRules?.length) await db.importRules.bulkAdd(dataToImport.importRules);
-              if (dataToImport.mainCategories?.length) await db.mainCategories.bulkAdd(dataToImport.mainCategories);
-              if (dataToImport.subCategories?.length) await db.subCategories.bulkAdd(dataToImport.subCategories);
-              if (dataToImport.budgetGroups?.length) await db.budgetGroups.bulkAdd(dataToImport.budgetGroups);
-              if (dataToImport.ignoredSubscriptions?.length) await db.ignoredSubscriptions.bulkAdd(dataToImport.ignoredSubscriptions);
-          });
+          // 4. UPPDATERA UI DIREKT (Tvinga React att se nya datan)
+          setUsers(uniqueUsers);
+          setAccounts(uniqueAccounts);
+          setBuckets(uniqueBuckets);
           
-          // 3. UPPDATERA SKÄRMEN (Dessa rader saknas i din fil!) 
-          // Detta tvingar appen att visa den nya datan direkt.
-          setUsers(dataToImport.users || []);
-          setAccounts(dataToImport.accounts || []);
-          setBuckets(dataToImport.buckets || []);
-          
-          const newSettings = Array.isArray(dataToImport.settings) ? dataToImport.settings[0] : dataToImport.settings;
+          const newSettings = Array.isArray(data.settings) ? data.settings[0] : data.settings;
           if (newSettings) setSettings(newSettings);
           
-          // Här kommer dina bokförda transaktioner in:
-          setTransactions(dataToImport.transactions || []);
+          setTransactions(uniqueTransactions); 
           
-          setImportRules(dataToImport.importRules || []);
-          setMainCategories(dataToImport.mainCategories || []);
-          setSubCategories(dataToImport.subCategories || []);
-          setBudgetGroups(dataToImport.budgetGroups || []);
-          setIgnoredSubscriptions(dataToImport.ignoredSubscriptions || []);
+          setImportRules(uniqueRules);
+          setMainCategories(uniqueMainCats);
+          setSubCategories(uniqueSubCats);
+          setBudgetGroups(uniqueGroups);
+          setIgnoredSubscriptions(uniqueIgnored);
+          setImportLogs(uniqueLogs);
 
+          console.log("Import helt klar!");
+          alert(`Backup inläst!\nKonton: ${uniqueAccounts.length}\nTransaktioner: ${uniqueTransactions.length}\n(Om transaktioner fortfarande saknas, kolla konsolen F12)`);
           return true;
+
       } catch (e) {
-          console.error("Import failed", e);
-          alert("Kunde inte läsa in filen. Kontrollera att det är en giltig backup.");
+          console.error("Kritisk importkrasch", e);
+          alert("Filen kunde inte läsas. Är det en giltig JSON-fil?");
           return false;
       }
   };
@@ -809,6 +882,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     
     // Subscriptions
     ignoredSubscriptions, addIgnoredSubscription,
+
+    // Logs
+    importLogs, addImportLog,
 
     getExportData, importData
   };

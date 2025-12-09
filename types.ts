@@ -149,6 +149,15 @@ export interface AppSettings {
   autoApproveExpense?: boolean;
 }
 
+export interface ImportLog {
+  id: string;
+  date: string; // ISO Timestamp
+  fileName: string;
+  transactionCount: number;
+  status: 'SUCCESS' | 'ERROR' | 'PARTIAL';
+  errors?: string[]; // List of specific error messages
+}
+
 export interface GlobalState {
   users: User[];
   accounts: Account[];
@@ -164,4 +173,5 @@ export interface GlobalState {
   transactions: Transaction[];
   importRules: ImportRule[];
   ignoredSubscriptions: IgnoredSubscription[];
+  importLogs: ImportLog[]; // New log state
 }
