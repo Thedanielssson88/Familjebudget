@@ -6,7 +6,7 @@ import { z } from 'zod';
 import { db } from './db';
 import { DEFAULT_MAIN_CATEGORIES, DEFAULT_SUB_CATEGORIES } from './constants/defaultCategories';
 
-// --- ZOD SCHEMAS FOR VALIDATION (Still used for Import/Backup) ---
+// --- ZOD SCHEMAS FOR VALIDATION (Still used for Export/Type Safety checks if needed) ---
 // Note: .passthrough() is used to ensure we don't strip data fields that might exist in the JSON 
 // but are not explicitly defined in the schema (future-proofing).
 
@@ -723,33 +723,53 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const importData = async (json: string): Promise<boolean> => {
       try {
           const rawData = JSON.parse(json);
-          // With .passthrough(), we keep all fields even if not in schema
-          const result = GlobalStateSchema.safeParse(rawData);
           
-          if (!result.success) {
-              console.error("Invalid backup format", result.error);
-              return false;
-          }
-          
-          const data = result.data; 
+          // Use rawData directly to avoid Zod stripping any fields. 
+          // This ensures "all data" from the file is attempted to be stored.
+          const data = rawData;
 
           await (db as any).transaction('rw', db.users, db.accounts, db.buckets, db.settings, db.transactions, db.importRules, db.mainCategories, db.subCategories, db.budgetGroups, db.ignoredSubscriptions, async () => {
-              await db.users.clear(); await db.users.bulkAdd(data.users);
-              await db.accounts.clear(); await db.accounts.bulkAdd(data.accounts);
-              await db.buckets.clear(); await db.buckets.bulkAdd(data.buckets);
-              await db.settings.clear(); await db.settings.put({ ...data.settings, id: 1 });
+              // 1. DELETE ALL EXISTING DATA
+              await Promise.all([
+                  db.users.clear(),
+                  db.accounts.clear(),
+                  db.buckets.clear(),
+                  db.settings.clear(),
+                  db.transactions.clear(),
+                  db.importRules.clear(),
+                  db.mainCategories.clear(),
+                  db.subCategories.clear(),
+                  db.budgetGroups.clear(),
+                  db.ignoredSubscriptions.clear()
+              ]);
+
+              // 2. INSERT NEW DATA
+              if (Array.isArray(data.users)) await db.users.bulkAdd(data.users);
+              if (Array.isArray(data.accounts)) await db.accounts.bulkAdd(data.accounts);
+              if (Array.isArray(data.buckets)) await db.buckets.bulkAdd(data.buckets);
               
-              if (data.transactions) { await db.transactions.clear(); await db.transactions.bulkAdd(data.transactions); }
-              if (data.importRules) { await db.importRules.clear(); await db.importRules.bulkAdd(data.importRules); }
-              if (data.mainCategories) { await db.mainCategories.clear(); await db.mainCategories.bulkAdd(data.mainCategories); }
-              if (data.subCategories) { await db.subCategories.clear(); await db.subCategories.bulkAdd(data.subCategories); }
-              if (data.budgetGroups) { await db.budgetGroups.clear(); await db.budgetGroups.bulkAdd(data.budgetGroups); }
-              if (data.ignoredSubscriptions) { await db.ignoredSubscriptions.clear(); await db.ignoredSubscriptions.bulkAdd(data.ignoredSubscriptions); }
+              if (data.settings) {
+                  const settingsToSave = Array.isArray(data.settings) ? data.settings[0] : data.settings;
+                  await db.settings.put({ ...settingsToSave, id: 1 });
+              } else {
+                  await db.settings.put({ ...defaultSettings, id: 1 });
+              }
+              
+              if (Array.isArray(data.transactions)) await db.transactions.bulkAdd(data.transactions);
+              if (Array.isArray(data.importRules)) await db.importRules.bulkAdd(data.importRules);
+              if (Array.isArray(data.mainCategories)) await db.mainCategories.bulkAdd(data.mainCategories);
+              if (Array.isArray(data.subCategories)) await db.subCategories.bulkAdd(data.subCategories);
+              if (Array.isArray(data.budgetGroups)) await db.budgetGroups.bulkAdd(data.budgetGroups);
+              if (Array.isArray(data.ignoredSubscriptions)) await db.ignoredSubscriptions.bulkAdd(data.ignoredSubscriptions);
           });
+          
+          // Force reload to reset application state completely
+          window.location.reload();
           
           return true;
       } catch (e) {
           console.error("Import failed", e);
+          alert("Import failed: " + (e as Error).message);
           return false;
       }
   };
