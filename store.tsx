@@ -724,52 +724,71 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       try {
           const rawData = JSON.parse(json);
           
-          // Use rawData directly to avoid Zod stripping any fields. 
-          // This ensures "all data" from the file is attempted to be stored.
-          const data = rawData;
+          // 1. Validera (med passthrough som du redan har lagt till)
+          const result = GlobalStateSchema.safeParse(rawData);
+          let dataToImport = rawData;
 
+          if (!result.success) {
+              console.warn("Backup-varning (mindre fel):", result.error);
+              // Vi använder rawData ändå för att inte stoppa importen pga småfel
+          } else {
+              dataToImport = result.data;
+          }
+
+          // 2. Skriv till databasen (Detta gör du redan, men vi säkrar upp med fallback till [])
           await (db as any).transaction('rw', db.users, db.accounts, db.buckets, db.settings, db.transactions, db.importRules, db.mainCategories, db.subCategories, db.budgetGroups, db.ignoredSubscriptions, async () => {
-              // 1. DELETE ALL EXISTING DATA
-              await Promise.all([
-                  db.users.clear(),
-                  db.accounts.clear(),
-                  db.buckets.clear(),
-                  db.settings.clear(),
-                  db.transactions.clear(),
-                  db.importRules.clear(),
-                  db.mainCategories.clear(),
-                  db.subCategories.clear(),
-                  db.budgetGroups.clear(),
-                  db.ignoredSubscriptions.clear()
-              ]);
+              // Rensa allt
+              await db.users.clear(); 
+              await db.accounts.clear(); 
+              await db.buckets.clear(); 
+              await db.settings.clear(); 
+              await db.transactions.clear(); 
+              await db.importRules.clear(); 
+              await db.mainCategories.clear(); 
+              await db.subCategories.clear(); 
+              await db.budgetGroups.clear(); 
+              await db.ignoredSubscriptions.clear();
 
-              // 2. INSERT NEW DATA
-              if (Array.isArray(data.users)) await db.users.bulkAdd(data.users);
-              if (Array.isArray(data.accounts)) await db.accounts.bulkAdd(data.accounts);
-              if (Array.isArray(data.buckets)) await db.buckets.bulkAdd(data.buckets);
+              // Lägg in nytt
+              if (dataToImport.users?.length) await db.users.bulkAdd(dataToImport.users);
+              if (dataToImport.accounts?.length) await db.accounts.bulkAdd(dataToImport.accounts);
+              if (dataToImport.buckets?.length) await db.buckets.bulkAdd(dataToImport.buckets);
               
-              if (data.settings) {
-                  const settingsToSave = Array.isArray(data.settings) ? data.settings[0] : data.settings;
-                  await db.settings.put({ ...settingsToSave, id: 1 });
-              } else {
-                  await db.settings.put({ ...defaultSettings, id: 1 });
+              if (dataToImport.settings) {
+                   const s = Array.isArray(dataToImport.settings) ? dataToImport.settings[0] : dataToImport.settings;
+                   await db.settings.put({ ...s, id: 1 });
               }
               
-              if (Array.isArray(data.transactions)) await db.transactions.bulkAdd(data.transactions);
-              if (Array.isArray(data.importRules)) await db.importRules.bulkAdd(data.importRules);
-              if (Array.isArray(data.mainCategories)) await db.mainCategories.bulkAdd(data.mainCategories);
-              if (Array.isArray(data.subCategories)) await db.subCategories.bulkAdd(data.subCategories);
-              if (Array.isArray(data.budgetGroups)) await db.budgetGroups.bulkAdd(data.budgetGroups);
-              if (Array.isArray(data.ignoredSubscriptions)) await db.ignoredSubscriptions.bulkAdd(data.ignoredSubscriptions);
+              if (dataToImport.transactions?.length) await db.transactions.bulkAdd(dataToImport.transactions);
+              if (dataToImport.importRules?.length) await db.importRules.bulkAdd(dataToImport.importRules);
+              if (dataToImport.mainCategories?.length) await db.mainCategories.bulkAdd(dataToImport.mainCategories);
+              if (dataToImport.subCategories?.length) await db.subCategories.bulkAdd(dataToImport.subCategories);
+              if (dataToImport.budgetGroups?.length) await db.budgetGroups.bulkAdd(dataToImport.budgetGroups);
+              if (dataToImport.ignoredSubscriptions?.length) await db.ignoredSubscriptions.bulkAdd(dataToImport.ignoredSubscriptions);
           });
           
-          // Force reload to reset application state completely
-          window.location.reload();
+          // 3. UPPDATERA SKÄRMEN (Dessa rader saknas i din fil!) 
+          // Detta tvingar appen att visa den nya datan direkt.
+          setUsers(dataToImport.users || []);
+          setAccounts(dataToImport.accounts || []);
+          setBuckets(dataToImport.buckets || []);
           
+          const newSettings = Array.isArray(dataToImport.settings) ? dataToImport.settings[0] : dataToImport.settings;
+          if (newSettings) setSettings(newSettings);
+          
+          // Här kommer dina bokförda transaktioner in:
+          setTransactions(dataToImport.transactions || []);
+          
+          setImportRules(dataToImport.importRules || []);
+          setMainCategories(dataToImport.mainCategories || []);
+          setSubCategories(dataToImport.subCategories || []);
+          setBudgetGroups(dataToImport.budgetGroups || []);
+          setIgnoredSubscriptions(dataToImport.ignoredSubscriptions || []);
+
           return true;
       } catch (e) {
           console.error("Import failed", e);
-          alert("Import failed: " + (e as Error).message);
+          alert("Kunde inte läsa in filen. Kontrollera att det är en giltig backup.");
           return false;
       }
   };
