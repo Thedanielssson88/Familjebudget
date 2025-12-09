@@ -7,13 +7,15 @@ import { db } from './db';
 import { DEFAULT_MAIN_CATEGORIES, DEFAULT_SUB_CATEGORIES } from './constants/defaultCategories';
 
 // --- ZOD SCHEMAS FOR VALIDATION (Still used for Import/Backup) ---
+// Note: .passthrough() is used to ensure we don't strip data fields that might exist in the JSON 
+// but are not explicitly defined in the schema (future-proofing).
 
 const BucketDataSchema = z.object({
   amount: z.number().optional().default(0),
   dailyAmount: z.number().optional().default(0),
   activeDays: z.array(z.number()).optional().default([]),
   isExplicitlyDeleted: z.boolean().optional()
-});
+}).passthrough();
 
 const BucketTypeSchema = z.enum(['FIXED', 'DAILY', 'GOAL']);
 const PaymentSourceSchema = z.enum(['INCOME', 'BALANCE']);
@@ -36,7 +38,7 @@ const BucketSchema = z.object({
   eventStartDate: z.string().optional(),
   eventEndDate: z.string().optional(),
   autoTagEvent: z.boolean().optional()
-});
+}).passthrough();
 
 const UserIncomeDataSchema = z.object({
   salary: z.number().optional().default(0),
@@ -45,34 +47,34 @@ const UserIncomeDataSchema = z.object({
   incomeLoss: z.number().optional().default(0),
   vabDays: z.number().optional().default(0),
   dailyDeduction: z.number().optional().default(0)
-});
+}).passthrough();
 
 const UserSchema = z.object({
   id: z.string(),
   name: z.string(),
   avatar: z.string(),
   incomeData: z.record(z.string(), UserIncomeDataSchema)
-});
+}).passthrough();
 
 const AccountSchema = z.object({
   id: z.string(),
   name: z.string(),
   icon: z.string(),
   startBalances: z.record(z.string(), z.number()).optional().default({})
-});
+}).passthrough();
 
 const AppSettingsSchema = z.object({
   payday: z.number(),
   autoApproveIncome: z.boolean().optional(),
   autoApproveTransfer: z.boolean().optional(),
   autoApproveExpense: z.boolean().optional(),
-});
+}).passthrough();
 
 const MainCategorySchema = z.object({
   id: z.string(),
   name: z.string(),
   description: z.string().optional()
-});
+}).passthrough();
 
 const SubCategorySchema = z.object({
   id: z.string(),
@@ -81,20 +83,21 @@ const SubCategorySchema = z.object({
   description: z.string().optional(),
   budgetGroupId: z.string().optional(),
   monthlyBudget: z.number().optional()
-});
+}).passthrough();
 
 const BudgetGroupDataSchema = z.object({
     limit: z.number(),
     isExplicitlyDeleted: z.boolean().optional()
-});
+}).passthrough();
 
 const BudgetGroupSchema = z.object({
     id: z.string(),
     name: z.string(),
     monthlyData: z.record(z.string(), BudgetGroupDataSchema).optional().default({}),
     isCatchAll: z.boolean().optional(),
-    icon: z.string().optional()
-});
+    icon: z.string().optional(),
+    linkedBucketIds: z.array(z.string()).optional()
+}).passthrough();
 
 const TransactionSchema = z.object({
     id: z.string(),
@@ -108,8 +111,15 @@ const TransactionSchema = z.object({
     categoryMainId: z.string().optional(),
     categorySubId: z.string().optional(),
     isVerified: z.boolean(),
-    source: z.enum(['manual', 'import'])
-});
+    source: z.enum(['manual', 'import']),
+    // Extended fields
+    matchType: z.enum(['rule', 'history', 'ai', 'event']).optional(),
+    aiSuggested: z.boolean().optional(),
+    ruleMatch: z.boolean().optional(),
+    isManuallyApproved: z.boolean().optional(),
+    originalText: z.string().optional(),
+    rowId: z.string().optional()
+}).passthrough();
 
 const ImportRuleSchema = z.object({
     id: z.string(),
@@ -121,11 +131,11 @@ const ImportRuleSchema = z.object({
     targetCategorySubId: z.string().optional(),
     matchType: z.enum(['contains', 'exact', 'starts_with']),
     sign: z.enum(['positive', 'negative']).optional()
-});
+}).passthrough();
 
 const IgnoredSubscriptionSchema = z.object({
     id: z.string()
-});
+}).passthrough();
 
 const GlobalStateSchema = z.object({
   users: z.array(UserSchema).optional().default([]),
@@ -138,7 +148,7 @@ const GlobalStateSchema = z.object({
   subCategories: z.array(SubCategorySchema).optional().default([]),
   budgetGroups: z.array(BudgetGroupSchema).optional().default([]),
   ignoredSubscriptions: z.array(IgnoredSubscriptionSchema).optional().default([])
-});
+}).passthrough();
 
 // --- END SCHEMAS ---
 
@@ -286,16 +296,23 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         }
 
         // Fetch from DB to State
-        const dbUsers = await db.users.toArray();
-        const dbAccounts = await db.accounts.toArray();
-        const dbBuckets = await db.buckets.toArray();
-        const dbSettings = await db.settings.get(1);
-        const dbTransactions = await db.transactions.toArray();
-        const dbRules = await db.importRules.toArray();
-        const dbMainCats = await db.mainCategories.toArray();
-        const dbSubCats = await db.subCategories.toArray();
-        const dbGroups = await db.budgetGroups.toArray();
-        const dbIgnored = await db.ignoredSubscriptions.toArray();
+        const [
+            dbUsers, dbAccounts, dbBuckets, dbSettingsArr, dbTransactions, 
+            dbRules, dbMainCats, dbSubCats, dbGroups, dbIgnored
+        ] = await Promise.all([
+            db.users.toArray(),
+            db.accounts.toArray(),
+            db.buckets.toArray(),
+            db.settings.toArray(),
+            db.transactions.toArray(),
+            db.importRules.toArray(),
+            db.mainCategories.toArray(),
+            db.subCategories.toArray(),
+            db.budgetGroups.toArray(),
+            db.ignoredSubscriptions.toArray()
+        ]);
+
+        const dbSettings = dbSettingsArr.find(s => s.id === 1);
 
         setUsers(dbUsers);
         setAccounts(dbAccounts);
@@ -706,6 +723,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const importData = async (json: string): Promise<boolean> => {
       try {
           const rawData = JSON.parse(json);
+          // With .passthrough(), we keep all fields even if not in schema
           const result = GlobalStateSchema.safeParse(rawData);
           
           if (!result.success) {
@@ -713,7 +731,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
               return false;
           }
           
-          const data = result.data; // Use validated data with default fallbacks
+          const data = result.data; 
 
           await (db as any).transaction('rw', db.users, db.accounts, db.buckets, db.settings, db.transactions, db.importRules, db.mainCategories, db.subCategories, db.budgetGroups, db.ignoredSubscriptions, async () => {
               await db.users.clear(); await db.users.bulkAdd(data.users);
