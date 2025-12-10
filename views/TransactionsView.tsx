@@ -1,15 +1,16 @@
 
+
 import React, { useState, useRef, useMemo, useEffect } from 'react';
 import { useApp } from '../store';
 import { Transaction, ImportRule, Bucket, MainCategory, SubCategory, AppSettings, Account } from '../types';
 import { parseBankFile, runImportPipeline } from '../services/importService';
 import { categorizeTransactionsWithAi } from '../services/aiService';
 import { cn, Button, Card, Modal, Input } from '../components/components';
-import { Upload, Check, Wand2, Save, Trash2, Loader2, AlertTriangle, Zap, Clock, ArrowRightLeft, ShoppingCart, ArrowDownLeft, Sparkles, CheckCircle, Target, LayoutList, GalleryHorizontalEnd, ChevronLeft, ChevronRight, Search, Filter, Link2, CalendarClock, PlusCircle, CheckCircle2, Gavel, Edit2, FileText, X, Plus, XCircle, Smartphone, LayoutGrid, Square, CheckSquare, Layers, Plane, SlidersHorizontal, Unlink } from 'lucide-react';
-import { formatMoney, generateId } from '../utils';
+import { Upload, Check, Wand2, Save, Trash2, Loader2, AlertTriangle, Zap, Clock, ArrowRightLeft, ShoppingCart, ArrowDownLeft, Sparkles, CheckCircle, Target, LayoutList, GalleryHorizontalEnd, ChevronLeft, ChevronRight, Search, Filter, Link2, CalendarClock, PlusCircle, CheckCircle2, Gavel, Edit2, FileText, X, Plus, XCircle, Smartphone, LayoutGrid, Square, CheckSquare, Layers, Plane, SlidersHorizontal, Unlink, Calendar } from 'lucide-react';
+import { formatMoney, generateId, getBudgetInterval } from '../utils';
 import { useTransferMatching } from '../hooks/useTransferMatching';
 import { useSubscriptionDetection } from '../hooks/useSubscriptionDetection';
-import { format } from 'date-fns';
+import { format, subMonths } from 'date-fns';
 
 // --- SUB-COMPONENT: STAGING ROW (List View) ---
 
@@ -437,7 +438,10 @@ export const TransactionsView: React.FC = () => {
         updateImportRule,
         transactions,
         updateTransaction,
-        addBucket
+        addBucket,
+        ignoredSubscriptions,
+        addIgnoredSubscription,
+        selectedMonth
     } = useApp();
 
     const [viewMode, setViewMode] = useState<'import' | 'history' | 'smart-transfers' | 'subscriptions' | 'rules'>('import');
@@ -453,6 +457,12 @@ export const TransactionsView: React.FC = () => {
     const [historyFilterSubCat, setHistoryFilterSubCat] = useState('');
     const [historyFilterAmountMin, setHistoryFilterAmountMin] = useState<string>('');
     const [historyFilterAmountMax, setHistoryFilterAmountMax] = useState<string>('');
+    
+    // --- NEW: History Date Filters & Pagination ---
+    const [historyDateFrom, setHistoryDateFrom] = useState('');
+    const [historyDateTo, setHistoryDateTo] = useState('');
+    const [historyPage, setHistoryPage] = useState(0);
+    const HISTORY_PAGE_SIZE = 50;
 
     // --- NEW: History View Filter States ---
     const [historyTypeFilter, setHistoryTypeFilter] = useState<'ALL' | 'EXPENSE' | 'TRANSFER' | 'INCOME'>('ALL');
@@ -465,9 +475,6 @@ export const TransactionsView: React.FC = () => {
     // For Card View Navigation
     const [currentCardIndex, setCurrentCardIndex] = useState(0);
     
-    // Ignore list for subscriptions
-    const [ignoredSubscriptions, setIgnoredSubscriptions] = useState<string[]>([]);
-    
     // Rule Modal State
     const [ruleModalOpen, setRuleModalOpen] = useState(false);
     const [ruleTransaction, setRuleTransaction] = useState<Transaction | null>(null);
@@ -475,6 +482,12 @@ export const TransactionsView: React.FC = () => {
     const [ruleKeyword, setRuleKeyword] = useState('');
     const [ruleMatchType, setRuleMatchType] = useState<'contains' | 'exact' | 'starts_with'>('contains');
     const [ruleSign, setRuleSign] = useState<'positive' | 'negative' | undefined>(undefined);
+
+    // Edit Transaction Modal State
+    const [isEditTransactionModalOpen, setIsEditTransactionModalOpen] = useState(false);
+    const [editingTransaction, setEditingTransaction] = useState<Transaction | null>(null);
+    const [editDescription, setEditDescription] = useState('');
+    const [editDate, setEditDate] = useState('');
 
     // History Bulk Selection State
     const [selectedHistoryIds, setSelectedHistoryIds] = useState<Set<string>>(new Set());
@@ -485,9 +498,58 @@ export const TransactionsView: React.FC = () => {
     const [bulkBucketId, setBulkBucketId] = useState('');
     const [bulkMainCatId, setBulkMainCatId] = useState('');
     const [bulkSubCatId, setBulkSubCatId] = useState('');
-    const [bulkDreamId, setBulkDreamId] = useState(''); // New state for linking Dreams
+    const [bulkDreamId, setBulkDreamId] = useState(''); 
 
     const fileInputRef = useRef<HTMLInputElement>(null);
+
+    // Filtered transaction list for "History" tab
+    const filteredHistoryTransactions = useMemo(() => {
+        return transactions
+            .filter(t => t.isVerified)
+            .filter(t => {
+                const matchesSearch = !historySearch || t.description.toLowerCase().includes(historySearch.toLowerCase());
+                const matchesAccount = !historyAccountFilter || t.accountId === historyAccountFilter;
+                
+                // Date Filter
+                const matchesFrom = !historyDateFrom || t.date >= historyDateFrom;
+                const matchesTo = !historyDateTo || t.date <= historyDateTo;
+
+                // Advanced Filters
+                const matchesMainCat = !historyFilterMainCat || 
+                    (historyFilterMainCat === '__UNCAT__' ? !t.categoryMainId : t.categoryMainId === historyFilterMainCat);
+                
+                const matchesSubCat = !historyFilterSubCat || 
+                    (historyFilterSubCat === '__UNCAT__' ? !t.categorySubId : t.categorySubId === historyFilterSubCat);
+                
+                const amount = Math.abs(t.amount);
+                const matchesMin = !historyFilterAmountMin || amount >= Number(historyFilterAmountMin);
+                const matchesMax = !historyFilterAmountMax || amount <= Number(historyFilterAmountMax);
+
+                // Type Filtering
+                const matchesType = historyTypeFilter === 'ALL' || t.type === historyTypeFilter;
+
+                // Transfer Scope Filtering
+                let matchesTransferScope = true;
+                if (historyTypeFilter === 'TRANSFER') {
+                    if (historyTransferScope === 'UNLINKED') {
+                        matchesTransferScope = !t.linkedTransactionId && (!t.bucketId || t.bucketId === 'INTERNAL');
+                    } else if (historyTransferScope === 'LINKED') {
+                        matchesTransferScope = !!t.linkedTransactionId;
+                    }
+                }
+
+                return matchesSearch && matchesAccount && matchesFrom && matchesTo && matchesMainCat && matchesSubCat && matchesMin && matchesMax && matchesType && matchesTransferScope;
+            })
+            .sort((a, b) => b.date.localeCompare(a.date));
+    }, [transactions, historySearch, historyAccountFilter, historyDateFrom, historyDateTo, historyFilterMainCat, historyFilterSubCat, historyFilterAmountMin, historyFilterAmountMax, historyTypeFilter, historyTransferScope]);
+
+    // Paginated History
+    const paginatedHistory = useMemo(() => {
+        const start = historyPage * HISTORY_PAGE_SIZE;
+        return filteredHistoryTransactions.slice(start, start + HISTORY_PAGE_SIZE);
+    }, [filteredHistoryTransactions, historyPage]);
+    
+    const totalHistoryPages = Math.ceil(filteredHistoryTransactions.length / HISTORY_PAGE_SIZE);
 
     // Calculate latest transaction date per account
     const latestTransactionDates = useMemo(() => {
@@ -507,47 +569,6 @@ export const TransactionsView: React.FC = () => {
         return importedTransactions.filter(t => t.description.toLowerCase().includes(lower) || formatMoney(t.amount).includes(lower));
     }, [importedTransactions, importSearch]);
 
-    // Filtered transaction list for "History" tab
-    const historyTransactions = useMemo(() => {
-        return transactions
-            .filter(t => t.isVerified)
-            .filter(t => {
-                const matchesSearch = !historySearch || t.description.toLowerCase().includes(historySearch.toLowerCase());
-                const matchesAccount = !historyAccountFilter || t.accountId === historyAccountFilter;
-                
-                // Advanced Filters
-                const matchesMainCat = !historyFilterMainCat || 
-                    (historyFilterMainCat === '__UNCAT__' ? !t.categoryMainId : t.categoryMainId === historyFilterMainCat);
-                
-                const matchesSubCat = !historyFilterSubCat || 
-                    (historyFilterSubCat === '__UNCAT__' ? !t.categorySubId : t.categorySubId === historyFilterSubCat);
-                
-                const amount = Math.abs(t.amount);
-                const matchesMin = !historyFilterAmountMin || amount >= Number(historyFilterAmountMin);
-                const matchesMax = !historyFilterAmountMax || amount <= Number(historyFilterAmountMax);
-
-                // --- NEW: Type Filtering ---
-                const matchesType = historyTypeFilter === 'ALL' || t.type === historyTypeFilter;
-
-                // --- NEW: Special Transfer Scope Filtering ---
-                let matchesTransferScope = true;
-                if (historyTypeFilter === 'TRANSFER') {
-                    if (historyTransferScope === 'UNLINKED') {
-                        // "Utan koppling" = Not linked to another tx AND (is marked INTERNAL OR has no bucket)
-                        // This allows showing transfers that are manually marked as 'INTERNAL' but missing a pair.
-                        matchesTransferScope = !t.linkedTransactionId && (!t.bucketId || t.bucketId === 'INTERNAL');
-                    } else if (historyTransferScope === 'LINKED') {
-                        // "Kopplade" = Has a linkedTransactionId
-                        matchesTransferScope = !!t.linkedTransactionId;
-                    }
-                }
-
-                return matchesSearch && matchesAccount && matchesMainCat && matchesSubCat && matchesMin && matchesMax && matchesType && matchesTransferScope;
-            })
-            .sort((a, b) => b.date.localeCompare(a.date))
-            .slice(0, 100); // Show last 100 (after filter)
-    }, [transactions, historySearch, historyAccountFilter, historyFilterMainCat, historyFilterSubCat, historyFilterAmountMin, historyFilterAmountMax, historyTypeFilter, historyTransferScope]);
-
     // History Selection Logic
     const toggleHistorySelection = (id: string) => {
         const next = new Set(selectedHistoryIds);
@@ -556,15 +577,15 @@ export const TransactionsView: React.FC = () => {
     };
 
     const selectAllHistory = () => {
-        if (selectedHistoryIds.size === historyTransactions.length) {
+        if (selectedHistoryIds.size === paginatedHistory.length) {
             setSelectedHistoryIds(new Set());
         } else {
-            setSelectedHistoryIds(new Set(historyTransactions.map(t => t.id)));
+            setSelectedHistoryIds(new Set(paginatedHistory.map(t => t.id)));
         }
     };
 
     const selectHistoryByType = (type: 'EXPENSE' | 'TRANSFER' | 'INCOME') => {
-        const ids = historyTransactions.filter(t => t.type === type).map(t => t.id);
+        const ids = paginatedHistory.filter(t => t.type === type).map(t => t.id);
         setSelectedHistoryIds(new Set(ids));
     };
 
@@ -600,10 +621,7 @@ export const TransactionsView: React.FC = () => {
                 updateData.categoryMainId = undefined;
                 updateData.categorySubId = undefined;
             } else if (bulkTargetType === 'EXPENSE') {
-                // Allows setting a bucketId (Dream) IF one is selected, otherwise clear it.
                 updateData.bucketId = bulkDreamId || undefined; 
-                
-                // Only update category if a specific value is chosen (not empty string)
                 if (bulkMainCatId) {
                     updateData.categoryMainId = bulkMainCatId;
                 }
@@ -612,7 +630,6 @@ export const TransactionsView: React.FC = () => {
                 }
             } else if (bulkTargetType === 'INCOME') {
                 updateData.bucketId = undefined;
-                // Only update category if chosen
                 if (bulkMainCatId) {
                     updateData.categoryMainId = bulkMainCatId;
                 }
@@ -627,10 +644,43 @@ export const TransactionsView: React.FC = () => {
         setSelectedHistoryIds(new Set());
     };
 
+    const handleEditTransaction = (tx: Transaction) => {
+        setEditingTransaction(tx);
+        setEditDescription(tx.description);
+        setEditDate(tx.date);
+        setIsEditTransactionModalOpen(true);
+    };
+
+    const handleSaveTransactionEdit = async () => {
+        if (!editingTransaction) return;
+        
+        const updatedTx = { ...editingTransaction };
+        
+        // IMPORTANT: If this is the first time we edit, ensure we save the original description
+        // to originalText, so duplicate detection during import still works against the bank's text.
+        if (!updatedTx.originalText) {
+            updatedTx.originalText = updatedTx.description;
+        }
+
+        updatedTx.description = editDescription;
+
+        // Date Change Logic: Keep original date for future duplicate detection
+        if (editDate !== updatedTx.date) {
+            if (!updatedTx.originalDate) {
+                updatedTx.originalDate = updatedTx.date;
+            }
+            updatedTx.date = editDate;
+        }
+
+        await updateTransaction(updatedTx);
+        setIsEditTransactionModalOpen(false);
+    };
+
     const transferMatches = useTransferMatching(transactions);
     const subscriptionsRaw = useSubscriptionDetection(transactions);
     const subscriptions = useMemo(() => {
-        return subscriptionsRaw.filter(s => !ignoredSubscriptions.includes(s.name));
+        const ignoredIds = new Set(ignoredSubscriptions.map(i => i.id));
+        return subscriptionsRaw.filter(s => !ignoredIds.has(s.name));
     }, [subscriptionsRaw, ignoredSubscriptions]);
 
     const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -829,6 +879,19 @@ export const TransactionsView: React.FC = () => {
         alert(`Skapade fast utgift för ${sub.name}!`);
     };
 
+    const handleIgnoreSubscription = async (name: string) => {
+        if (confirm(`Är du säker på att du vill ignorera "${name}" från prenumerationslistan? Detta val sparas.`)) {
+            await addIgnoredSubscription(name);
+        }
+    };
+
+    const setDateFilterByMonth = (monthKey: string) => {
+        const { start, end } = getBudgetInterval(monthKey, settings.payday);
+        setHistoryDateFrom(format(start, 'yyyy-MM-dd'));
+        setHistoryDateTo(format(end, 'yyyy-MM-dd'));
+        setHistoryPage(0);
+    };
+
     const isBudgeted = (name: string) => buckets.some(b => b.name.toLowerCase() === name.toLowerCase());
 
     return (
@@ -930,6 +993,50 @@ export const TransactionsView: React.FC = () => {
             {viewMode === 'history' && (
                  <div className="space-y-4">
                      
+                     {/* --- DATE FILTER SECTION --- */}
+                     <div className="bg-slate-900/50 p-3 rounded-lg border border-slate-700 flex flex-col gap-2">
+                         <div className="flex gap-2 text-xs overflow-x-auto no-scrollbar pb-1">
+                             <button 
+                                onClick={() => setDateFilterByMonth(selectedMonth)}
+                                className="px-3 py-1.5 bg-blue-600/20 text-blue-300 border border-blue-500/30 rounded-full whitespace-nowrap hover:bg-blue-600/30"
+                             >
+                                 Nuvarande budgetmånad
+                             </button>
+                             <button 
+                                onClick={() => setDateFilterByMonth(format(subMonths(new Date(`${selectedMonth}-01`), 1), 'yyyy-MM'))}
+                                className="px-3 py-1.5 bg-slate-700/50 text-slate-400 border border-slate-600 rounded-full whitespace-nowrap hover:bg-slate-700"
+                             >
+                                 Föregående budgetmånad
+                             </button>
+                             <button 
+                                onClick={() => { setHistoryDateFrom(''); setHistoryDateTo(''); }}
+                                className="px-3 py-1.5 bg-slate-700/50 text-slate-400 border border-slate-600 rounded-full whitespace-nowrap hover:bg-slate-700"
+                             >
+                                 Visa allt
+                             </button>
+                         </div>
+                         <div className="flex gap-2 items-center">
+                             <div className="flex-1">
+                                 <label className="text-[10px] text-slate-500 uppercase font-bold mb-1 block">Från</label>
+                                 <input 
+                                    type="date" 
+                                    className="w-full bg-slate-800 border border-slate-600 rounded px-2 py-1.5 text-xs text-white" 
+                                    value={historyDateFrom} 
+                                    onChange={(e) => setHistoryDateFrom(e.target.value)} 
+                                 />
+                             </div>
+                             <div className="flex-1">
+                                 <label className="text-[10px] text-slate-500 uppercase font-bold mb-1 block">Till</label>
+                                 <input 
+                                    type="date" 
+                                    className="w-full bg-slate-800 border border-slate-600 rounded px-2 py-1.5 text-xs text-white" 
+                                    value={historyDateTo} 
+                                    onChange={(e) => setHistoryDateTo(e.target.value)} 
+                                 />
+                             </div>
+                         </div>
+                     </div>
+
                      {/* --- NEW: TYPE FILTER & SEARCH --- */}
                      <div className="flex flex-col gap-3">
                          
@@ -1006,8 +1113,8 @@ export const TransactionsView: React.FC = () => {
                      {/* Bulk Selection Actions */}
                      <div className="bg-slate-800/80 p-2 rounded-lg border border-slate-700 flex flex-wrap gap-2 items-center text-xs">
                          <button onClick={selectAllHistory} className="flex items-center gap-1.5 px-3 py-1.5 rounded hover:bg-slate-700 text-slate-300 transition-colors">
-                             {selectedHistoryIds.size === historyTransactions.length && historyTransactions.length > 0 ? <CheckSquare size={14} className="text-blue-400" /> : <Square size={14} />}
-                             <span>Välj alla</span>
+                             {selectedHistoryIds.size === paginatedHistory.length && paginatedHistory.length > 0 ? <CheckSquare size={14} className="text-blue-400" /> : <Square size={14} />}
+                             <span>Välj alla på sidan</span>
                          </button>
                          <div className="w-px h-4 bg-slate-700 mx-1" />
                          <span className="text-slate-500 font-medium mr-1">Snabbval:</span>
@@ -1030,7 +1137,7 @@ export const TransactionsView: React.FC = () => {
                     )}
 
                      <div className="space-y-2">
-                         {historyTransactions.map(tx => {
+                         {paginatedHistory.map(tx => {
                              const isSelected = selectedHistoryIds.has(tx.id);
                              const account = accounts.find(a => a.id === tx.accountId);
                              const linkedGoal = buckets.find(b => b.id === tx.bucketId && b.type === 'GOAL');
@@ -1063,7 +1170,17 @@ export const TransactionsView: React.FC = () => {
                                      
                                      <div className="flex-1 min-w-0">
                                          <div className="flex justify-between items-start">
-                                             <div className="text-white font-medium truncate pr-2">{tx.description}</div>
+                                             <div className="text-white font-medium truncate pr-2 group flex items-center gap-2">
+                                                {tx.description}
+                                                {/* --- NEW: Edit Button --- */}
+                                                <button 
+                                                    onClick={(e) => { e.stopPropagation(); handleEditTransaction(tx); }}
+                                                    className="opacity-0 group-hover:opacity-100 p-1 text-slate-400 hover:text-white transition-opacity bg-slate-700/50 rounded"
+                                                    title="Redigera namn och detaljer"
+                                                >
+                                                    <Edit2 size={10} />
+                                                </button>
+                                             </div>
                                              <div className="font-mono font-bold text-white whitespace-nowrap">{formatMoney(tx.amount)}</div>
                                          </div>
                                          
@@ -1107,10 +1224,35 @@ export const TransactionsView: React.FC = () => {
                                  </div>
                              );
                          })}
-                         {historyTransactions.length === 0 && (
+                         {filteredHistoryTransactions.length === 0 && (
                              <div className="text-center text-slate-500 py-10">Ingen historik matchade filtret.</div>
                          )}
                      </div>
+
+                     {/* PAGINATION CONTROLS */}
+                     {filteredHistoryTransactions.length > HISTORY_PAGE_SIZE && (
+                         <div className="flex justify-center items-center gap-4 pt-4">
+                             <Button 
+                                variant="secondary" 
+                                disabled={historyPage === 0} 
+                                onClick={() => setHistoryPage(p => p - 1)}
+                                className="px-4 py-2"
+                             >
+                                 Föregående
+                             </Button>
+                             <span className="text-sm text-slate-400">
+                                 Sida {historyPage + 1} av {totalHistoryPages}
+                             </span>
+                             <Button 
+                                variant="secondary" 
+                                disabled={historyPage >= totalHistoryPages - 1} 
+                                onClick={() => setHistoryPage(p => p + 1)}
+                                className="px-4 py-2"
+                             >
+                                 Nästa
+                             </Button>
+                         </div>
+                     )}
                  </div>
             )}
 
@@ -1188,7 +1330,7 @@ export const TransactionsView: React.FC = () => {
                                                 <span className="text-xs text-slate-500 italic">Redan tillagd</span>
                                             )}
                                         </div>
-                                        <button onClick={() => setIgnoredSubscriptions(prev => [...prev, sub.name])} className="p-2 text-slate-600 hover:text-rose-400 opacity-0 group-hover:opacity-100 transition-opacity" title="Dölj detta förslag">
+                                        <button onClick={() => handleIgnoreSubscription(sub.name)} className="p-2 text-slate-600 hover:text-rose-400 opacity-0 group-hover:opacity-100 transition-opacity" title="Dölj detta förslag permanent">
                                             <X size={16} />
                                         </button>
                                     </div>
@@ -1340,6 +1482,48 @@ export const TransactionsView: React.FC = () => {
                     </div>
                     <Button onClick={handleBulkSave} disabled={!bulkTargetType} className="w-full">Uppdatera transaktioner</Button>
                 </div>
+            </Modal>
+            
+            {/* EDIT SINGLE TRANSACTION MODAL */}
+            <Modal isOpen={isEditTransactionModalOpen} onClose={() => setIsEditTransactionModalOpen(false)} title="Redigera Transaktion">
+                {editingTransaction && (
+                    <div className="space-y-4">
+                        <Input 
+                            label="Beskrivning" 
+                            value={editDescription} 
+                            onChange={(e) => setEditDescription(e.target.value)}
+                            placeholder="T.ex. Veckohandling" 
+                        />
+                        
+                        <div className="grid grid-cols-2 gap-4">
+                            <div>
+                                <label className="text-xs font-medium text-slate-500 uppercase tracking-wider block mb-1">Datum</label>
+                                <input 
+                                    type="date"
+                                    className="w-full bg-slate-900/50 border border-slate-700 rounded px-3 py-2 text-white text-sm focus:border-blue-500 outline-none"
+                                    value={editDate}
+                                    onChange={(e) => setEditDate(e.target.value)}
+                                />
+                            </div>
+                            <div>
+                                <label className="text-xs font-medium text-slate-500 uppercase tracking-wider block mb-1">Belopp (Ej ändrbart)</label>
+                                <div className="bg-slate-900/50 border border-slate-800 rounded px-3 py-2 text-slate-400 text-sm font-mono">
+                                    {formatMoney(editingTransaction.amount)}
+                                </div>
+                            </div>
+                        </div>
+
+                        {editingTransaction.originalText && (
+                            <div className="text-xs text-slate-500 italic bg-slate-800/30 p-2 rounded">
+                                Ursprunglig banktext: "{editingTransaction.originalText}"
+                            </div>
+                        )}
+
+                        <Button onClick={handleSaveTransactionEdit} disabled={!editDescription.trim()} className="w-full">
+                            Spara Ändringar
+                        </Button>
+                    </div>
+                )}
             </Modal>
         </div>
     );

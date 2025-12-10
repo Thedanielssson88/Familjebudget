@@ -112,6 +112,7 @@ export interface Transaction {
   isVerified: boolean; // If the user has approved/reviewed it
   source: 'manual' | 'import';
   originalText?: string;
+  originalDate?: string; // If date is modified manually, keep original here for duplicate detection
   rowId?: string; // Helper to track CSV rows
   
   // UI Helpers for Import Review
@@ -137,6 +138,10 @@ export interface ImportRule {
   sign?: 'positive' | 'negative'; // Only match transactions with this sign
 }
 
+export interface IgnoredSubscription {
+    id: string; // Usually the description
+}
+
 export interface AppSettings {
   payday: number; // Day of month (e.g., 25)
   // Auto-approval settings for import
@@ -159,4 +164,5 @@ export interface GlobalState {
   selectedMonth: string; // YYYY-MM
   transactions: Transaction[];
   importRules: ImportRule[];
+  ignoredSubscriptions: IgnoredSubscription[];
 }

@@ -1,10 +1,11 @@
+
 import React, { useState, useEffect, useMemo } from 'react';
 import { useApp } from '../store';
 import { OperatingBudgetView } from './OperatingBudgetView';
 import { Bucket, BucketData, Account } from '../types';
 import { calculateDailyBucketCost, calculateFixedBucketCost, calculateGoalBucketCost, formatMoney, generateId, getBudgetInterval, isBucketActiveInMonth, getEffectiveBucketData, calculateSavedAmount } from '../utils';
 import { Card, Button, Input, Modal, cn } from '../components/components';
-import { Plus, Trash2, Calendar, Target, Repeat, Wallet, PiggyBank, ArrowRightLeft, Image as ImageIcon, X, Check, ChevronDown, ChevronUp, Settings, Copy, PieChart, LayoutGrid, Edit2 } from 'lucide-react';
+import { Plus, Trash2, Calendar, Target, Repeat, Wallet, PiggyBank, ArrowRightLeft, Image as ImageIcon, X, Check, ChevronDown, ChevronUp, Settings, Copy, PieChart, LayoutGrid, Edit2, ChevronRight, HelpCircle } from 'lucide-react';
 import { format, addMonths, parseISO, differenceInMonths } from 'date-fns';
 import { sv } from 'date-fns/locale';
 import { useBudgetActuals } from '../hooks/useBudgetActuals';
@@ -76,6 +77,7 @@ const TransfersViewContent: React.FC = () => {
   // REAL-TIME ACTUALS HOOK
   const actuals = useBudgetActuals(selectedMonth, settings.payday);
   const [drillDownBucketId, setDrillDownBucketId] = useState<string | null>(null);
+  const [drillDownUnallocatedAccount, setDrillDownUnallocatedAccount] = useState<string | null>(null);
 
   // We use a partial Bucket for editing state to handle the UI form
   const [editingBucket, setEditingBucket] = useState<Bucket | null>(null);
@@ -86,6 +88,9 @@ const TransfersViewContent: React.FC = () => {
   const [showGoalDetails, setShowGoalDetails] = useState(false); // Toggle for advanced goal settings
   const [showRegularDetails, setShowRegularDetails] = useState(false); // Toggle for advanced settings on regular buckets
 
+  // EXPANDED STATE FOR ACCOUNTS
+  const [expandedAccounts, setExpandedAccounts] = useState<Set<string>>(new Set());
+
   // Account creation/editing state
   const [isAccountModalOpen, setIsAccountModalOpen] = useState(false);
   const [editingAccount, setEditingAccount] = useState<Account | null>(null);
@@ -93,6 +98,13 @@ const TransfersViewContent: React.FC = () => {
   const [accountIcon, setAccountIcon] = useState('🏠');
 
   const accountIcons = ['🏠', '🚗', '💰', '✈️', '🍔', '👶', '🐶', '💊', '🎓', '🎁', '🔧', '🧥', '💳', '🏦', '📉', '🏖️', '💡', '🛒', '🚲', '🎮'];
+
+  const toggleAccountExpand = (id: string) => {
+      const next = new Set(expandedAccounts);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      setExpandedAccounts(next);
+  };
 
   const openAccountModal = (account?: Account) => {
       if (account) {
@@ -369,127 +381,176 @@ const TransfersViewContent: React.FC = () => {
       {accounts.map(account => {
         const accountBuckets = buckets.filter(b => b.accountId === account.id && isBucketActiveInMonth(b, selectedMonth));
         const accountTotal = accountBuckets.reduce((sum, b) => sum + calculateCost(b), 0);
+        const isExpanded = expandedAccounts.has(account.id);
         
-        // Sum transfers for the entire account visualization (strictly funding/inflow)
-        const accountTransferred = accountBuckets.reduce((sum, b) => {
-            return sum + (actuals?.transfersByBucket[b.id] || 0);
-        }, 0);
+        // Sum transfers for the entire account visualization (Net Flow)
+        // This is strictly positive transfers minus negative transfers to/from this account
+        const accountNetFlow = actuals?.accountTransferNet[account.id] || 0;
+        const unallocatedFlow = actuals?.accountUnallocatedNet[account.id] || 0;
 
         return (
-          <div key={account.id} className="space-y-4 mb-8">
-            <div className="bg-slate-800/50 p-4 rounded-2xl border border-slate-700 shadow-lg">
+          <div key={account.id} className="space-y-0 mb-4 bg-slate-800/50 rounded-2xl border border-slate-700 shadow-lg overflow-hidden transition-all duration-300">
+            {/* EXPANDABLE HEADER */}
+            <div 
+                className="p-4 cursor-pointer hover:bg-slate-800 transition-colors"
+                onClick={() => toggleAccountExpand(account.id)}
+            >
                 <div className="flex items-center justify-between mb-3">
-                    <div className="flex items-center gap-2 text-white">
+                    <div className="flex items-center gap-3 text-white">
+                        <div className={cn("text-slate-500 transition-transform duration-300", isExpanded ? "rotate-90 text-blue-400" : "")}>
+                            <ChevronRight size={20} />
+                        </div>
                         <h2 className="text-xl font-bold flex items-center gap-2">
                             <span>{account.icon}</span> {account.name}
                         </h2>
-                        <button 
-                            onClick={() => openAccountModal(account)}
-                            className="text-slate-500 hover:text-blue-400 p-1.5 rounded-lg hover:bg-slate-700 transition-colors"
-                            title="Redigera konto"
-                        >
-                            <Edit2 size={14} />
-                        </button>
+                        {isExpanded && (
+                            <button 
+                                onClick={(e) => { e.stopPropagation(); openAccountModal(account); }}
+                                className="text-slate-500 hover:text-blue-400 p-1.5 rounded-lg hover:bg-slate-700 transition-colors"
+                                title="Redigera konto"
+                            >
+                                <Edit2 size={14} />
+                            </button>
+                        )}
                     </div>
                     <div className="text-right">
-                        <div className="text-[10px] uppercase font-bold text-slate-500 tracking-wider">Planerad Överföring</div>
-                        <div className="text-lg font-mono font-bold text-white leading-none">{formatMoney(accountTotal)}</div>
+                        <div className="text-[10px] uppercase font-bold text-slate-500 tracking-wider">Utfall / Planerat</div>
+                        <div className="flex items-baseline justify-end gap-1.5">
+                            <span className={cn("text-lg font-mono font-bold leading-none", 
+                                accountNetFlow >= accountTotal ? "text-emerald-400" : "text-white"
+                            )}>
+                                {formatMoney(accountNetFlow)}
+                            </span>
+                            <span className="text-xs font-mono text-slate-500">
+                                / {formatMoney(accountTotal)}
+                            </span>
+                        </div>
                     </div>
                 </div>
 
                 <BudgetProgressBar 
-                    spent={accountTransferred} 
+                    spent={accountNetFlow} 
                     total={accountTotal} 
-                    label={`Totalt Överfört till kontot`}
+                    label={`Totalt Nettoflöde`}
                     className="mt-1"
                 />
             </div>
             
-            <div className="grid gap-3">
-              {accountBuckets.map(bucket => {
-                const cost = calculateCost(bucket);
-                const { isInherited } = getEffectiveBucketData(bucket, selectedMonth);
-                const showConfirmButton = isInherited && bucket.type !== 'GOAL';
-                const styles = getBucketStyles(bucket);
-                
-                // Show ONLY transfers here (as per user request "Kassaflöde ska enbart överföringar synas")
-                // actuals.transfersByBucket is now strictly absolute value (Funding)
-                const transferred = actuals?.transfersByBucket[bucket.id] || 0;
-                
-                // --- NEW: Calculate Accumulated Balance for Goal ---
-                const accumulated = bucket.type === 'GOAL' ? calculateSavedAmount(bucket, selectedMonth) : 0;
+            {/* EXPANDED CONTENT (BUCKET LIST) */}
+            {isExpanded && (
+                <div className="bg-slate-900/30 border-t border-slate-700/50 p-4 animate-in slide-in-from-top-2">
+                    <div className="grid gap-3">
+                    {accountBuckets.map(bucket => {
+                        const cost = calculateCost(bucket);
+                        const { isInherited } = getEffectiveBucketData(bucket, selectedMonth);
+                        const showConfirmButton = isInherited && bucket.type !== 'GOAL';
+                        const styles = getBucketStyles(bucket);
+                        
+                        // Show ONLY transfers here (as per user request "Kassaflöde ska enbart överföringar synas")
+                        // actuals.transfersByBucket is now strictly absolute value (Funding)
+                        const transferred = actuals?.transfersByBucket[bucket.id] || 0;
+                        
+                        // --- NEW: Calculate Accumulated Balance for Goal ---
+                        const accumulated = bucket.type === 'GOAL' ? calculateSavedAmount(bucket, selectedMonth) : 0;
 
-                return (
-                  <Card 
-                    key={bucket.id} 
-                    onClick={() => openModal(bucket)} 
-                    className={cn(
-                        "flex items-stretch justify-between py-3 px-4 border-l-4 cursor-pointer active:scale-[0.98] transition-all group relative overflow-hidden", 
-                        styles.container
-                    )}
-                  >
-                    <div className="flex-1 flex flex-col justify-center">
-                      <div className="flex items-center gap-2">
-                         <span className="font-medium text-white">{bucket.name}</span>
-                         {bucket.isSavings && <span className={cn("text-[10px] px-1.5 py-0.5 rounded uppercase tracking-wider", styles.badge)}>Spar</span>}
-                         {bucket.paymentSource === 'BALANCE' && <span className={cn("text-[10px] px-1.5 py-0.5 rounded uppercase tracking-wider", styles.badge)}>Saldo</span>}
-                      </div>
-                      
-                      <div className={cn("text-xs mt-1 flex flex-wrap gap-2 opacity-80 transition-colors", styles.text)}>
-                        {bucket.type === 'FIXED' && <span className="flex items-center gap-1"><Repeat className="w-3 h-3"/> Fast</span>}
-                        {bucket.type === 'DAILY' && <span className="flex items-center gap-1"><Calendar className="w-3 h-3"/> Rörligt</span>}
-                        {bucket.type === 'GOAL' && (
-                            <div className="flex items-center gap-3">
-                                <span className="flex items-center gap-1"><Target className="w-3 h-3"/> Mål</span>
-                                <span className="flex items-center gap-1 font-bold bg-black/20 px-1.5 rounded"><PiggyBank className="w-3 h-3"/> Saldo: {formatMoney(accumulated)}</span>
-                            </div>
-                        )}
-                      </div>
-                    </div>
-                    
-                    <div className="flex items-center gap-4">
-                        <div 
-                            className="w-24 flex flex-col items-end justify-center group/bar"
-                            onClick={(e) => {
-                                e.stopPropagation();
-                                setDrillDownBucketId(bucket.id);
-                            }}
+                        return (
+                        <Card 
+                            key={bucket.id} 
+                            onClick={() => openModal(bucket)} 
+                            className={cn(
+                                "flex items-stretch justify-between py-3 px-4 border-l-4 cursor-pointer active:scale-[0.98] transition-all group relative overflow-hidden", 
+                                styles.container
+                            )}
                         >
-                            <div className="text-right mb-1">
-                                <span className={cn("font-mono font-bold text-sm", transferred >= cost ? "text-emerald-400" : "text-white")}>
-                                    {transferred > 0 && '+'}{formatMoney(transferred)}
-                                </span>
-                                <span className="text-[10px] text-slate-500 mx-1">/</span>
-                                <span className="text-[10px] text-slate-400">{formatMoney(cost)}</span>
+                            <div className="flex-1 flex flex-col justify-center">
+                            <div className="flex items-center gap-2">
+                                <span className="font-medium text-white">{bucket.name}</span>
+                                {bucket.isSavings && <span className={cn("text-[10px] px-1.5 py-0.5 rounded uppercase tracking-wider", styles.badge)}>Spar</span>}
+                                {bucket.paymentSource === 'BALANCE' && <span className={cn("text-[10px] px-1.5 py-0.5 rounded uppercase tracking-wider", styles.badge)}>Saldo</span>}
                             </div>
-                            <BudgetProgressBar 
-                                spent={transferred} 
-                                total={cost} 
-                                compact
-                            />
-                        </div>
+                            
+                            <div className={cn("text-xs mt-1 flex flex-wrap gap-2 opacity-80 transition-colors", styles.text)}>
+                                {bucket.type === 'FIXED' && <span className="flex items-center gap-1"><Repeat className="w-3 h-3"/> Fast</span>}
+                                {bucket.type === 'DAILY' && <span className="flex items-center gap-1"><Calendar className="w-3 h-3"/> Rörligt</span>}
+                                {bucket.type === 'GOAL' && (
+                                    <div className="flex items-center gap-3">
+                                        <span className="flex items-center gap-1"><Target className="w-3 h-3"/> Mål</span>
+                                        <span className="flex items-center gap-1 font-bold bg-black/20 px-1.5 rounded"><PiggyBank className="w-3 h-3"/> Saldo: {formatMoney(accumulated)}</span>
+                                    </div>
+                                )}
+                            </div>
+                            </div>
+                            
+                            <div className="flex items-center gap-4">
+                                <div 
+                                    className="w-24 flex flex-col items-end justify-center group/bar"
+                                    onClick={(e) => {
+                                        e.stopPropagation();
+                                        setDrillDownBucketId(bucket.id);
+                                    }}
+                                >
+                                    <div className="text-right mb-1">
+                                        <span className={cn("font-mono font-bold text-sm", transferred >= cost ? "text-emerald-400" : "text-white")}>
+                                            {transferred > 0 && '+'}{formatMoney(transferred)}
+                                        </span>
+                                        <span className="text-[10px] text-slate-500 mx-1">/</span>
+                                        <span className="text-[10px] text-slate-400">{formatMoney(cost)}</span>
+                                    </div>
+                                    <BudgetProgressBar 
+                                        spent={transferred} 
+                                        total={cost} 
+                                        compact
+                                    />
+                                </div>
 
-                        {showConfirmButton && (
-                            <button 
-                                onClick={(e) => {
-                                    e.stopPropagation();
-                                    confirmBucketAmount(bucket.id, selectedMonth);
-                                }}
-                                title="Bekräfta beloppet"
-                                className="w-8 h-8 rounded-full bg-emerald-500/20 hover:bg-emerald-500 text-emerald-500 hover:text-white flex items-center justify-center transition-all animate-in zoom-in ml-2"
-                            >
-                                <Check className="w-4 h-4" />
-                            </button>
-                        )}
+                                {showConfirmButton && (
+                                    <button 
+                                        onClick={(e) => {
+                                            e.stopPropagation();
+                                            confirmBucketAmount(bucket.id, selectedMonth);
+                                        }}
+                                        title="Bekräfta beloppet"
+                                        className="w-8 h-8 rounded-full bg-emerald-500/20 hover:bg-emerald-500 text-emerald-500 hover:text-white flex items-center justify-center transition-all animate-in zoom-in ml-2"
+                                    >
+                                        <Check className="w-4 h-4" />
+                                    </button>
+                                )}
+                            </div>
+                        </Card>
+                        );
+                    })}
+
+                    {/* NEW: UNALLOCATED TRANSFERS CARD */}
+                    {unallocatedFlow !== 0 && (
+                        <Card 
+                            onClick={() => setDrillDownUnallocatedAccount(account.id)}
+                            className="flex items-stretch justify-between py-3 px-4 border-l-4 border-l-slate-500 bg-slate-800/30 hover:bg-slate-800/60 cursor-pointer active:scale-[0.98] transition-all"
+                        >
+                            <div className="flex-1 flex flex-col justify-center">
+                                <div className="flex items-center gap-2">
+                                    <span className="font-medium text-slate-300">Övriga Överföringar</span>
+                                    <span className="text-[10px] bg-slate-700 text-slate-400 px-1.5 py-0.5 rounded uppercase tracking-wider">Okopplade</span>
+                                </div>
+                                <div className="text-xs mt-1 text-slate-500">
+                                    Transaktioner som inte är kopplade till någon budgetpost.
+                                </div>
+                            </div>
+                            <div className="flex items-center gap-4">
+                                <div className="w-24 text-right">
+                                    <div className={cn("font-mono font-bold text-sm", unallocatedFlow > 0 ? "text-emerald-400" : "text-rose-400")}>
+                                        {unallocatedFlow > 0 && '+'}{formatMoney(unallocatedFlow)}
+                                    </div>
+                                </div>
+                            </div>
+                        </Card>
+                    )}
+                    
+                    <Button variant="ghost" className="border-dashed border border-slate-700 text-slate-500 hover:text-white mt-2" onClick={() => openModal(undefined, account.id)}>
+                        <Plus className="w-5 h-5" /> Lägg till post i {account.name}
+                    </Button>
                     </div>
-                  </Card>
-                );
-              })}
-              
-              <Button variant="ghost" className="border-dashed border border-slate-700 text-slate-500 hover:text-white" onClick={() => openModal(undefined, account.id)}>
-                <Plus className="w-5 h-5" /> Lägg till post i {account.name}
-              </Button>
-            </div>
+                </div>
+            )}
           </div>
         );
       })}
@@ -875,6 +936,19 @@ const TransfersViewContent: React.FC = () => {
             onClose={() => setDrillDownBucketId(null)}
             filterType="TRANSFER"
          />
+      )}
+
+      {/* NEW: Drill Down for Unallocated Transfers */}
+      {drillDownUnallocatedAccount && (
+          <TransactionDrillDown
+             bucketName="Övriga Överföringar (Okopplade)"
+             month={selectedMonth}
+             payday={settings.payday}
+             onClose={() => setDrillDownUnallocatedAccount(null)}
+             filterType="TRANSFER"
+             unallocatedOnly={true}
+             accountId={drillDownUnallocatedAccount}
+          />
       )}
     </div>
   );

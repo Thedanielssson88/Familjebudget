@@ -1,3 +1,4 @@
+
 import { useLiveQuery } from 'dexie-react-hooks';
 import { db } from '../db';
 import { getBudgetInterval } from '../utils';
@@ -20,6 +21,10 @@ export const useBudgetActuals = (selectedMonth: string, payday: number) => {
     const transfersByBucket: Record<string, number> = {};
     const expensesByBucket: Record<string, number> = {};
     const spentByAccount: Record<string, number> = {};
+    
+    // New: Account Level Transfer Stats
+    const accountTransferNet: Record<string, number> = {};
+    const accountUnallocatedNet: Record<string, number> = {};
 
     transactions.forEach(t => {
       // Calculate generic impact for legacy spentByBucket (Consumption View)
@@ -32,13 +37,15 @@ export const useBudgetActuals = (selectedMonth: string, payday: number) => {
           consumptionImpact = -t.amount;
       }
 
-      if (t.bucketId) {
+      // Check if it is a specific user bucket or a special system category
+      const isSpecialBucket = t.bucketId === 'INTERNAL' || t.bucketId === 'PAYOUT';
+
+      if (t.bucketId && !isSpecialBucket) {
         // Split by Type for specific views
-        if (t.type === 'TRANSFER') {
+        if (t.type === 'TRANSFER' || t.type === 'INCOME') {
             // For Cash Flow / Funding:
-            // Any transfer associated with a bucket is considered a "Funding Event".
-            // Whether it is negative (from Main Account) or positive (arriving in Goal Account),
-            // it represents money allocated to this bucket. We use Absolute Value to show magnitude of funding.
+            // Any transfer or income associated with a bucket is considered a "Funding Event".
+            // We use Absolute Value to show magnitude of funding.
             transfersByBucket[t.bucketId] = (transfersByBucket[t.bucketId] || 0) + Math.abs(t.amount);
         } else if (t.type === 'EXPENSE') {
             // For Expenses:
@@ -47,17 +54,24 @@ export const useBudgetActuals = (selectedMonth: string, payday: number) => {
         }
 
         // Total aggregate (Legacy/Consumption focused)
-        // We generally don't want Transfers to count as "Spent" in the generic sense if we are looking at consumption,
-        // but some views might rely on this. 
-        // Given the new strict separation, we populate this mainly with Expenses + consumption logic.
         spentByBucket[t.bucketId] = (spentByBucket[t.bucketId] || 0) + consumptionImpact;
+      } else {
+          // No Bucket ID OR Special Bucket (Internal/Payout)
+          if ((t.type === 'TRANSFER' || t.type === 'INCOME') && t.accountId) {
+              accountUnallocatedNet[t.accountId] = (accountUnallocatedNet[t.accountId] || 0) + t.amount;
+          }
       }
       
       if (t.accountId) {
         spentByAccount[t.accountId] = (spentByAccount[t.accountId] || 0) + consumptionImpact;
+        
+        // Calculate Net Transfer Flow per Account (All transfers/income in minus all transfers out)
+        if (t.type === 'TRANSFER' || t.type === 'INCOME') {
+            accountTransferNet[t.accountId] = (accountTransferNet[t.accountId] || 0) + t.amount;
+        }
       }
     });
 
-    return { spentByBucket, transfersByBucket, expensesByBucket, spentByAccount, transactions };
+    return { spentByBucket, transfersByBucket, expensesByBucket, spentByAccount, accountTransferNet, accountUnallocatedNet, transactions };
   }, [selectedMonth, payday]);
 };

@@ -1,5 +1,5 @@
 import Dexie, { type Table } from 'dexie';
-import { User, Account, Bucket, AppSettings, Transaction, ImportRule, MainCategory, SubCategory, BudgetGroup } from './types';
+import { User, Account, Bucket, AppSettings, Transaction, ImportRule, MainCategory, SubCategory, BudgetGroup, IgnoredSubscription } from './types';
 
 export class FamilyFlowDB extends Dexie {
   users!: Table<User, string>;
@@ -12,12 +12,13 @@ export class FamilyFlowDB extends Dexie {
   mainCategories!: Table<MainCategory, string>;
   subCategories!: Table<SubCategory, string>;
   budgetGroups!: Table<BudgetGroup, string>;
+  ignoredSubscriptions!: Table<IgnoredSubscription, string>;
 
   constructor() {
     super('FamilyFlowDB');
     
     // Define schema and indexes
-    (this as any).version(7).stores({
+    (this as any).version(8).stores({
       users: 'id',
       accounts: 'id',
       buckets: 'id, type, isSavings, accountId',
@@ -26,7 +27,8 @@ export class FamilyFlowDB extends Dexie {
       importRules: 'id, keyword, accountId',
       mainCategories: 'id',
       subCategories: 'id, mainCategoryId, budgetGroupId',
-      budgetGroups: 'id'
+      budgetGroups: 'id',
+      ignoredSubscriptions: 'id'
     });
   }
 }

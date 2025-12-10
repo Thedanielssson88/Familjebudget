@@ -214,10 +214,15 @@ export const runImportPipeline = async (
 ): Promise<Transaction[]> => {
     
     // 1. DUPLICATE CHECK
-    const existingHashes = new Set(existingTransactions.map(t => `${t.date}_${t.amount}_${t.description}`));
+    // IMPORTANT: We check against 'originalText' (if renamed) AND 'originalDate' (if date changed)
+    // to match against the raw data from the file.
+    const existingHashes = new Set(existingTransactions.map(t => 
+        `${t.originalDate || t.date}_${t.amount}_${(t.originalText || t.description).trim()}`
+    ));
     
     let processed = rawTransactions.filter(t => {
-        const hash = `${t.date}_${t.amount}_${t.description}`;
+        // Raw transactions from file always have the bank text in 'description' and date in 'date'.
+        const hash = `${t.date}_${t.amount}_${t.description.trim()}`;
         return !existingHashes.has(hash);
     });
 

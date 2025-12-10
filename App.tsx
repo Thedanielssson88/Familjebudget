@@ -85,7 +85,9 @@ const MainApp = () => {
       setBackupStatus('Återställer...');
       try {
           const jsonContent = await loadBackupFile(fileId);
-          const success = importData(jsonContent);
+          // AWAIT the import process to ensure DB is populated before reload
+          const success = await importData(jsonContent);
+          
           if (success) {
               setBackupStatus('Återställd!');
               window.location.reload(); // Reload to refresh state cleanly

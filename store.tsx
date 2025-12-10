@@ -1,5 +1,5 @@
 import React, { createContext, useContext, useEffect, useState } from 'react';
-import { Account, AppSettings, Bucket, GlobalState, User, MonthKey, Transaction, ImportRule, MainCategory, SubCategory, BudgetGroup, BudgetGroupData } from './types';
+import { Account, AppSettings, Bucket, GlobalState, User, MonthKey, Transaction, ImportRule, MainCategory, SubCategory, BudgetGroup, BudgetGroupData, IgnoredSubscription } from './types';
 import { format, addMonths, parseISO } from 'date-fns';
 import { getEffectiveBucketData, generateId, isBucketActiveInMonth, calculateFixedBucketCost, calculateDailyBucketCost, calculateGoalBucketCost, getEffectiveBudgetGroupData } from './utils';
 import { z } from 'zod';
@@ -7,7 +7,6 @@ import { db } from './db';
 import { DEFAULT_MAIN_CATEGORIES, DEFAULT_SUB_CATEGORIES } from './constants/defaultCategories';
 
 // --- ZOD SCHEMAS FOR VALIDATION (Still used for Import/Backup) ---
-// ... (keep existing schemas unchanged)
 
 const BucketDataSchema = z.object({
   amount: z.number().optional().default(0),
@@ -92,7 +91,6 @@ const BudgetGroupDataSchema = z.object({
 const BudgetGroupSchema = z.object({
     id: z.string(),
     name: z.string(),
-    // monthlyLimit: z.number(), // REMOVED
     monthlyData: z.record(z.string(), BudgetGroupDataSchema).optional().default({}),
     isCatchAll: z.boolean().optional(),
     icon: z.string().optional()
@@ -110,7 +108,9 @@ const TransactionSchema = z.object({
     categoryMainId: z.string().optional(),
     categorySubId: z.string().optional(),
     isVerified: z.boolean(),
-    source: z.enum(['manual', 'import'])
+    source: z.enum(['manual', 'import']),
+    originalText: z.string().optional(),
+    originalDate: z.string().optional()
 });
 
 const ImportRuleSchema = z.object({
@@ -125,6 +125,10 @@ const ImportRuleSchema = z.object({
     sign: z.enum(['positive', 'negative']).optional()
 });
 
+const IgnoredSubscriptionSchema = z.object({
+    id: z.string()
+});
+
 const GlobalStateSchema = z.object({
   users: z.array(UserSchema).optional().default([]),
   accounts: z.array(AccountSchema).optional().default([]),
@@ -134,7 +138,8 @@ const GlobalStateSchema = z.object({
   importRules: z.array(ImportRuleSchema).optional().default([]),
   mainCategories: z.array(MainCategorySchema).optional().default([]),
   subCategories: z.array(SubCategorySchema).optional().default([]),
-  budgetGroups: z.array(BudgetGroupSchema).optional().default([])
+  budgetGroups: z.array(BudgetGroupSchema).optional().default([]),
+  ignoredSubscriptions: z.array(IgnoredSubscriptionSchema).optional().default([])
 });
 
 // --- END SCHEMAS ---
@@ -174,6 +179,9 @@ interface AppContextType extends GlobalState {
   updateBudgetGroup: (group: BudgetGroup) => Promise<void>;
   deleteBudgetGroup: (id: string, month?: MonthKey, scope?: 'THIS_MONTH' | 'THIS_AND_FUTURE' | 'ALL') => Promise<void>;
   
+  // Subscription Ignore
+  addIgnoredSubscription: (name: string) => Promise<void>;
+
   // Backup features
   getExportData: () => Promise<string>; 
   importData: (json: string) => Promise<boolean>; 
@@ -189,6 +197,15 @@ const defaultSettings: AppSettings = {
     autoApproveExpense: true 
 };
 
+// Helper for chunking arrays
+const chunkArray = <T,>(array: T[], size: number): T[][] => {
+    const chunks: T[][] = [];
+    for (let i = 0; i < array.length; i += size) {
+        chunks.push(array.slice(i, i + size));
+    }
+    return chunks;
+};
+
 export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [isLoaded, setIsLoaded] = useState(false);
   const [users, setUsers] = useState<User[]>([]);
@@ -201,6 +218,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const [mainCategories, setMainCategories] = useState<MainCategory[]>([]);
   const [subCategories, setSubCategories] = useState<SubCategory[]>([]);
   const [budgetGroups, setBudgetGroups] = useState<BudgetGroup[]>([]);
+  const [ignoredSubscriptions, setIgnoredSubscriptions] = useState<IgnoredSubscription[]>([]);
 
   // Initial Load & Migration Logic
   useEffect(() => {
@@ -218,7 +236,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
                 if (result.success) {
                     const data = result.data;
-                    await (db as any).transaction('rw', db.users, db.accounts, db.buckets, db.settings, db.transactions, db.importRules, db.mainCategories, db.subCategories, db.budgetGroups, async () => {
+                    await (db as any).transaction('rw', db.users, db.accounts, db.buckets, db.settings, db.transactions, db.importRules, db.mainCategories, db.subCategories, db.budgetGroups, db.ignoredSubscriptions, async () => {
                         await db.users.bulkAdd(data.users);
                         await db.accounts.bulkAdd(data.accounts);
                         await db.buckets.bulkAdd(data.buckets);
@@ -228,6 +246,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
                         if (data.mainCategories) await db.mainCategories.bulkAdd(data.mainCategories);
                         if (data.subCategories) await db.subCategories.bulkAdd(data.subCategories);
                         if (data.budgetGroups) await db.budgetGroups.bulkAdd(data.budgetGroups);
+                        if (data.ignoredSubscriptions) await db.ignoredSubscriptions.bulkAdd(data.ignoredSubscriptions);
                     });
                 }
             } else {
@@ -287,6 +306,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         const dbMainCats = await db.mainCategories.toArray();
         const dbSubCats = await db.subCategories.toArray();
         const dbGroups = await db.budgetGroups.toArray();
+        const dbIgnored = await db.ignoredSubscriptions.toArray();
 
         setUsers(dbUsers);
         setAccounts(dbAccounts);
@@ -349,6 +369,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
         setTransactions(migratedTransactions);
         setImportRules(migratedRules);
+        setIgnoredSubscriptions(dbIgnored);
 
         if (dbSettings) {
             const { id, ...cleanSettings } = dbSettings;
@@ -446,7 +467,17 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const deleteBucket = async (id: string, month: MonthKey, scope: 'THIS_MONTH' | 'THIS_AND_FUTURE' | 'ALL') => {
     if (scope === 'ALL') {
         await db.buckets.delete(id);
+        
+        // Remove link from transactions so they fall back to "Other Transfers"
+        await db.transactions
+            .where('bucketId')
+            .equals(id)
+            .modify({ bucketId: undefined });
+
         setBuckets(prev => prev.filter(b => b.id !== id));
+        setTransactions(prev => prev.map(t => 
+            t.bucketId === id ? { ...t, bucketId: undefined } : t
+        ));
         return;
     }
 
@@ -654,35 +685,98 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       await db.importRules.delete(id);
       setImportRules(prev => prev.filter(r => r.id !== id));
   };
+  
+  const addIgnoredSubscription = async (name: string) => {
+      const ignored = { id: name };
+      await db.ignoredSubscriptions.add(ignored);
+      setIgnoredSubscriptions(prev => [...prev, ignored]);
+  };
 
-  // --- BACKUP ---
+  // --- BACKUP: EXPORT ---
   const getExportData = async () => {
+      // Vi hämtar direkt från DB för att garantera att vi får ALL data, oberoende av state
+      const [
+          users, accounts, buckets, settingsArr, transactions, 
+          importRules, mainCategories, subCategories, budgetGroups, ignoredSubscriptions
+      ] = await Promise.all([
+          db.users.toArray(),
+          db.accounts.toArray(),
+          db.buckets.toArray(),
+          db.settings.toArray(), // Settings är en tabell, men vi sparar ofta bara en rad
+          db.transactions.toArray(),
+          db.importRules.toArray(),
+          db.mainCategories.toArray(),
+          db.subCategories.toArray(),
+          db.budgetGroups.toArray(),
+          db.ignoredSubscriptions.toArray()
+      ]);
+
+      // Eftersom settings i din typ är ett objekt men i DB en tabell, hanterar vi det:
+      const settingsExport = settingsArr.length > 0 ? settingsArr[0] : defaultSettings;
+
       const data = {
-          users, accounts, buckets, settings, transactions, importRules, mainCategories, subCategories, budgetGroups
+          users, accounts, buckets, settings: settingsExport, transactions, 
+          importRules, mainCategories, subCategories, budgetGroups, ignoredSubscriptions,
+          meta: {
+              version: 1,
+              date: new Date().toISOString()
+          }
       };
       return JSON.stringify(data, null, 2);
   };
 
+  // --- BACKUP: IMPORT ---
   const importData = async (json: string): Promise<boolean> => {
       try {
           const data = JSON.parse(json);
           const result = GlobalStateSchema.safeParse(data);
+          
           if (!result.success) {
               console.error("Invalid backup format", result.error);
               return false;
           }
           
-          await (db as any).transaction('rw', db.users, db.accounts, db.buckets, db.settings, db.transactions, db.importRules, db.mainCategories, db.subCategories, db.budgetGroups, async () => {
-              await db.users.clear(); await db.users.bulkAdd(data.users);
-              await db.accounts.clear(); await db.accounts.bulkAdd(data.accounts);
-              await db.buckets.clear(); await db.buckets.bulkAdd(data.buckets);
-              await db.settings.clear(); await db.settings.put({ ...data.settings, id: 1 });
-              
-              if (data.transactions) { await db.transactions.clear(); await db.transactions.bulkAdd(data.transactions); }
-              if (data.importRules) { await db.importRules.clear(); await db.importRules.bulkAdd(data.importRules); }
-              if (data.mainCategories) { await db.mainCategories.clear(); await db.mainCategories.bulkAdd(data.mainCategories); }
-              if (data.subCategories) { await db.subCategories.clear(); await db.subCategories.bulkAdd(data.subCategories); }
-              if (data.budgetGroups) { await db.budgetGroups.clear(); await db.budgetGroups.bulkAdd(data.budgetGroups); }
+          const validData = result.data;
+
+          // Transaktion för att säkerställa att allt eller inget sparas
+          await (db as any).transaction('rw', 
+              db.users, db.accounts, db.buckets, db.settings, 
+              db.transactions, db.importRules, db.mainCategories, 
+              db.subCategories, db.budgetGroups, db.ignoredSubscriptions,
+              async () => {
+                  
+                  // 1. Rensa alla tabeller först
+                  await Promise.all([
+                      db.users.clear(),
+                      db.accounts.clear(),
+                      db.buckets.clear(),
+                      db.settings.clear(),
+                      db.transactions.clear(),
+                      db.importRules.clear(),
+                      db.mainCategories.clear(),
+                      db.subCategories.clear(),
+                      db.budgetGroups.clear(),
+                      db.ignoredSubscriptions.clear()
+                  ]);
+
+                  // 2. Lägg in data (Små tabeller kan tas direkt)
+                  if (validData.users) await db.users.bulkAdd(validData.users);
+                  if (validData.accounts) await db.accounts.bulkAdd(validData.accounts);
+                  if (validData.buckets) await db.buckets.bulkAdd(validData.buckets);
+                  if (validData.settings) await db.settings.put({ ...validData.settings, id: 1 });
+                  if (validData.importRules) await db.importRules.bulkAdd(validData.importRules);
+                  if (validData.mainCategories) await db.mainCategories.bulkAdd(validData.mainCategories);
+                  if (validData.subCategories) await db.subCategories.bulkAdd(validData.subCategories);
+                  if (validData.budgetGroups) await db.budgetGroups.bulkAdd(validData.budgetGroups);
+                  if (validData.ignoredSubscriptions) await db.ignoredSubscriptions.bulkAdd(validData.ignoredSubscriptions);
+
+                  // 3. Hantera stora datamängder (Transaktioner) med Chunking (500 rader åt gången)
+                  if (validData.transactions && validData.transactions.length > 0) {
+                      const chunks = chunkArray(validData.transactions, 500);
+                      for (const chunk of chunks) {
+                          await db.transactions.bulkAdd(chunk);
+                      }
+                  }
           });
           
           return true;
@@ -706,6 +800,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     // Budget Groups
     budgetGroups, addBudgetGroup, updateBudgetGroup, deleteBudgetGroup,
     
+    // Subscriptions
+    ignoredSubscriptions, addIgnoredSubscription,
+
     getExportData, importData
   };
 
