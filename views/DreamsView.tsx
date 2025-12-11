@@ -1,13 +1,24 @@
+
+
 import React, { useEffect, useState, useMemo } from 'react';
 import { useApp } from '../store';
-import { calculateSavedAmount, calculateGoalBucketCost, formatMoney } from '../utils';
+import { calculateSavedAmount, calculateGoalBucketCost, formatMoney, generateId, calculateReimbursementMap, getEffectiveAmount } from '../utils';
 import { PieChart, Pie, Cell, ResponsiveContainer } from 'recharts';
 import { format, parseISO, isValid, addMonths, differenceInMonths } from 'date-fns';
 import { sv } from 'date-fns/locale';
-import { Archive, CheckCircle, Pause, Play, Rocket, TrendingUp, Calendar, Trash2, Settings, Save, Search, Receipt, CheckSquare, Square, X, Unlink, Wallet, PiggyBank, PieChart as PieChartIcon, ChevronDown, ChevronRight } from 'lucide-react';
+import { Archive, CheckCircle, Pause, Play, Rocket, TrendingUp, Calendar, Trash2, Settings, Save, Search, Receipt, CheckSquare, Square, X, Unlink, Wallet, PiggyBank, PieChart as PieChartIcon, ChevronDown, ChevronRight, Plus, Target, Image as ImageIcon } from 'lucide-react';
 import { cn, Button, Modal, Input } from '../components/components';
 import { Bucket, Transaction } from '../types';
-import { db } from '../db';
+
+const DREAM_IMAGES = [
+  "https://images.unsplash.com/photo-1507525428034-b723cf961d3e?q=80&w=2073&auto=format&fit=crop", // Beach
+  "https://images.unsplash.com/photo-1469854523086-cc02fe5d8800?q=80&w=2021&auto=format&fit=crop", // Travel
+  "https://images.unsplash.com/photo-1533473359331-0135ef1b58bf?q=80&w=2070&auto=format&fit=crop", // Car
+  "https://images.unsplash.com/photo-1560518883-ce09059eeffa?q=80&w=1973&auto=format&fit=crop", // House
+  "https://images.unsplash.com/photo-1555041469-a586c61ea9bc?q=80&w=2070&auto=format&fit=crop", // Sofa/Home
+  "https://images.unsplash.com/photo-1523275335684-37898b6baf30?q=80&w=1999&auto=format&fit=crop", // Watch/Luxury
+  "https://images.unsplash.com/photo-1518770660439-4636190af475?q=80&w=2070&auto=format&fit=crop", // Tech
+];
 
 // Animated Number Component
 const AnimatedNumber = ({ value }: { value: number }) => {
@@ -63,12 +74,14 @@ const DreamCard: React.FC<DreamCardProps> = ({ goal, isArchived, selectedMonth, 
     const remaining = Math.max(0, goal.targetAmount - saved);
     const progress = goal.targetAmount > 0 ? Math.min(100, (saved / goal.targetAmount) * 100) : 0;
     
+    const reimbursementMap = useMemo(() => calculateReimbursementMap(transactions), [transactions]);
+
     // Calculate total Booked Spend (Transactions linked to this goal)
     const totalBooked = useMemo(() => {
         return transactions
             .filter(t => t.bucketId === goal.id && (t.type === 'EXPENSE' || t.amount < 0))
-            .reduce((sum, t) => sum + Math.abs(t.amount), 0);
-    }, [transactions, goal.id]);
+            .reduce((sum, t) => sum + Math.abs(getEffectiveAmount(t, reimbursementMap)), 0);
+    }, [transactions, goal.id, reimbursementMap]);
 
     // Calculate Stats Breakdown
     const statsBreakdown = useMemo(() => {
@@ -78,14 +91,14 @@ const DreamCard: React.FC<DreamCardProps> = ({ goal, isArchived, selectedMonth, 
             const mainTxs = relevantTxs.filter(t => t.categoryMainId === main.id);
             if (mainTxs.length === 0) return null;
             
-            const mainTotal = mainTxs.reduce((sum, t) => sum + Math.abs(t.amount), 0);
+            const mainTotal = mainTxs.reduce((sum, t) => sum + Math.abs(getEffectiveAmount(t, reimbursementMap)), 0);
             
             const subs = subCategories
                 .filter(s => s.mainCategoryId === main.id)
                 .map(sub => {
                     const subTxs = mainTxs.filter(t => t.categorySubId === sub.id);
                     if (subTxs.length === 0) return null;
-                    const subTotal = subTxs.reduce((sum, t) => sum + Math.abs(t.amount), 0);
+                    const subTotal = subTxs.reduce((sum, t) => sum + Math.abs(getEffectiveAmount(t, reimbursementMap)), 0);
                     return { ...sub, total: subTotal, transactions: subTxs };
                 })
                 .filter((s): s is NonNullable<typeof s> => !!s)
@@ -94,7 +107,7 @@ const DreamCard: React.FC<DreamCardProps> = ({ goal, isArchived, selectedMonth, 
             // Unassigned
             const unassignedTxs = mainTxs.filter(t => !t.categorySubId);
             if (unassignedTxs.length > 0) {
-                const unTotal = unassignedTxs.reduce((sum, t) => sum + Math.abs(t.amount), 0);
+                const unTotal = unassignedTxs.reduce((sum, t) => sum + Math.abs(getEffectiveAmount(t, reimbursementMap)), 0);
                 subs.push({ id: 'orphan', mainCategoryId: main.id, name: 'Övrigt', total: unTotal, description: '', budgetGroupId: '', transactions: unassignedTxs });
             }
 
@@ -104,7 +117,7 @@ const DreamCard: React.FC<DreamCardProps> = ({ goal, isArchived, selectedMonth, 
         // Also handle completely uncategorized (no main cat)
         const uncategorizedTxs = relevantTxs.filter(t => !t.categoryMainId);
         if (uncategorizedTxs.length > 0) {
-            const total = uncategorizedTxs.reduce((sum, t) => sum + Math.abs(t.amount), 0);
+            const total = uncategorizedTxs.reduce((sum, t) => sum + Math.abs(getEffectiveAmount(t, reimbursementMap)), 0);
             mains.push({ 
                 id: 'uncat', 
                 name: 'Okategoriserat', 
@@ -115,7 +128,7 @@ const DreamCard: React.FC<DreamCardProps> = ({ goal, isArchived, selectedMonth, 
         }
 
         return mains;
-    }, [transactions, goal.id, mainCategories, subCategories]);
+    }, [transactions, goal.id, mainCategories, subCategories, reimbursementMap]);
 
     const toggleStat = (id: string) => {
         const next = new Set(expandedStats);
@@ -186,14 +199,14 @@ const DreamCard: React.FC<DreamCardProps> = ({ goal, isArchived, selectedMonth, 
     return (
         <div className={cn("relative w-full rounded-3xl overflow-hidden shadow-2xl group bg-slate-800 transition-all border border-slate-700/50", grayscale, opacity)}>
             {/* Background Image Container */}
-            <div className="absolute inset-0 h-64 z-0">
+            <div className="absolute inset-0 h-full z-0">
                 <div 
                     className="absolute inset-0 bg-cover bg-center transition-transform duration-700 group-hover:scale-105"
                     style={{ 
                         backgroundImage: `url(${goal.backgroundImage || 'https://images.unsplash.com/photo-1469854523086-cc02fe5d8800?q=80&w=2021&auto=format&fit=crop'})` 
                     }}
                 />
-                <div className="absolute inset-0 bg-gradient-to-t from-slate-900 via-slate-900/80 to-transparent" />
+                <div className="absolute inset-0 bg-gradient-to-t from-slate-900 via-slate-900/60 to-transparent" />
             </div>
 
             {/* Top Controls */}
@@ -214,7 +227,7 @@ const DreamCard: React.FC<DreamCardProps> = ({ goal, isArchived, selectedMonth, 
                             </>
                         ) : (
                             <>
-                                <Pause className="w-3 h-3 fill-current" /> Pausa Månad
+                                <Pause className="w-3 h-3 fill-current" /> Pausa
                             </>
                         )}
                     </button>
@@ -267,39 +280,39 @@ const DreamCard: React.FC<DreamCardProps> = ({ goal, isArchived, selectedMonth, 
                 </div>
             </div>
 
-            {/* Main Content */}
-            <div className="relative z-10 p-6 pt-32 flex flex-col h-full justify-end">
+            {/* Main Content - Compact */}
+            <div className="relative z-10 p-5 pt-16 flex flex-col h-full justify-end">
                 <div className="flex items-end justify-between">
                     <div className="flex-1 min-w-0 pr-4">
-                        <div className="flex items-center gap-2 mb-1">
-                            <h2 className="text-2xl font-bold leading-none text-white drop-shadow-lg truncate">{goal.name}</h2>
+                        <div className="flex items-center gap-2 mb-0.5">
+                            <h2 className="text-xl font-bold leading-none text-white drop-shadow-lg truncate">{goal.name}</h2>
                             {isArchived && <CheckCircle className="w-5 h-5 text-emerald-400 shrink-0" />}
                         </div>
-                        <p className="text-sm text-slate-300 mb-4 font-medium drop-shadow-md flex items-center gap-1">
+                        <p className="text-sm text-slate-300 mb-2 font-medium drop-shadow-md flex items-center gap-1">
                             {isArchived ? (
                                 <span>Avslutad: {goal.archivedDate}</span>
                             ) : (
                                 <>
-                                    <span>Datum: {dateLabel}</span>
+                                    <span>{dateLabel}</span>
                                     {!isPaused && simulatedExtra === 0 && goal.paymentSource !== 'BALANCE' && (
-                                        <span className="text-slate-500 text-xs bg-black/40 px-1.5 py-0.5 rounded">
-                                            {formatMoney(currentMonthlyRate)}/mån
+                                        <span className="text-slate-400 text-xs px-1 py-0.5">
+                                            • {formatMoney(currentMonthlyRate)}/mån
                                         </span>
                                     )}
                                     {goal.paymentSource === 'BALANCE' && (
                                         <span className="text-amber-400 text-xs bg-black/40 px-1.5 py-0.5 rounded flex items-center gap-1">
-                                            <PiggyBank size={10} /> Befintligt Saldo
+                                            <PiggyBank size={10} /> Saldo
                                         </span>
                                     )}
                                 </>
                             )}
                         </p>
                         
-                        <div className="space-y-1">
-                            <div className="text-xs font-bold uppercase tracking-widest text-purple-300 drop-shadow-md">
+                        <div className="space-y-0.5">
+                            <div className="text-[10px] font-bold uppercase tracking-widest text-purple-300 drop-shadow-md">
                                 {isArchived ? "Totalt Sparat" : (goal.paymentSource === 'BALANCE' ? "Tillgängligt Saldo" : "Kvar till drömmen")}
                             </div>
-                            <div className="text-4xl font-bold font-mono tracking-tighter text-white drop-shadow-lg">
+                            <div className="text-3xl font-bold font-mono tracking-tighter text-white drop-shadow-lg">
                                 {isArchived || goal.paymentSource === 'BALANCE' ? (
                                     <span>{formatMoney(goal.paymentSource === 'BALANCE' ? goal.targetAmount : saved)}</span>
                                 ) : (
@@ -319,13 +332,13 @@ const DreamCard: React.FC<DreamCardProps> = ({ goal, isArchived, selectedMonth, 
                     </div>
 
                     {/* Donut Chart */}
-                    <div className="w-24 h-24 relative shrink-0">
+                    <div className="w-20 h-20 relative shrink-0">
                         <ResponsiveContainer width="100%" height="100%">
                             <PieChart>
                                 <Pie
                                     data={chartData}
-                                    innerRadius={35}
-                                    outerRadius={45}
+                                    innerRadius={30}
+                                    outerRadius={40}
                                     startAngle={90}
                                     endAngle={-270}
                                     dataKey="value"
@@ -344,7 +357,7 @@ const DreamCard: React.FC<DreamCardProps> = ({ goal, isArchived, selectedMonth, 
 
                 {/* SIMULATOR SECTION */}
                 {!isArchived && !isPaused && goal.paymentSource !== 'BALANCE' && (
-                    <div className="mt-6 pt-4 border-t border-white/10">
+                    <div className="mt-4 pt-3 border-t border-white/10">
                         <button 
                             onClick={() => setIsSimulating(!isSimulating)}
                             className="flex items-center gap-2 text-xs font-bold text-purple-300 hover:text-purple-200 transition-colors uppercase tracking-wider mb-2"
@@ -463,3 +476,225 @@ const DreamCard: React.FC<DreamCardProps> = ({ goal, isArchived, selectedMonth, 
 };
 
 export const DreamsView: React.FC = () => {
+    const { buckets, updateBucket, deleteBucket, archiveBucket, selectedMonth, addBucket, accounts } = useApp();
+    const [showArchived, setShowArchived] = useState(false);
+    
+    // Edit/Create Modal State
+    const [isEditModalOpen, setIsEditModalOpen] = useState(false);
+    const [editingGoal, setEditingGoal] = useState<Bucket | null>(null);
+
+    const goals = useMemo(() => {
+        return buckets
+            .filter(b => b.type === 'GOAL')
+            .filter(b => showArchived ? !!b.archivedDate : !b.archivedDate)
+            .sort((a, b) => (a.targetDate || '') > (b.targetDate || '') ? 1 : -1);
+    }, [buckets, showArchived]);
+
+    const { transactions } = useApp();
+
+    const handleArchive = (id: string, name: string) => {
+        if (confirm(`Är du säker på att du vill arkivera "${name}"? Det avslutar sparandet men sparar historiken.`)) {
+            archiveBucket(id, selectedMonth);
+        }
+    };
+
+    const handleDelete = (id: string, name: string) => {
+        if (confirm(`VARNING: Detta tar bort "${name}" permanent. Vill du fortsätta?`)) {
+            deleteBucket(id, selectedMonth, 'ALL');
+        }
+    };
+
+    const openEditModal = (goal?: Bucket) => {
+        if (goal) {
+            setEditingGoal(goal);
+        } else {
+            // New Goal
+            setEditingGoal({
+                id: generateId(),
+                accountId: accounts[0]?.id || '',
+                name: '',
+                type: 'GOAL',
+                isSavings: true,
+                paymentSource: 'INCOME',
+                monthlyData: {},
+                targetAmount: 0,
+                targetDate: format(addMonths(new Date(), 12), 'yyyy-MM'),
+                startSavingDate: selectedMonth,
+                backgroundImage: DREAM_IMAGES[0]
+            });
+        }
+        setIsEditModalOpen(true);
+    };
+
+    const handleSaveGoal = async () => {
+        if (!editingGoal) return;
+        
+        if (buckets.find(b => b.id === editingGoal.id)) {
+            await updateBucket(editingGoal);
+        } else {
+            await addBucket(editingGoal);
+        }
+        setIsEditModalOpen(false);
+    };
+
+    return (
+        <div className="space-y-6 pb-24 animate-in slide-in-from-right duration-300">
+            <header className="flex justify-between items-start">
+                <div>
+                    <h1 className="text-3xl font-bold text-transparent bg-clip-text bg-gradient-to-r from-purple-400 to-pink-400">Drömmar & Mål</h1>
+                    <p className="text-slate-400">Visualisera och nå dina sparmål.</p>
+                </div>
+                <div className="flex bg-slate-800 p-1 rounded-lg">
+                    <button 
+                        onClick={() => setShowArchived(false)} 
+                        className={cn("px-3 py-1.5 text-xs font-bold rounded transition-all", !showArchived ? "bg-purple-600 text-white" : "text-slate-400 hover:text-white")}
+                    >
+                        Aktiva
+                    </button>
+                    <button 
+                        onClick={() => setShowArchived(true)} 
+                        className={cn("px-3 py-1.5 text-xs font-bold rounded transition-all", showArchived ? "bg-slate-600 text-white" : "text-slate-400 hover:text-white")}
+                    >
+                        Arkiverade
+                    </button>
+                </div>
+            </header>
+
+            <div className="space-y-6">
+                {goals.map(goal => (
+                    <DreamCard 
+                        key={goal.id} 
+                        goal={goal} 
+                        isArchived={!!goal.archivedDate}
+                        selectedMonth={selectedMonth}
+                        transactions={transactions}
+                        onArchive={handleArchive}
+                        onDelete={handleDelete}
+                        onEdit={openEditModal}
+                    />
+                ))}
+                
+                {goals.length === 0 && (
+                    <div className="text-center py-10 text-slate-500 italic">
+                        {showArchived ? "Inga arkiverade drömmar än." : "Inga aktiva drömmar. Dags att skapa en?"}
+                    </div>
+                )}
+
+                {!showArchived && (
+                    <Button 
+                        variant="secondary" 
+                        className="w-full border-dashed border-slate-700 py-6 text-slate-400 hover:text-white hover:border-purple-500/50 group"
+                        onClick={() => openEditModal()}
+                    >
+                        <div className="flex flex-col items-center gap-2">
+                            <div className="p-3 bg-slate-800 rounded-full group-hover:bg-purple-600 group-hover:text-white transition-colors">
+                                <Plus className="w-6 h-6" />
+                            </div>
+                            <span className="font-bold">Lägg till ny dröm</span>
+                        </div>
+                    </Button>
+                )}
+            </div>
+
+            {/* EDIT MODAL */}
+            <Modal isOpen={isEditModalOpen} onClose={() => setIsEditModalOpen(false)} title={editingGoal?.name ? `Redigera ${editingGoal.name}` : "Ny Dröm"}>
+                {editingGoal && (
+                    <div className="space-y-4">
+                        <Input label="Namn på målet" value={editingGoal.name} onChange={e => setEditingGoal({...editingGoal, name: e.target.value})} autoFocus />
+                        
+                        <div>
+                            <label className="text-xs font-medium text-slate-400 uppercase tracking-wider block mb-1">Kopplat Konto</label>
+                            <select 
+                                value={editingGoal.accountId}
+                                onChange={(e) => setEditingGoal({...editingGoal, accountId: e.target.value})}
+                                className="w-full bg-slate-900/50 border border-slate-700 rounded-xl px-4 py-3 text-white focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                            >
+                                {accounts.map(acc => (
+                                    <option key={acc.id} value={acc.id}>
+                                        {acc.icon} {acc.name}
+                                    </option>
+                                ))}
+                            </select>
+                        </div>
+
+                        <Input label="Målbelopp" type="number" value={editingGoal.targetAmount} onChange={e => setEditingGoal({...editingGoal, targetAmount: Number(e.target.value)})} />
+                        
+                        <div className="grid grid-cols-2 gap-4">
+                            <Input label="Startdatum" type="month" value={editingGoal.startSavingDate} onChange={e => setEditingGoal({...editingGoal, startSavingDate: e.target.value})} />
+                            <Input label="Slutdatum (Mål)" type="month" value={editingGoal.targetDate} onChange={e => setEditingGoal({...editingGoal, targetDate: e.target.value})} />
+                        </div>
+
+                        {/* Event Dates (Optional) */}
+                        <div className="bg-slate-800/50 p-3 rounded-xl border border-slate-700/50 space-y-3">
+                            <div className="flex items-center gap-2 text-purple-300">
+                                <Calendar size={16} />
+                                <span className="text-xs font-bold uppercase">Resa / Event (Datum)</span>
+                            </div>
+                            <p className="text-[10px] text-slate-400">
+                                Om detta är en resa, ange exakta datum här för att automatiskt koppla korttransaktioner under resan till detta mål.
+                            </p>
+                            <div className="grid grid-cols-2 gap-4">
+                                <Input label="Start (Dag)" type="date" value={editingGoal.eventStartDate || ''} onChange={e => setEditingGoal({...editingGoal, eventStartDate: e.target.value})} />
+                                <Input label="Slut (Dag)" type="date" value={editingGoal.eventEndDate || ''} onChange={e => setEditingGoal({...editingGoal, eventEndDate: e.target.value})} />
+                            </div>
+                            <label className="flex items-center gap-2 text-xs text-slate-300 cursor-pointer">
+                                <input 
+                                    type="checkbox" 
+                                    checked={!!editingGoal.autoTagEvent} 
+                                    onChange={(e) => setEditingGoal({...editingGoal, autoTagEvent: e.target.checked})}
+                                    className="rounded border-slate-600 bg-slate-900 text-purple-500 focus:ring-purple-500"
+                                />
+                                Auto-koppla transaktioner under dessa datum
+                            </label>
+                        </div>
+
+                        {/* Payment Source */}
+                        <div className="space-y-2">
+                            <label className="text-xs font-medium text-slate-400 uppercase tracking-wider block">Finansiering</label>
+                            <div className="flex flex-col gap-2">
+                                <button 
+                                    onClick={() => setEditingGoal({...editingGoal, paymentSource: 'INCOME'})}
+                                    className={cn("p-3 rounded-xl border text-left flex items-center gap-3 transition-colors", (!editingGoal.paymentSource || editingGoal.paymentSource === 'INCOME') ? "bg-emerald-500/20 border-emerald-500 text-white" : "border-slate-700 text-slate-400 hover:bg-slate-800")}
+                                >
+                                    <Wallet className="w-5 h-5" />
+                                    <div>
+                                        <div className="font-bold text-sm">Från Månadslön</div>
+                                        <div className="text-[10px] opacity-70">Minskar månadens utrymme</div>
+                                    </div>
+                                </button>
+                                <button 
+                                    onClick={() => setEditingGoal({...editingGoal, paymentSource: 'BALANCE'})}
+                                    className={cn("p-3 rounded-xl border text-left flex items-center gap-3 transition-colors", editingGoal.paymentSource === 'BALANCE' ? "bg-amber-500/20 border-amber-500 text-white" : "border-slate-700 text-slate-400 hover:bg-slate-800")}
+                                >
+                                    <PiggyBank className="w-5 h-5" />
+                                    <div>
+                                        <div className="font-bold text-sm">Från Saldo / Sparade Medel</div>
+                                        <div className="text-[10px] opacity-70">Påverkar ej budgeten (Bara uppföljning)</div>
+                                    </div>
+                                </button>
+                            </div>
+                        </div>
+
+                        {/* Background Image Selection */}
+                        <div className="space-y-2">
+                            <label className="text-xs font-medium text-slate-400 uppercase tracking-wider block">Välj Tema</label>
+                            <div className="flex gap-2 overflow-x-auto pb-2 no-scrollbar">
+                                {DREAM_IMAGES.map((img, i) => (
+                                    <button 
+                                    key={i}
+                                    onClick={() => setEditingGoal({...editingGoal, backgroundImage: img})}
+                                    className={cn("w-16 h-16 shrink-0 rounded-lg overflow-hidden border-2 transition-all", editingGoal.backgroundImage === img ? "border-purple-500 scale-105" : "border-transparent opacity-60 hover:opacity-100")}
+                                    >
+                                        <img src={img} className="w-full h-full object-cover" alt="theme" />
+                                    </button>
+                                ))}
+                            </div>
+                        </div>
+
+                        <Button onClick={handleSaveGoal} disabled={!editingGoal.name} className="w-full mt-4">Spara Dröm</Button>
+                    </div>
+                )}
+            </Modal>
+        </div>
+    );
+};

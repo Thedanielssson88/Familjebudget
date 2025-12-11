@@ -1,6 +1,7 @@
+
 import { format, subMonths, addMonths, startOfMonth, endOfMonth, setDate, isAfter, isBefore, parseISO, differenceInMonths, eachDayOfInterval, getDay, isSameMonth, isSameDay, isValid, min, max } from 'date-fns';
 import { sv } from 'date-fns/locale';
-import { Bucket, BucketData, User, BudgetGroup, BudgetGroupData } from './types';
+import { Bucket, BucketData, User, BudgetGroup, BudgetGroupData, Transaction } from './types';
 
 // Generate a unique ID using crypto API for safety
 export const generateId = () => self.crypto.randomUUID();
@@ -17,6 +18,25 @@ export const getBudgetInterval = (monthKey: string, payday: number) => {
   const start = setDate(subMonths(date, 1), payday);
   const end = setDate(date, payday - 1);
   return { start, end };
+};
+
+// --- REIMBURSEMENT HELPERS ---
+export const calculateReimbursementMap = (transactions: Transaction[]) => {
+    const map: Record<string, number> = {};
+    transactions.forEach(t => {
+        if (t.linkedExpenseId) {
+            map[t.linkedExpenseId] = (map[t.linkedExpenseId] || 0) + t.amount;
+        }
+    });
+    return map;
+};
+
+export const getEffectiveAmount = (t: Transaction, reimbursementMap: Record<string, number>) => {
+    // If t is a reimbursement (has linkedExpenseId), its effective amount is 0 for statistics/budgeting purposes (it's netting out the expense).
+    if (t.linkedExpenseId) return 0;
+    
+    const reimbursement = reimbursementMap[t.id] || 0;
+    return t.amount + reimbursement;
 };
 
 /**
@@ -309,19 +329,6 @@ export const calculateSavedAmount = (bucket: Bucket, currentMonthKey: string): n
         if (!isBefore(iterDate, target)) break;
 
         const key = format(iterDate, 'yyyy-MM');
-        // calculateGoalBucketCost handles overrides logic
-        // IMPORTANT: We need to temporarily force source check logic here?
-        // Actually, saved amount is theoretical accumulation. 
-        // If paymentSource is BALANCE, we still consider the money "in the bucket" from the start?
-        // Or do we accumulate 0?
-        // If source is BALANCE, it means we HAVE the money already. The "Saved" amount should probably reflect Target immediately?
-        // Or simply 0 accumulation but it serves as a spending pot?
-        
-        // Let's assume standard behavior: calculateGoalBucketCost returns 0 for BALANCE source.
-        // So totalSaved will be 0.
-        // But for display purposes, a BALANCE source goal usually starts "Full" or we track spending against it.
-        // The "Saved" UI might be confusing for Balance source.
-        
         const cost = calculateGoalBucketCost(bucket, key);
         totalSaved += cost;
         

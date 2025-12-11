@@ -1,17 +1,20 @@
 
 import React, { useMemo, useState } from 'react';
 import { useApp } from '../store';
-import { formatMoney, getEffectiveBudgetGroupData, calculateFixedBucketCost, calculateDailyBucketCost, calculateGoalBucketCost, getBudgetInterval } from '../utils';
-import { ChevronRight, ChevronDown, Check, AlertTriangle, PieChart, Edit2, Plus, Trash2, X, Settings, ArrowRightLeft, Rocket, Calendar, Plane, RefreshCw, Lock, ChevronUp } from 'lucide-react';
+import { useBudgetMonth } from '../hooks/useBudgetMonth';
+import { formatMoney, getEffectiveBudgetGroupData, calculateFixedBucketCost, calculateDailyBucketCost, calculateGoalBucketCost, calculateReimbursementMap, getEffectiveAmount } from '../utils';
+import { ChevronRight, ChevronDown, Check, AlertTriangle, PieChart, Edit2, Plus, Trash2, Settings, ArrowRightLeft, Rocket, Calendar, Plane, RefreshCw, Lock, ChevronUp } from 'lucide-react';
 import { BudgetProgressBar } from '../components/BudgetProgressBar';
 import { cn, Button, Modal, Input } from '../components/components';
 import { BudgetGroup, SubCategory, Bucket } from '../types';
-import { format, startOfMonth, endOfMonth, parseISO, differenceInDays, min, max, areIntervalsOverlapping, isValid } from 'date-fns';
-import { sv } from 'date-fns/locale';
+import { startOfMonth, endOfMonth, parseISO, differenceInDays, min, max, areIntervalsOverlapping, isValid } from 'date-fns';
 
 export const OperatingBudgetView: React.FC = () => {
   const { selectedMonth, budgetGroups, subCategories, mainCategories, transactions, buckets, accounts, settings, addBudgetGroup, updateBudgetGroup, deleteBudgetGroup, updateSubCategory, addSubCategory } = useApp();
   
+  // Use the centralized hook for date logic
+  const { startStr, endStr, intervalLabel } = useBudgetMonth(selectedMonth);
+
   const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set());
   const [expandedMains, setExpandedMains] = useState<Set<string>>(new Set());
   const [expandedSubs, setExpandedSubs] = useState<Set<string>>(new Set());
@@ -37,6 +40,9 @@ export const OperatingBudgetView: React.FC = () => {
   // Toggle for Events - Note: This now only affects the 'Overview' calculation/summary, 
   // but deduping logic ensures dreams don't appear in regular groups regardless of this toggle.
   const [includeEvents, setIncludeEvents] = useState(false);
+
+  // Calculate Reimbursement Map for Net Amounts
+  const reimbursementMap = useMemo(() => calculateReimbursementMap(transactions), [transactions]);
 
   // --- HELPER: Event Distribution Logic ---
   const calculateEventDistribution = (goalBucket: Bucket, month: string): { amount: number, label?: string } | null => {
@@ -75,49 +81,54 @@ export const OperatingBudgetView: React.FC = () => {
 
   // --- DATA PROCESSING ---
   const data = useMemo(() => {
-    // 1. Calculate Date Range for Budget Month
-    const { start, end } = getBudgetInterval(selectedMonth, settings.payday);
-    const startStr = format(start, 'yyyy-MM-dd');
-    const endStr = format(end, 'yyyy-MM-dd');
-    const dateRangeLabel = `${format(start, 'd MMM', {locale: sv})} - ${format(end, 'd MMM', {locale: sv})}`;
-
-    // 2. Filter Transactions (Expenses Only for this Month Interval)
+    // 1. Filter Transactions (Expenses Only for this Month Interval)
     const txForMonth = transactions.filter(t => {
         const isExpense = t.type === 'EXPENSE' || (!t.type && t.amount < 0);
         const inRange = t.date >= startStr && t.date <= endStr;
         return isExpense && inRange;
     });
 
-    // 3. Identify "Spending Goals" (Goals active for payout this month OR overlapping Event)
+    // 2. Identify "Spending Goals" (Goals active for payout this month OR overlapping Event OR has transactions)
     const spendingGoals = buckets.map(b => {
         if (b.type !== 'GOAL') return null;
 
-        let monthlyBudget = 0;
-        let isActive = false;
-        let label = '';
+        // A. Calculate Spent This Month
+        const goalTxs = txForMonth.filter(t => t.bucketId === b.id);
+        const spentThisMonth = goalTxs.reduce((sum, t) => sum + Math.abs(getEffectiveAmount(t, reimbursementMap)), 0);
 
-        // 1. EVENT MODE (Prioritized)
+        // B. Calculate Spent PREVIOUSLY (Lifetime before current month start)
+        // We use the global 'transactions' list for this, filtering by date < startStr
+        const previousTxs = transactions.filter(t => 
+            t.bucketId === b.id && 
+            (t.type === 'EXPENSE' || t.amount < 0) &&
+            t.date < startStr
+        );
+        const spentPreviously = previousTxs.reduce((sum, t) => sum + Math.abs(getEffectiveAmount(t, reimbursementMap)), 0);
+
+        // C. Check Event/Target Validity
         const eventDist = calculateEventDistribution(b, selectedMonth);
-        if (eventDist) {
-            if (eventDist.amount > 0) {
-                isActive = true;
-                monthlyBudget = eventDist.amount;
-                label = eventDist.label || '';
-            }
-        } 
-        // 2. LEGACY GOAL MODE (Target Date)
-        else if (b.targetDate === selectedMonth) {
-            isActive = true;
-            monthlyBudget = b.targetAmount;
-            label = 'Måldatum nått (Hela beloppet)';
+        const isEventActive = eventDist && eventDist.amount > 0;
+        const isTargetMonth = b.targetDate === selectedMonth;
+        const hasActivity = spentThisMonth > 0;
+
+        // D. Visibility Check: Show if Event Overlap OR Target Month OR Has Transactions
+        if (!isEventActive && !isTargetMonth && !hasActivity) return null;
+
+        // E. Budget Logic: Remaining Lifetime Budget
+        // Instead of showing just the daily pro-rated amount, we show what is LEFT of the total pot.
+        // Formula: TargetAmount - SpentPreviously
+        let monthlyBudget = Math.max(0, b.targetAmount - spentPreviously);
+        
+        let label = 'Kvar av totalbudget';
+        if (isEventActive && eventDist?.label) {
+            label = `${eventDist.label} (Kvar totalt)`;
+        } else if (isTargetMonth) {
+            label = 'Måldatum (Kvar totalt)';
+        } else if (hasActivity) {
+            label = 'Transaktioner finns (Kvar totalt)';
         }
 
-        if (!isActive) return null;
-
         // Build Hierarchy for this Goal (Duplicate logic from groupStats, but specific to this Goal's bucketId)
-        const goalTxs = txForMonth.filter(t => t.bucketId === b.id);
-        const goalSpent = goalTxs.reduce((sum, t) => sum + Math.abs(t.amount), 0);
-
         // Group by Main -> Sub
         const relevantMainIds = new Set<string>();
         goalTxs.forEach(t => { if(t.categoryMainId) relevantMainIds.add(t.categoryMainId) });
@@ -125,7 +136,7 @@ export const OperatingBudgetView: React.FC = () => {
         const mains = Array.from(relevantMainIds).map(mainId => {
             const mainCat = mainCategories.find(m => m.id === mainId);
             const mainTxs = goalTxs.filter(t => t.categoryMainId === mainId);
-            const mainSpent = mainTxs.reduce((sum, t) => sum + Math.abs(t.amount), 0);
+            const mainSpent = mainTxs.reduce((sum, t) => sum + Math.abs(getEffectiveAmount(t, reimbursementMap)), 0);
 
             // Group by Sub
             const relevantSubIds = new Set<string>();
@@ -134,14 +145,14 @@ export const OperatingBudgetView: React.FC = () => {
             const subs = Array.from(relevantSubIds).map(subId => {
                 const subCat = subCategories.find(s => s.id === subId);
                 const subTxs = mainTxs.filter(t => t.categorySubId === subId);
-                const subSpent = subTxs.reduce((sum, t) => sum + Math.abs(t.amount), 0);
+                const subSpent = subTxs.reduce((sum, t) => sum + Math.abs(getEffectiveAmount(t, reimbursementMap)), 0);
                 return { id: subId, name: subCat?.name || 'Okänd', spent: subSpent, transactions: subTxs };
             });
 
             // Handle unassigned subs within main
             const unassignedTxs = mainTxs.filter(t => !t.categorySubId);
             if (unassignedTxs.length > 0) {
-                const unSpent = unassignedTxs.reduce((sum, t) => sum + Math.abs(t.amount), 0);
+                const unSpent = unassignedTxs.reduce((sum, t) => sum + Math.abs(getEffectiveAmount(t, reimbursementMap)), 0);
                 subs.push({ id: 'unassigned', name: 'Övrigt', spent: unSpent, transactions: unassignedTxs });
             }
 
@@ -151,19 +162,19 @@ export const OperatingBudgetView: React.FC = () => {
         // Handle completely uncategorized within goal
         const uncategorizedGoalTxs = goalTxs.filter(t => !t.categoryMainId);
         if (uncategorizedGoalTxs.length > 0) {
-            const unSpent = uncategorizedGoalTxs.reduce((sum, t) => sum + Math.abs(t.amount), 0);
+            const unSpent = uncategorizedGoalTxs.reduce((sum, t) => sum + Math.abs(getEffectiveAmount(t, reimbursementMap)), 0);
             mains.push({ 
                 id: 'orphan', 
                 name: 'Okategoriserat', 
                 spent: unSpent, 
-                subs: [{ id: 'orphan', name: 'Övrigt', spent: unSpent, transactions: uncategorizedGoalTxs }] 
+                subs: [{ id: 'orphan-sub', name: 'Övrigt', spent: unSpent, transactions: uncategorizedGoalTxs }] 
             });
         }
 
-        return { ...b, monthlyBudget, label, spent: goalSpent, mains };
+        return { ...b, monthlyBudget, label, spent: spentThisMonth, mains };
     }).filter((g): g is NonNullable<typeof g> => g !== null);
 
-    // 4. Build Hierarchy per Budget Group
+    // 3. Build Hierarchy per Budget Group
     const groupStats = budgetGroups.map(group => {
         
         // A. Calculate Total Funding from Cash Flow (Transfers)
@@ -183,11 +194,6 @@ export const OperatingBudgetView: React.FC = () => {
         }, 0);
 
         // B. Determine Budget Limit
-        // Logic: 
-        // 1. If explicit override for THIS month exists -> Use it (Manual).
-        // 2. Else if has Linked Buckets -> Use totalFunding (Auto).
-        // 3. Else -> Use inherited limit (Legacy Manual).
-        
         const explicitData = group.monthlyData?.[selectedMonth];
         let monthlyLimit = 0;
         let isAutoCalculated = false;
@@ -235,7 +241,7 @@ export const OperatingBudgetView: React.FC = () => {
             return false;
         });
 
-        const groupSpent = groupTxs.reduce((sum, t) => sum + Math.abs(t.amount), 0);
+        const groupSpent = groupTxs.reduce((sum, t) => sum + Math.abs(getEffectiveAmount(t, reimbursementMap)), 0);
 
         // Group by Main Category within this Budget Group
         const relevantMainIds = new Set<string>();
@@ -267,19 +273,19 @@ export const OperatingBudgetView: React.FC = () => {
             const subStats = relevantSubs.map(sub => {
                 const subTxs = mainTxs.filter(t => t.categorySubId === sub.id);
                 subTxs.forEach(t => coveredTxIds.add(t.id));
-                const subSpent = subTxs.reduce((sum, t) => sum + Math.abs(t.amount), 0);
+                const subSpent = subTxs.reduce((sum, t) => sum + Math.abs(getEffectiveAmount(t, reimbursementMap)), 0);
                 return { id: sub.id, name: sub.name, spent: subSpent, transactions: subTxs };
             }).filter(s => s.spent > 0 || assignedInMain.some(as => as.id === s.id))
               .sort((a,b) => b.spent - a.spent);
 
             const remainingTxs = mainTxs.filter(t => !coveredTxIds.has(t.id));
-            const remainingSpent = remainingTxs.reduce((sum, t) => sum + Math.abs(t.amount), 0);
+            const remainingSpent = remainingTxs.reduce((sum, t) => sum + Math.abs(getEffectiveAmount(t, reimbursementMap)), 0);
             
             if (remainingSpent > 0.01) {
                 subStats.push({ id: `unassigned-${mainId}`, name: 'Ospecificerat / Övrigt', spent: remainingSpent, transactions: remainingTxs });
             }
 
-            const mainSpent = mainTxs.reduce((sum, t) => sum + Math.abs(t.amount), 0);
+            const mainSpent = mainTxs.reduce((sum, t) => sum + Math.abs(getEffectiveAmount(t, reimbursementMap)), 0);
 
             return { id: mainId, name: mainName, spent: mainSpent, subs: subStats };
         }).filter(m => m.subs.length > 0 || m.spent > 0).sort((a,b) => b.spent - a.spent);
@@ -317,9 +323,9 @@ export const OperatingBudgetView: React.FC = () => {
     const totalLimit = groupStats.reduce((sum, g) => sum + g.monthlyLimit, 0);
     const totalSpent = groupStats.reduce((sum, g) => sum + g.spent, 0);
 
-    return { groupStats, totalLimit, totalSpent, spendingGoals, txForMonth, dateRangeLabel };
+    return { groupStats, totalLimit, totalSpent, spendingGoals, txForMonth };
 
-  }, [transactions, selectedMonth, budgetGroups, subCategories, mainCategories, buckets, settings.payday, includeEvents]);
+  }, [transactions, selectedMonth, budgetGroups, subCategories, mainCategories, buckets, settings.payday, includeEvents, startStr, endStr, reimbursementMap]);
 
   // --- HANDLERS ---
   const toggleGroup = (id: string) => {
@@ -485,7 +491,7 @@ export const OperatingBudgetView: React.FC = () => {
                 <div>
                     <h1 className="text-3xl font-bold text-transparent bg-clip-text bg-gradient-to-r from-emerald-400 to-teal-400">Driftbudget</h1>
                     <div className="text-[10px] text-slate-400 font-mono bg-slate-800/50 px-2 py-0.5 rounded-full inline-flex items-center gap-1 mt-1">
-                        <Calendar size={10} /> {data.dateRangeLabel}
+                        <Calendar size={10} /> {intervalLabel}
                     </div>
                 </div>
               </div>
@@ -633,18 +639,23 @@ export const OperatingBudgetView: React.FC = () => {
                                                             {/* TRANSACTION LIST (Level 4) */}
                                                             {isSubExpanded && sub.transactions.length > 0 && (
                                                                 <div className="pl-16 pr-4 pb-3 space-y-1">
-                                                                    {sub.transactions.map(t => (
-                                                                        <div key={t.id} className="flex justify-between items-center text-[10px] py-1 border-b border-white/5 last:border-0">
-                                                                            <div className="flex flex-col max-w-[70%]">
-                                                                                <span className="text-slate-400 truncate">{t.description}</span>
-                                                                                {t.bucketId && <span className="text-[9px] text-purple-400 flex items-center gap-0.5"><Plane size={8}/> Kopplad till event</span>}
+                                                                    {sub.transactions.map(t => {
+                                                                        const eff = getEffectiveAmount(t, reimbursementMap);
+                                                                        // If fully reimbursed (net 0), should we show it? Yes, maybe as 0 kr.
+                                                                        
+                                                                        return (
+                                                                            <div key={t.id} className="flex justify-between items-center text-[10px] py-1 border-b border-white/5 last:border-0">
+                                                                                <div className="flex flex-col max-w-[70%]">
+                                                                                    <span className="text-slate-400 truncate">{t.description}</span>
+                                                                                    {t.bucketId && <span className="text-[9px] text-purple-400 flex items-center gap-0.5"><Plane size={8}/> Kopplad till event</span>}
+                                                                                </div>
+                                                                                <div className="flex gap-2 text-right">
+                                                                                    <span className="text-slate-600">{t.date}</span>
+                                                                                    <span className="text-slate-300 font-mono">{formatMoney(eff)}</span>
+                                                                                </div>
                                                                             </div>
-                                                                            <div className="flex gap-2 text-right">
-                                                                                <span className="text-slate-600">{t.date}</span>
-                                                                                <span className="text-slate-300 font-mono">{formatMoney(t.amount)}</span>
-                                                                            </div>
-                                                                        </div>
-                                                                    ))}
+                                                                        );
+                                                                    })}
                                                                 </div>
                                                             )}
                                                         </div>
@@ -753,7 +764,7 @@ export const OperatingBudgetView: React.FC = () => {
                                                                             <span className="text-slate-500 truncate max-w-[70%]">{t.description}</span>
                                                                             <div className="flex gap-2">
                                                                                 <span className="text-slate-600">{t.date}</span>
-                                                                                <span className="text-slate-400 font-mono">{formatMoney(t.amount)}</span>
+                                                                                <span className="text-slate-400 font-mono">{formatMoney(getEffectiveAmount(t, reimbursementMap))}</span>
                                                                             </div>
                                                                         </div>
                                                                     ))}

@@ -18,12 +18,12 @@ export class FamilyFlowDB extends Dexie {
     super('FamilyFlowDB');
     
     // Define schema and indexes
-    (this as any).version(8).stores({
+    (this as any).version(9).stores({
       users: 'id',
       accounts: 'id',
       buckets: 'id, type, isSavings, accountId',
       settings: '++id',
-      transactions: 'id, accountId, date, bucketId, categoryMainId, categorySubId, isVerified, description, linkedTransactionId, [accountId+description]',
+      transactions: 'id, accountId, date, bucketId, categoryMainId, categorySubId, isVerified, description, linkedTransactionId, linkedExpenseId, [accountId+description]',
       importRules: 'id, keyword, accountId',
       mainCategories: 'id',
       subCategories: 'id, mainCategoryId, budgetGroupId',

@@ -1,4 +1,6 @@
-import { Bucket, Transaction, MainCategory, SubCategory } from "../types";
+
+import { Bucket, Transaction, MainCategory, SubCategory, User, BudgetGroup } from "../types";
+import { formatMoney } from "../utils";
 
 // This service handles the "Smart" part of the import pipeline
 export const categorizeTransactionsWithAi = async (
@@ -87,4 +89,88 @@ export const categorizeTransactionsWithAi = async (
     console.error("AI Categorization failed:", error);
     return {};
   }
+};
+
+export interface FinancialSnapshot {
+    totalIncome: number;
+    budgetGroups: { name: string; limit: number; spent: number; }[];
+    categoryBreakdownCurrent: { main: string; sub: string; amount: number }[];
+    topExpenses: { name: string; amount: number }[];
+    transactionLog: string; // List of all transactions for detailed analysis
+    monthLabel: string;
+    periodLabel: string; // e.g. "25 okt - 24 nov"
+}
+
+export const constructMonthlyReportPrompt = (data: FinancialSnapshot): string => {
+    return `
+            Agera som en skarp ekonomisk detektiv och rådgivare för en familj.
+            Din uppgift är att granska ekonomin för perioden: ${data.monthLabel}.
+            
+            VIKTIG KONTEXT OM DATUM:
+            Denna familj räknar sin ekonomi från lön till lön.
+            Aktuell period omfattar: ${data.periodLabel}.
+            Transaktioner inom detta intervall är KORREKTA för denna period.
+            Du ska alltså INTE påpeka att datum "verkar vara från fel månad", utan analysera dem som en del av perioden.
+
+            Här är datan för HELA perioden (Totaler):
+            
+            TOTAL INKOMST (NETTO): ${formatMoney(data.totalIncome)}
+            
+            BUDGETGRUPPER (Plan vs Utfall):
+            ${data.budgetGroups.map(g => `- ${g.name}: Utfall ${formatMoney(g.spent)} (Budget: ${formatMoney(g.limit)})`).join('\n')}
+            
+            DETALJERAD TRANSAKTIONSLISTA (Datum | Belopp | Beskrivning | Kategori > Underkategori | [Ev Dröm-tagg]):
+            ${data.transactionLog}
+
+            INSTRUKTIONER:
+            Du ska INTE bara summera kategorier. Du ska hitta mönster i transaktionslistan.
+            Leta specifikt efter:
+            1. **Dubbelbokningar:** Har samma belopp dragits två gånger samma dag eller dagarna intill varandra hos samma handlare? Varna för detta!
+            2. **Småköps-fällan:** Har de handlat på samma ställe (t.ex. Ica, Pressbyrån) onödigt många gånger? Räkna frekvensen!
+            3. **Engångs vs Vana:** Skilj på en stor engångsutgift (t.ex. "Säng 5000kr" märkt som "Möbler") och dyra vanor. Om en kategori är hög pga ett medvetet köp (kanske taggat som en Dröm), påpeka att det är okej/planerat. Om det är hög matkostnad pga 30 besök på Coop, varna.
+            4. **Drömmar/Mål:** Om transaktioner är taggade med [Dröm: ...], notera att dessa pengar användes till ett sparmål och inte "slösades".
+
+            Strukturera rapporten så här:
+
+            ## Snabbanalys: ${data.monthLabel}
+            *   Kort sammanfattning av läget (Plus/Minus för hela perioden).
+            *   Den viktigaste insikten (t.ex. "Ni gick back, men det beror helt på sängköpet" eller "Matkostnaden har skenat").
+
+            ## Detektivens Fynd (Varningar & Mönster)
+            *   **Dubbelbokningar?** (Lista misstänkta transaktioner eller skriv "Inga upptäckta").
+            *   **Frekvens-kollen:** (T.ex. "Ni besökte matbutik 22 gånger denna period. Snittnota X kr").
+            *   **Avvikelser:** (T.ex. "Hög kostnad på X, men det var ett engångsköp").
+
+            ## Var läckte pengarna? (Topp 3 Kategorier)
+            *   Analysera de största kategorierna baserat på transaktionerna.
+            *   Förklara *varför* de är höga (Var det ett stort köp eller många små?).
+
+            ## Konkreta Åtgärder
+            *   Ge 3 tips baserat EXAKT på deras beteende denna period.
+
+            Ton: Professionell, skarp, men hjälpsam. Använd fetstil för belopp och butiksnamn.
+    `;
+};
+
+export const fetchAiAnalysis = async (prompt: string): Promise<string> => {
+    try {
+        const module = await import("@google/genai");
+        const GoogleGenAI = module.GoogleGenAI || (module.default && module.default.GoogleGenAI);
+        const apiKey = process.env.API_KEY;
+        
+        if (!apiKey || !GoogleGenAI) return "Kunde inte initiera AI-tjänsten.";
+
+        const ai = new GoogleGenAI({ apiKey });
+
+        const response = await ai.models.generateContent({
+            model: 'gemini-2.5-flash',
+            contents: prompt,
+        });
+
+        return response.text || "Kunde inte generera analys.";
+
+    } catch (e) {
+        console.error("Report generation failed", e);
+        return "Ett fel uppstod vid generering av rapporten. Försök igen senare.";
+    }
 };

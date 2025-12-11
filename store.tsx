@@ -104,6 +104,7 @@ const TransactionSchema = z.object({
     description: z.string(),
     type: z.enum(['EXPENSE', 'TRANSFER', 'INCOME']).optional(),
     linkedTransactionId: z.string().optional(),
+    linkedExpenseId: z.string().optional(),
     bucketId: z.string().optional(),
     categoryMainId: z.string().optional(),
     categorySubId: z.string().optional(),

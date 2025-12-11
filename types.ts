@@ -101,6 +101,7 @@ export interface Transaction {
   type?: TransactionType; // New: Distinguish between consumption (Expense) and movement (Transfer)
   
   linkedTransactionId?: string; // If matched with another transaction (e.g. internal transfer)
+  linkedExpenseId?: string; // NEW: If this is a reimbursement, points to the original expense transaction ID
 
   // Funding / Budgeting (Used if type == TRANSFER)
   bucketId?: string; // Where the money comes from (Budget Post).

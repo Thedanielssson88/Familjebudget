@@ -16,6 +16,18 @@ export const useBudgetActuals = (selectedMonth: string, payday: number) => {
       .between(startStr, endStr, true, true)
       .toArray();
 
+    // --- REIMBURSEMENT LOGIC ---
+    // 1. Identify transactions that are reimbursements (they have linkedExpenseId)
+    // 2. Sum up reimbursements per original expense ID
+    const reimbursementMap: Record<string, number> = {}; // ExpenseID -> Total Reimbursed Amount
+    
+    transactions.forEach(t => {
+        if (t.linkedExpenseId) {
+            // This is a reimbursement (income/inflow). We add its amount to the target expense.
+            reimbursementMap[t.linkedExpenseId] = (reimbursementMap[t.linkedExpenseId] || 0) + t.amount;
+        }
+    });
+
     // Aggregates
     const spentByBucket: Record<string, number> = {};
     const transfersByBucket: Record<string, number> = {};
@@ -27,14 +39,26 @@ export const useBudgetActuals = (selectedMonth: string, payday: number) => {
     const accountUnallocatedNet: Record<string, number> = {};
 
     transactions.forEach(t => {
+      // SKIP Processing if this transaction IS a reimbursement itself.
+      // It effectively disappears from the budget view as income, because it's netting out an expense.
+      if (t.linkedExpenseId) return;
+
+      // Calculate Effective Amount (Net)
+      // If this transaction is an expense that has been reimbursed, reduce its magnitude.
+      // Example: Expense -8400, Reimbursement +2700. Effective = -5700.
+      let effectiveAmount = t.amount;
+      if (reimbursementMap[t.id]) {
+          effectiveAmount += reimbursementMap[t.id];
+      }
+
       // Calculate generic impact for legacy spentByBucket (Consumption View)
       // Negative transaction (outflow) -> Positive Impact (Money spent)
       // Positive transaction (inflow) -> Negative Impact (Refund)
       let consumptionImpact = 0;
-      if (t.amount < 0) {
-          consumptionImpact = Math.abs(t.amount);
+      if (effectiveAmount < 0) {
+          consumptionImpact = Math.abs(effectiveAmount);
       } else {
-          consumptionImpact = -t.amount;
+          consumptionImpact = -effectiveAmount;
       }
 
       // Check if it is a specific user bucket or a special system category
@@ -46,7 +70,7 @@ export const useBudgetActuals = (selectedMonth: string, payday: number) => {
             // For Cash Flow / Funding:
             // Any transfer or income associated with a bucket is considered a "Funding Event".
             // We use Absolute Value to show magnitude of funding.
-            transfersByBucket[t.bucketId] = (transfersByBucket[t.bucketId] || 0) + Math.abs(t.amount);
+            transfersByBucket[t.bucketId] = (transfersByBucket[t.bucketId] || 0) + Math.abs(effectiveAmount);
         } else if (t.type === 'EXPENSE') {
             // For Expenses:
             // Standard consumption logic.
@@ -58,7 +82,7 @@ export const useBudgetActuals = (selectedMonth: string, payday: number) => {
       } else {
           // No Bucket ID OR Special Bucket (Internal/Payout)
           if ((t.type === 'TRANSFER' || t.type === 'INCOME') && t.accountId) {
-              accountUnallocatedNet[t.accountId] = (accountUnallocatedNet[t.accountId] || 0) + t.amount;
+              accountUnallocatedNet[t.accountId] = (accountUnallocatedNet[t.accountId] || 0) + effectiveAmount;
           }
       }
       
@@ -67,11 +91,11 @@ export const useBudgetActuals = (selectedMonth: string, payday: number) => {
         
         // Calculate Net Transfer Flow per Account (All transfers/income in minus all transfers out)
         if (t.type === 'TRANSFER' || t.type === 'INCOME') {
-            accountTransferNet[t.accountId] = (accountTransferNet[t.accountId] || 0) + t.amount;
+            accountTransferNet[t.accountId] = (accountTransferNet[t.accountId] || 0) + effectiveAmount;
         }
       }
     });
 
-    return { spentByBucket, transfersByBucket, expensesByBucket, spentByAccount, accountTransferNet, accountUnallocatedNet, transactions };
+    return { spentByBucket, transfersByBucket, expensesByBucket, spentByAccount, accountTransferNet, accountUnallocatedNet, transactions, reimbursementMap };
   }, [selectedMonth, payday]);
 };

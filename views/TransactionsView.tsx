@@ -6,7 +6,7 @@ import { Transaction, ImportRule, Bucket, MainCategory, SubCategory, AppSettings
 import { parseBankFile, runImportPipeline } from '../services/importService';
 import { categorizeTransactionsWithAi } from '../services/aiService';
 import { cn, Button, Card, Modal, Input } from '../components/components';
-import { Upload, Check, Wand2, Save, Trash2, Loader2, AlertTriangle, Zap, Clock, ArrowRightLeft, ShoppingCart, ArrowDownLeft, Sparkles, CheckCircle, Target, LayoutList, GalleryHorizontalEnd, ChevronLeft, ChevronRight, Search, Filter, Link2, CalendarClock, PlusCircle, CheckCircle2, Gavel, Edit2, FileText, X, Plus, XCircle, Smartphone, LayoutGrid, Square, CheckSquare, Layers, Plane, SlidersHorizontal, Unlink, Calendar } from 'lucide-react';
+import { Upload, Check, Wand2, Save, Trash2, Loader2, AlertTriangle, Zap, Clock, ArrowRightLeft, ShoppingCart, ArrowDownLeft, Sparkles, CheckCircle, Target, LayoutList, GalleryHorizontalEnd, ChevronLeft, ChevronRight, Search, Filter, Link2, CalendarClock, PlusCircle, CheckCircle2, Gavel, Edit2, FileText, X, Plus, XCircle, Smartphone, LayoutGrid, Square, CheckSquare, Layers, Plane, SlidersHorizontal, Unlink, Calendar, Link } from 'lucide-react';
 import { formatMoney, generateId, getBudgetInterval } from '../utils';
 import { useTransferMatching } from '../hooks/useTransferMatching';
 import { useSubscriptionDetection } from '../hooks/useSubscriptionDetection';
@@ -500,7 +500,23 @@ export const TransactionsView: React.FC = () => {
     const [bulkSubCatId, setBulkSubCatId] = useState('');
     const [bulkDreamId, setBulkDreamId] = useState(''); 
 
+    // Reimbursement State
+    const [isReimburseModalOpen, setIsReimburseModalOpen] = useState(false);
+    const [reimbursementSourceTx, setReimbursementSourceTx] = useState<Transaction | null>(null);
+    const [reimburseSearch, setReimburseSearch] = useState('');
+
     const fileInputRef = useRef<HTMLInputElement>(null);
+
+    // Calculate map of reimbursements for display in history
+    const reimbursementMap = useMemo(() => {
+        const map: Record<string, number> = {};
+        transactions.forEach(t => {
+            if (t.linkedExpenseId) {
+                map[t.linkedExpenseId] = (map[t.linkedExpenseId] || 0) + t.amount;
+            }
+        });
+        return map;
+    }, [transactions]);
 
     // Filtered transaction list for "History" tab
     const filteredHistoryTransactions = useMemo(() => {
@@ -674,6 +690,27 @@ export const TransactionsView: React.FC = () => {
 
         await updateTransaction(updatedTx);
         setIsEditTransactionModalOpen(false);
+    };
+
+    // Reimbursement Logic
+    const openReimburseModal = (tx: Transaction) => {
+        setReimbursementSourceTx(tx);
+        setReimburseSearch('');
+        setIsReimburseModalOpen(true);
+    };
+
+    const handleLinkReimbursement = async (expenseTx: Transaction) => {
+        if (!reimbursementSourceTx) return;
+        
+        await updateTransaction({
+            ...reimbursementSourceTx,
+            linkedExpenseId: expenseTx.id,
+            // When linking as reimbursement, ensure it is verified but maybe clear other categories if they conflict?
+            // Actually, keep type as INCOME or TRANSFER, but the presence of linkedExpenseId will override its effect in stats.
+        });
+        
+        setIsReimburseModalOpen(false);
+        setReimbursementSourceTx(null);
     };
 
     const transferMatches = useTransferMatching(transactions);
@@ -1141,6 +1178,8 @@ export const TransactionsView: React.FC = () => {
                              const isSelected = selectedHistoryIds.has(tx.id);
                              const account = accounts.find(a => a.id === tx.accountId);
                              const linkedGoal = buckets.find(b => b.id === tx.bucketId && b.type === 'GOAL');
+                             const isReimbursement = !!tx.linkedExpenseId;
+                             const reimbursedAmount = reimbursementMap[tx.id] || 0;
                              
                              let categoryLabel = '';
                              if (tx.type === 'EXPENSE') {
@@ -1159,8 +1198,9 @@ export const TransactionsView: React.FC = () => {
                                  <div 
                                     key={tx.id} 
                                     className={cn(
-                                        "bg-slate-800 p-3 rounded-lg border flex gap-3 items-start transition-all cursor-pointer group",
-                                        isSelected ? "border-blue-500 bg-blue-900/10" : "border-slate-700 hover:bg-slate-700/50"
+                                        "bg-slate-800 p-3 rounded-lg border flex gap-3 items-start transition-all cursor-pointer group relative overflow-hidden",
+                                        isSelected ? "border-blue-500 bg-blue-900/10" : "border-slate-700 hover:bg-slate-700/50",
+                                        isReimbursement ? "opacity-75 bg-slate-800/50 grayscale-[0.5]" : ""
                                     )}
                                     onClick={() => toggleHistorySelection(tx.id)}
                                  >
@@ -1171,8 +1211,15 @@ export const TransactionsView: React.FC = () => {
                                      <div className="flex-1 min-w-0">
                                          <div className="flex justify-between items-start">
                                              <div className="text-white font-medium truncate pr-2 group flex items-center gap-2">
-                                                {tx.description}
-                                                {/* --- NEW: Edit Button --- */}
+                                                {isReimbursement ? (
+                                                    <span className="flex items-center gap-1 text-slate-400 italic">
+                                                        <Link size={12} /> {tx.description} (Täcker utlägg)
+                                                    </span>
+                                                ) : (
+                                                    tx.description
+                                                )}
+                                                
+                                                {/* Edit Button */}
                                                 <button 
                                                     onClick={(e) => { e.stopPropagation(); handleEditTransaction(tx); }}
                                                     className="opacity-0 group-hover:opacity-100 p-1 text-slate-400 hover:text-white transition-opacity bg-slate-700/50 rounded"
@@ -1180,8 +1227,28 @@ export const TransactionsView: React.FC = () => {
                                                 >
                                                     <Edit2 size={10} />
                                                 </button>
+
+                                                {/* Reimburse Button (Only for incoming funds > 0 and not already a reimbursement) */}
+                                                {tx.amount > 0 && !isReimbursement && !tx.linkedTransactionId && (
+                                                    <button
+                                                        onClick={(e) => { e.stopPropagation(); openReimburseModal(tx); }}
+                                                        className="opacity-0 group-hover:opacity-100 px-2 py-0.5 text-[10px] bg-indigo-500/20 text-indigo-300 border border-indigo-500/30 hover:bg-indigo-500 hover:text-white rounded transition-all"
+                                                    >
+                                                        Täck Utlägg
+                                                    </button>
+                                                )}
                                              </div>
-                                             <div className="font-mono font-bold text-white whitespace-nowrap">{formatMoney(tx.amount)}</div>
+                                             
+                                             <div className="text-right">
+                                                 <div className={cn("font-mono font-bold whitespace-nowrap", isReimbursement ? "text-slate-500" : "text-white")}>
+                                                     {isReimbursement ? formatMoney(0) : formatMoney(tx.amount + reimbursedAmount)}
+                                                 </div>
+                                                 {(reimbursedAmount > 0 || isReimbursement) && (
+                                                     <div className={cn("text-[10px] font-medium flex items-center justify-end gap-1", isReimbursement ? "text-slate-500 line-through" : "text-emerald-400")}>
+                                                         <Link size={8} /> Original: {formatMoney(tx.amount)}
+                                                     </div>
+                                                 )}
+                                             </div>
                                          </div>
                                          
                                          <div className="text-xs text-slate-500 mt-1 flex items-center gap-1">
@@ -1524,6 +1591,59 @@ export const TransactionsView: React.FC = () => {
                         </Button>
                     </div>
                 )}
+            </Modal>
+
+            {/* REIMBURSEMENT MODAL */}
+            <Modal isOpen={isReimburseModalOpen} onClose={() => setIsReimburseModalOpen(false)} title="Vilken utgift täcker detta?">
+                <div className="space-y-4 h-[60vh] flex flex-col">
+                    <div className="bg-emerald-950/30 p-3 rounded-lg border border-emerald-500/30">
+                        <div className="text-[10px] text-emerald-400 uppercase font-bold">Inkomst att koppla</div>
+                        <div className="font-bold text-white flex justify-between">
+                            <span>{reimbursementSourceTx?.description}</span>
+                            <span className="font-mono">{reimbursementSourceTx && formatMoney(reimbursementSourceTx.amount)}</span>
+                        </div>
+                    </div>
+
+                    <div className="relative">
+                        <Search className="absolute left-3 top-2.5 h-4 w-4 text-slate-400" />
+                        <input 
+                            placeholder="Sök utgift (t.ex. Hotell, ICA)..."
+                            className="w-full bg-slate-900 border border-slate-700 rounded-xl pl-10 pr-4 py-2 text-sm text-white focus:border-blue-500 outline-none"
+                            value={reimburseSearch}
+                            onChange={(e) => setReimburseSearch(e.target.value)}
+                            autoFocus
+                        />
+                    </div>
+
+                    <div className="flex-1 overflow-y-auto space-y-2 pr-1 no-scrollbar">
+                        {transactions
+                            .filter(t => t.amount < 0 && t.type !== 'TRANSFER') // Only expenses/outflows
+                            .filter(t => !reimburseSearch || t.description.toLowerCase().includes(reimburseSearch.toLowerCase()))
+                            .sort((a,b) => b.date.localeCompare(a.date))
+                            .slice(0, 50) // Limit list size
+                            .map(tx => (
+                                <button 
+                                    key={tx.id}
+                                    onClick={() => handleLinkReimbursement(tx)}
+                                    className="w-full text-left p-3 rounded-xl bg-slate-800 border border-slate-700 hover:bg-slate-700 hover:border-blue-500 transition-all group"
+                                >
+                                    <div className="flex justify-between items-start">
+                                        <span className="font-bold text-slate-200 group-hover:text-white truncate pr-2">{tx.description}</span>
+                                        <span className="font-mono text-rose-400 font-bold whitespace-nowrap">{formatMoney(tx.amount)}</span>
+                                    </div>
+                                    <div className="flex justify-between text-xs text-slate-500 mt-1">
+                                        <span>{tx.date}</span>
+                                        {reimbursementSourceTx && (
+                                            <span className="text-emerald-400 group-hover:opacity-100 opacity-0 transition-opacity">
+                                                Nytt netto: {formatMoney(tx.amount + reimbursementSourceTx.amount)}
+                                            </span>
+                                        )}
+                                    </div>
+                                </button>
+                            ))
+                        }
+                    </div>
+                </div>
             </Modal>
         </div>
     );
