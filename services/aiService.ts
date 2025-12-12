@@ -98,61 +98,9 @@ export interface FinancialSnapshot {
     topExpenses: { name: string; amount: number }[];
     transactionLog: string; // List of all transactions for detailed analysis
     monthLabel: string;
-    periodLabel: string; // e.g. "25 okt - 24 nov"
 }
 
-export const constructMonthlyReportPrompt = (data: FinancialSnapshot): string => {
-    return `
-            Agera som en skarp ekonomisk detektiv och rådgivare för en familj.
-            Din uppgift är att granska ekonomin för perioden: ${data.monthLabel}.
-            
-            VIKTIG KONTEXT OM DATUM:
-            Denna familj räknar sin ekonomi från lön till lön.
-            Aktuell period omfattar: ${data.periodLabel}.
-            Transaktioner inom detta intervall är KORREKTA för denna period.
-            Du ska alltså INTE påpeka att datum "verkar vara från fel månad", utan analysera dem som en del av perioden.
-
-            Här är datan för HELA perioden (Totaler):
-            
-            TOTAL INKOMST (NETTO): ${formatMoney(data.totalIncome)}
-            
-            BUDGETGRUPPER (Plan vs Utfall):
-            ${data.budgetGroups.map(g => `- ${g.name}: Utfall ${formatMoney(g.spent)} (Budget: ${formatMoney(g.limit)})`).join('\n')}
-            
-            DETALJERAD TRANSAKTIONSLISTA (Datum | Belopp | Beskrivning | Kategori > Underkategori | [Ev Dröm-tagg]):
-            ${data.transactionLog}
-
-            INSTRUKTIONER:
-            Du ska INTE bara summera kategorier. Du ska hitta mönster i transaktionslistan.
-            Leta specifikt efter:
-            1. **Dubbelbokningar:** Har samma belopp dragits två gånger samma dag eller dagarna intill varandra hos samma handlare? Varna för detta!
-            2. **Småköps-fällan:** Har de handlat på samma ställe (t.ex. Ica, Pressbyrån) onödigt många gånger? Räkna frekvensen!
-            3. **Engångs vs Vana:** Skilj på en stor engångsutgift (t.ex. "Säng 5000kr" märkt som "Möbler") och dyra vanor. Om en kategori är hög pga ett medvetet köp (kanske taggat som en Dröm), påpeka att det är okej/planerat. Om det är hög matkostnad pga 30 besök på Coop, varna.
-            4. **Drömmar/Mål:** Om transaktioner är taggade med [Dröm: ...], notera att dessa pengar användes till ett sparmål och inte "slösades".
-
-            Strukturera rapporten så här:
-
-            ## Snabbanalys: ${data.monthLabel}
-            *   Kort sammanfattning av läget (Plus/Minus för hela perioden).
-            *   Den viktigaste insikten (t.ex. "Ni gick back, men det beror helt på sängköpet" eller "Matkostnaden har skenat").
-
-            ## Detektivens Fynd (Varningar & Mönster)
-            *   **Dubbelbokningar?** (Lista misstänkta transaktioner eller skriv "Inga upptäckta").
-            *   **Frekvens-kollen:** (T.ex. "Ni besökte matbutik 22 gånger denna period. Snittnota X kr").
-            *   **Avvikelser:** (T.ex. "Hög kostnad på X, men det var ett engångsköp").
-
-            ## Var läckte pengarna? (Topp 3 Kategorier)
-            *   Analysera de största kategorierna baserat på transaktionerna.
-            *   Förklara *varför* de är höga (Var det ett stort köp eller många små?).
-
-            ## Konkreta Åtgärder
-            *   Ge 3 tips baserat EXAKT på deras beteende denna period.
-
-            Ton: Professionell, skarp, men hjälpsam. Använd fetstil för belopp och butiksnamn.
-    `;
-};
-
-export const fetchAiAnalysis = async (prompt: string): Promise<string> => {
+export const generateMonthlyReport = async (data: FinancialSnapshot): Promise<string> => {
     try {
         const module = await import("@google/genai");
         const GoogleGenAI = module.GoogleGenAI || (module.default && module.default.GoogleGenAI);
@@ -161,6 +109,53 @@ export const fetchAiAnalysis = async (prompt: string): Promise<string> => {
         if (!apiKey || !GoogleGenAI) return "Kunde inte initiera AI-tjänsten.";
 
         const ai = new GoogleGenAI({ apiKey });
+
+        const prompt = `
+            Agera som en skarp ekonomisk detektiv och rådgivare för en familj (2 vuxna, 1 barn på 3 år).
+            Din uppgift är att granska ekonomin för ${data.monthLabel}.
+            
+            Här är datan:
+            
+            TOTAL INKOMST: ${formatMoney(data.totalIncome)}
+            
+            BUDGETGRUPPER (Plan vs Utfall):
+            ${data.budgetGroups.map(g => `- ${g.name}: Utfall ${formatMoney(g.spent)} (Budget: ${formatMoney(g.limit)})`).join('\n')}
+            
+            TOPP UTGIFTER:
+            ${data.topExpenses.map(e => `- ${e.name}: ${formatMoney(e.amount)}`).join('\n')}
+
+            DETALJERAD TRANSAKTIONSLISTA (Datum : Belopp : Beskrivning : Kategori):
+            ${data.transactionLog}
+
+            INSTRUKTIONER:
+            Skriv en rapport i Markdown som fokuserar på *beteende* och *orsak*, inte bara siffror. Använd transaktionslistan för att hitta mönster (t.ex. "22 besök på Ica Nara", "Stort engångsköp på IKEA").
+            Titta INTE på historisk data (du har bara denna månad). Gissa inte om du inte vet.
+
+            Strukturera rapporten så här:
+
+            ## Snabbanalys: ${data.monthLabel}
+            *   Ge resultatet (Utfall vs Budget/Inkomst). Gick de plus eller minus?
+            *   Vad är den absolut största avvikelsen?
+
+            ## Var läckte pengarna? (Topp 3 Avvikelser/Insikter)
+            *   Välj ut de 3 mest intressanta kategorierna eller händelserna.
+            *   För varje punkt:
+                *   **Vad hände:** Analysera transaktionerna. Var det många småköp? Ett stort köp? (Nämn specifika butiker om de förekommer ofta eller med stora belopp).
+                *   **Analys:** Var det onödigt? En engångshändelse? En dålig vana?
+
+            ## Jämförelse: Er familj vs "Normalfamiljen"
+            *   Gör en tabell där du jämför deras kostnader (Mat, Transport, Nöje) med schablonvärden för 2 vuxna + 1 barn (3 år).
+            *   Ge en status (🔴/🟡/🟢) för varje rad.
+
+            ## Konkreta Spartips för Er
+            *   Ge 3 tips baserat EXAKT på deras transaktioner.
+            *   T.ex: "Ni handlade mat 25 gånger, försök storhandla", "Ni har 3 streamingtjänster", "Utemat kostade X kr". Var specifik!
+
+            ## Slutsats
+            *   En peppande men ärlig sammanfattning på 2 meningar.
+
+            Ton: Professionell men personlig ("Ni/Er"). Använd fetstil för belopp och butiksnamn.
+        `;
 
         const response = await ai.models.generateContent({
             model: 'gemini-2.5-flash',

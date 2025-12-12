@@ -14,6 +14,7 @@ export const useBudgetActuals = (selectedMonth: string, payday: number) => {
     const transactions = await db.transactions
       .where('date')
       .between(startStr, endStr, true, true)
+      .filter(t => !t.isHidden) // Filter out hidden transactions from database query results
       .toArray();
 
     // --- REIMBURSEMENT LOGIC ---

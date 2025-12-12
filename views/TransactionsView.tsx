@@ -1,23 +1,23 @@
 
-
 import React, { useState, useRef, useMemo, useEffect } from 'react';
 import { useApp } from '../store';
 import { Transaction, ImportRule, Bucket, MainCategory, SubCategory, AppSettings, Account } from '../types';
 import { parseBankFile, runImportPipeline } from '../services/importService';
 import { categorizeTransactionsWithAi } from '../services/aiService';
 import { cn, Button, Card, Modal, Input } from '../components/components';
-import { Upload, Check, Wand2, Save, Trash2, Loader2, AlertTriangle, Zap, Clock, ArrowRightLeft, ShoppingCart, ArrowDownLeft, Sparkles, CheckCircle, Target, LayoutList, GalleryHorizontalEnd, ChevronLeft, ChevronRight, Search, Filter, Link2, CalendarClock, PlusCircle, CheckCircle2, Gavel, Edit2, FileText, X, Plus, XCircle, Smartphone, LayoutGrid, Square, CheckSquare, Layers, Plane, SlidersHorizontal, Unlink, Calendar, Link } from 'lucide-react';
+import { Upload, Check, Wand2, Save, Trash2, Loader2, AlertTriangle, Zap, Clock, ArrowRightLeft, ShoppingCart, ArrowDownLeft, Sparkles, CheckCircle, Target, LayoutList, GalleryHorizontalEnd, ChevronLeft, ChevronRight, Search, Filter, Link2, CalendarClock, PlusCircle, CheckCircle2, Gavel, Edit2, FileText, X, Plus, XCircle, Smartphone, LayoutGrid, Square, CheckSquare, Layers, Plane, SlidersHorizontal, Unlink, Calendar, Link, FileInput, EyeOff, Eye } from 'lucide-react';
 import { formatMoney, generateId, getBudgetInterval } from '../utils';
 import { useTransferMatching } from '../hooks/useTransferMatching';
 import { useSubscriptionDetection } from '../hooks/useSubscriptionDetection';
 import { format, subMonths } from 'date-fns';
+import { db } from '../db'; // Need DB access for auto-matching logic
 
 // --- SUB-COMPONENT: STAGING ROW (List View) ---
 
 const TransactionRow: React.FC<{ 
     tx: Transaction; 
     buckets: Bucket[]; 
-    mainCategories: MainCategory[];
+    mainCategories: MainCategory[]; 
     subCategories: SubCategory[];
     settings: AppSettings;
     onChange: (id: string, field: 'type'|'bucketId'|'categoryMainId'|'categorySubId'|'isManuallyApproved', value: string | boolean) => void;
@@ -44,7 +44,7 @@ const TransactionRow: React.FC<{
         (isExpense && settings.autoApproveExpense) ||
         (isIncome && settings.autoApproveIncome);
 
-    const autoApproved = isSystemMatch && settingAllowsAuto;
+    const autoApproved = (isSystemMatch && settingAllowsAuto) || (isTransfer && !!tx.linkedTransactionId); // Auto-approve linked transfers always
     const isReady = hasRequiredData && (tx.isManuallyApproved || autoApproved);
     const needsManualApproval = hasRequiredData && !isReady;
 
@@ -79,6 +79,10 @@ const TransactionRow: React.FC<{
         statusColor = "bg-purple-950/30 border-purple-500/30";
         icon = <Wand2 className="w-4 h-4 text-purple-400" />;
         title = "AI-gissning";
+    } else if (tx.linkedTransactionId) {
+        statusColor = "bg-indigo-950/30 border-indigo-500/30";
+        icon = <Link2 className="w-4 h-4 text-indigo-400" />;
+        title = "Smart Länkning";
     } else if (!hasRequiredData) {
         statusColor = "bg-slate-800 border-l-4 border-l-slate-500";
     }
@@ -100,7 +104,12 @@ const TransactionRow: React.FC<{
                 <div className="flex-1 font-medium text-white truncate min-w-0" title={tx.description}>
                     {tx.description}
                 </div>
-                <div className="font-mono text-right shrink-0">{formatMoney(tx.amount)}</div>
+                <div className="text-right shrink-0">
+                    <div className="font-mono">{formatMoney(tx.amount)}</div>
+                    {tx.balance !== undefined && (
+                        <div className="text-[10px] text-slate-500 font-mono mt-0.5">Saldo: {formatMoney(tx.balance)}</div>
+                    )}
+                </div>
                 
                 {/* Actions Area */}
                 <div className="flex items-center justify-end gap-1 w-24 shrink-0">
@@ -125,7 +134,7 @@ const TransactionRow: React.FC<{
                     )}
                     {isReady && (
                         <div className="flex items-center gap-1">
-                             {matchType !== 'rule' && (
+                             {matchType !== 'rule' && !tx.linkedTransactionId && (
                                 <button 
                                     onClick={() => onCreateRule(tx)}
                                     className="p-1.5 text-slate-400 hover:text-white hover:bg-blue-600 rounded transition-colors"
@@ -176,26 +185,33 @@ const TransactionRow: React.FC<{
                 {/* ROW 3: CATEGORY/BUCKET SELECTORS */}
                 <div className="w-full">
                     {isTransfer && (
-                        <select 
-                            className={cn(
-                                "w-full bg-slate-900 border rounded-lg px-3 py-2 text-sm focus:border-blue-500 outline-none transition-colors",
-                                !tx.bucketId ? "border-rose-500/50 text-rose-200" : "border-slate-600 text-blue-200"
+                        <div className="flex gap-2 items-center">
+                            {tx.linkedTransactionId && (
+                                <span className="bg-indigo-500/20 text-indigo-300 text-xs px-2 py-1 rounded flex items-center gap-1 border border-indigo-500/30">
+                                    <Link2 size={12} /> Auto-länkad
+                                </span>
                             )}
-                            value={tx.bucketId || ""}
-                            onChange={(e) => onChange(tx.id, 'bucketId', e.target.value)}
-                            title="Budgetpost (Varifrån tas pengarna?)"
-                        >
-                            <option value="">-- Välj Destination --</option>
-                            <option value="INTERNAL">Intern Överföring (Mellan egna konton)</option>
-                            <option value="PAYOUT">Utbetalning (Till annat konto)</option>
-                            <optgroup label="Budgetposter">
-                                {buckets
-                                    .filter(b => b.accountId === tx.accountId)
-                                    .map(b => (
-                                    <option key={b.id} value={b.id}>{b.name}</option>
-                                ))}
-                            </optgroup>
-                        </select>
+                            <select 
+                                className={cn(
+                                    "w-full bg-slate-900 border rounded-lg px-3 py-2 text-sm focus:border-blue-500 outline-none transition-colors",
+                                    !tx.bucketId ? "border-rose-500/50 text-rose-200" : "border-slate-600 text-blue-200"
+                                )}
+                                value={tx.bucketId || ""}
+                                onChange={(e) => onChange(tx.id, 'bucketId', e.target.value)}
+                                title="Budgetpost (Varifrån tas pengarna?)"
+                            >
+                                <option value="">-- Välj Destination --</option>
+                                <option value="INTERNAL">Intern Överföring (Mellan egna konton)</option>
+                                <option value="PAYOUT">Utbetalning (Till annat konto)</option>
+                                <optgroup label="Budgetposter">
+                                    {buckets
+                                        .filter(b => b.accountId === tx.accountId)
+                                        .map(b => (
+                                        <option key={b.id} value={b.id}>{b.name}</option>
+                                    ))}
+                                </optgroup>
+                            </select>
+                        </div>
                     )}
 
                     {isExpense && (
@@ -290,7 +306,7 @@ const TransactionCard: React.FC<{
         (isIncome && !!tx.categoryMainId);
 
     const isSystemMatch = tx.matchType === 'rule' || tx.matchType === 'history';
-    const autoApproved = isSystemMatch && ((isTransfer && settings.autoApproveTransfer) || (isExpense && settings.autoApproveExpense) || (isIncome && settings.autoApproveIncome));
+    const autoApproved = (isSystemMatch && ((isTransfer && settings.autoApproveTransfer) || (isExpense && settings.autoApproveExpense) || (isIncome && settings.autoApproveIncome))) || (isTransfer && !!tx.linkedTransactionId);
     const isReady = hasRequiredData && (tx.isManuallyApproved || autoApproved);
 
     const validSubCats = useMemo(() => {
@@ -321,8 +337,13 @@ const TransactionCard: React.FC<{
                  </div>
 
                  {/* Amount */}
-                 <div className="text-5xl font-bold font-mono text-white tracking-tight">
-                     {formatMoney(tx.amount)}
+                 <div>
+                    <div className="text-5xl font-bold font-mono text-white tracking-tight">
+                        {formatMoney(tx.amount)}
+                    </div>
+                    {tx.balance !== undefined && (
+                        <div className="text-sm text-slate-500 font-mono mt-1">Saldo: {formatMoney(tx.balance)}</div>
+                    )}
                  </div>
 
                  {/* Description */}
@@ -331,11 +352,12 @@ const TransactionCard: React.FC<{
                  </div>
 
                  {/* Match Badge */}
-                 {(tx.matchType || tx.isManuallyApproved) && (
+                 {(tx.matchType || tx.isManuallyApproved || tx.linkedTransactionId) && (
                      <div className="px-3 py-1 rounded-full text-xs font-bold uppercase flex items-center gap-2 bg-slate-700 text-slate-400">
                          {tx.matchType === 'rule' && <><Zap size={12}/> Regelmatch</>}
                          {tx.matchType === 'history' && <><Clock size={12}/> Historik</>}
                          {tx.matchType === 'ai' && <><Wand2 size={12}/> AI Gissning</>}
+                         {tx.linkedTransactionId && <><Link2 size={12}/> Smart Länkning</>}
                          {tx.isManuallyApproved && <><CheckCircle size={12}/> Manuellt Godkänd</>}
                      </div>
                  )}
@@ -441,11 +463,17 @@ export const TransactionsView: React.FC = () => {
         addBucket,
         ignoredSubscriptions,
         addIgnoredSubscription,
+        deleteTransaction,
+        deleteAllTransactions,
         selectedMonth
     } = useApp();
 
     const [viewMode, setViewMode] = useState<'import' | 'history' | 'smart-transfers' | 'subscriptions' | 'rules'>('import');
     
+    // NEW: Sub-tab for Import view
+    const [importTab, setImportTab] = useState<'upload' | 'review'>('upload');
+    const [uploadStats, setUploadStats] = useState<{ count: number; updatedCount?: number; matchedCount?: number; filename: string } | null>(null);
+
     // View Format for Import Tab (List vs Cards)
     const [viewFormat, setViewFormat] = useState<'list'|'cards'>('list');
     
@@ -457,18 +485,18 @@ export const TransactionsView: React.FC = () => {
     const [historyFilterSubCat, setHistoryFilterSubCat] = useState('');
     const [historyFilterAmountMin, setHistoryFilterAmountMin] = useState<string>('');
     const [historyFilterAmountMax, setHistoryFilterAmountMax] = useState<string>('');
+    const [historyShowHidden, setHistoryShowHidden] = useState(false); // NEW: Toggle hidden transactions
     
-    // --- NEW: History Date Filters & Pagination ---
+    // History Date Filters & Pagination
     const [historyDateFrom, setHistoryDateFrom] = useState('');
     const [historyDateTo, setHistoryDateTo] = useState('');
     const [historyPage, setHistoryPage] = useState(0);
     const HISTORY_PAGE_SIZE = 50;
 
-    // --- NEW: History View Filter States ---
+    // History View Filter States
     const [historyTypeFilter, setHistoryTypeFilter] = useState<'ALL' | 'EXPENSE' | 'TRANSFER' | 'INCOME'>('ALL');
     const [historyTransferScope, setHistoryTransferScope] = useState<'ALL' | 'UNLINKED' | 'LINKED'>('ALL');
 
-    const [importedTransactions, setImportedTransactions] = useState<Transaction[]>([]);
     const [selectedAccount, setSelectedAccount] = useState<string>('');
     const [isAiLoading, setIsAiLoading] = useState(false);
     
@@ -488,6 +516,7 @@ export const TransactionsView: React.FC = () => {
     const [editingTransaction, setEditingTransaction] = useState<Transaction | null>(null);
     const [editDescription, setEditDescription] = useState('');
     const [editDate, setEditDate] = useState('');
+    const [editIsHidden, setEditIsHidden] = useState(false); // NEW: Edit hidden state
 
     // History Bulk Selection State
     const [selectedHistoryIds, setSelectedHistoryIds] = useState<Set<string>>(new Set());
@@ -507,6 +536,30 @@ export const TransactionsView: React.FC = () => {
 
     const fileInputRef = useRef<HTMLInputElement>(null);
 
+    // Effect to check for navigation params from sessionStorage
+    useEffect(() => {
+        const params = sessionStorage.getItem('nav_params_transactions');
+        if (params) {
+            try {
+                const p = JSON.parse(params);
+                if (p.viewMode) setViewMode(p.viewMode);
+                if (p.typeFilter) setHistoryTypeFilter(p.typeFilter);
+                if (p.transferScope) setHistoryTransferScope(p.transferScope);
+                if (p.dateFrom) setHistoryDateFrom(p.dateFrom);
+                if (p.dateTo) setHistoryDateTo(p.dateTo);
+                sessionStorage.removeItem('nav_params_transactions');
+            } catch(e) {
+                console.error("Failed to parse nav params", e);
+            }
+        }
+    }, []);
+
+    // --- NEW: Derive Unverified Transactions from global store ---
+    // Instead of local state, we check the DB state (via store)
+    const unverifiedTransactions = useMemo(() => {
+        return transactions.filter(t => !t.isVerified).sort((a,b) => b.date.localeCompare(a.date));
+    }, [transactions]);
+
     // Calculate map of reimbursements for display in history
     const reimbursementMap = useMemo(() => {
         const map: Record<string, number> = {};
@@ -523,6 +576,9 @@ export const TransactionsView: React.FC = () => {
         return transactions
             .filter(t => t.isVerified)
             .filter(t => {
+                // Filter hidden
+                if (t.isHidden && !historyShowHidden) return false;
+
                 const matchesSearch = !historySearch || t.description.toLowerCase().includes(historySearch.toLowerCase());
                 const matchesAccount = !historyAccountFilter || t.accountId === historyAccountFilter;
                 
@@ -557,7 +613,7 @@ export const TransactionsView: React.FC = () => {
                 return matchesSearch && matchesAccount && matchesFrom && matchesTo && matchesMainCat && matchesSubCat && matchesMin && matchesMax && matchesType && matchesTransferScope;
             })
             .sort((a, b) => b.date.localeCompare(a.date));
-    }, [transactions, historySearch, historyAccountFilter, historyDateFrom, historyDateTo, historyFilterMainCat, historyFilterSubCat, historyFilterAmountMin, historyFilterAmountMax, historyTypeFilter, historyTransferScope]);
+    }, [transactions, historySearch, historyAccountFilter, historyDateFrom, historyDateTo, historyFilterMainCat, historyFilterSubCat, historyFilterAmountMin, historyFilterAmountMax, historyTypeFilter, historyTransferScope, historyShowHidden]);
 
     // Paginated History
     const paginatedHistory = useMemo(() => {
@@ -578,12 +634,12 @@ export const TransactionsView: React.FC = () => {
         return dates;
     }, [transactions]);
 
-    // Filtered transaction list for "Import" tab
-    const filteredImportTransactions = useMemo(() => {
-        if (!importSearch) return importedTransactions;
+    // Filtered transaction list for "Import" tab (Review)
+    const filteredReviewTransactions = useMemo(() => {
+        if (!importSearch) return unverifiedTransactions;
         const lower = importSearch.toLowerCase();
-        return importedTransactions.filter(t => t.description.toLowerCase().includes(lower) || formatMoney(t.amount).includes(lower));
-    }, [importedTransactions, importSearch]);
+        return unverifiedTransactions.filter(t => t.description.toLowerCase().includes(lower) || formatMoney(t.amount).includes(lower));
+    }, [unverifiedTransactions, importSearch]);
 
     // History Selection Logic
     const toggleHistorySelection = (id: string) => {
@@ -664,6 +720,7 @@ export const TransactionsView: React.FC = () => {
         setEditingTransaction(tx);
         setEditDescription(tx.description);
         setEditDate(tx.date);
+        setEditIsHidden(!!tx.isHidden);
         setIsEditTransactionModalOpen(true);
     };
 
@@ -679,6 +736,7 @@ export const TransactionsView: React.FC = () => {
         }
 
         updatedTx.description = editDescription;
+        updatedTx.isHidden = editIsHidden;
 
         // Date Change Logic: Keep original date for future duplicate detection
         if (editDate !== updatedTx.date) {
@@ -705,8 +763,6 @@ export const TransactionsView: React.FC = () => {
         await updateTransaction({
             ...reimbursementSourceTx,
             linkedExpenseId: expenseTx.id,
-            // When linking as reimbursement, ensure it is verified but maybe clear other categories if they conflict?
-            // Actually, keep type as INCOME or TRANSFER, but the presence of linkedExpenseId will override its effect in stats.
         });
         
         setIsReimburseModalOpen(false);
@@ -725,9 +781,90 @@ export const TransactionsView: React.FC = () => {
         try {
             const file = e.target.files[0];
             const rawTxs = await parseBankFile(file, selectedAccount);
-            const processed = await runImportPipeline(rawTxs, transactions, importRules, buckets);
-            setImportedTransactions(processed);
-            setCurrentCardIndex(0);
+            // Run pipeline against ALL existing transactions (to detect dupes and updates)
+            const { newTransactions, updatedTransactions } = await runImportPipeline(rawTxs, transactions, importRules, buckets);
+            
+            let matchedCount = 0;
+
+            const promises = [];
+            if (newTransactions.length > 0) {
+                // Immediately save to DB as unverified
+                promises.push(addTransactions(newTransactions));
+            }
+            
+            // Execute updates for existing transactions (e.g. balance updates)
+            if (updatedTransactions.length > 0) {
+                updatedTransactions.forEach(tx => promises.push(updateTransaction(tx)));
+            }
+
+            await Promise.all(promises);
+
+            // --- AUTO MATCHING LOGIC (SMART TRANSFERS) ---
+            if (settings.autoApproveSmartTransfers && newTransactions.length > 0) {
+                // Fetch all unverified transactions from DB to include the newly added ones + existing unverified
+                const allUnverified = await db.transactions.filter(t => !t.isVerified).toArray();
+                
+                const updates: Promise<void>[] = [];
+                const usedIds = new Set<string>();
+
+                // Sort to make matching deterministic
+                allUnverified.sort((a,b) => b.date.localeCompare(a.date));
+
+                for (let i = 0; i < allUnverified.length; i++) {
+                    const t1 = allUnverified[i];
+                    if (usedIds.has(t1.id)) continue;
+
+                    // Find counterpart
+                    const t2 = allUnverified.find((t, idx) => 
+                        idx > i &&
+                        !usedIds.has(t.id) &&
+                        t.accountId !== t1.accountId && // Different account
+                        t.date === t1.date && // Same date
+                        t.amount === -t1.amount // Opposite amount
+                    );
+
+                    if (t2) {
+                        matchedCount += 2; // Count pairs
+                        
+                        // Link them and mark as verified
+                        updates.push(updateTransaction({ 
+                            ...t1, 
+                            type: 'TRANSFER', 
+                            bucketId: 'INTERNAL', 
+                            linkedTransactionId: t2.id,
+                            isVerified: true
+                        }));
+                        updates.push(updateTransaction({ 
+                            ...t2, 
+                            type: 'TRANSFER', 
+                            bucketId: 'INTERNAL', 
+                            linkedTransactionId: t1.id,
+                            isVerified: true
+                        }));
+
+                        usedIds.add(t1.id);
+                        usedIds.add(t2.id);
+                    }
+                }
+                
+                if (updates.length > 0) {
+                    await Promise.all(updates);
+                }
+            }
+
+            if (newTransactions.length > 0 || updatedTransactions.length > 0) {
+                setUploadStats({ 
+                    count: newTransactions.length, 
+                    updatedCount: updatedTransactions.length, 
+                    matchedCount: matchedCount,
+                    filename: file.name 
+                });
+            } else {
+                setUploadStats({ count: 0, updatedCount: 0, matchedCount: 0, filename: file.name });
+            }
+            
+            // Clear input so same file can be selected again if needed
+            e.target.value = '';
         } catch (error) {
             alert("Kunde inte läsa filen. Kontrollera formatet.");
             console.error(error);
@@ -739,46 +876,46 @@ export const TransactionsView: React.FC = () => {
         const result = await categorizeTransactionsWithAi([tx], buckets, mainCategories, subCategories);
         const match = result[tx.id];
         if (match) {
-            setImportedTransactions(prev => prev.map(t => {
-                if (t.id !== tx.id) return t;
-                return {
-                    ...t,
-                    bucketId: match.bucketId || t.bucketId,
-                    categoryMainId: match.mainCatId || t.categoryMainId,
-                    categorySubId: match.subCatId || t.categorySubId,
-                    type: match.bucketId ? 'TRANSFER' : (match.mainCatId ? 'EXPENSE' : t.type),
-                    matchType: 'ai',
-                    aiSuggested: true
-                };
-            }));
+            await updateTransaction({
+                ...tx,
+                bucketId: match.bucketId || tx.bucketId,
+                categoryMainId: match.mainCatId || tx.categoryMainId,
+                categorySubId: match.subCatId || tx.categorySubId,
+                type: match.bucketId ? 'TRANSFER' : (match.mainCatId ? 'EXPENSE' : tx.type),
+                matchType: 'ai',
+                aiSuggested: true
+            });
         }
         setIsAiLoading(false);
     };
 
     const handleChange = (id: string, field: keyof Transaction, value: any) => {
-        setImportedTransactions(prev => {
-            const targetTx = prev.find(t => t.id === id);
-            if (!targetTx) return prev;
-            const updatedTx = { ...targetTx, [field]: value };
-            if (field === 'type' && value === 'TRANSFER') {
-                updatedTx.categoryMainId = undefined;
-                updatedTx.categorySubId = undefined;
-            }
-            if (field === 'type' && value === 'EXPENSE') {
-                updatedTx.bucketId = undefined;
-            }
-            if (field === 'bucketId' || field === 'categoryMainId' || field === 'categorySubId' || field === 'type') {
-                 return prev.map(t => {
-                     if (t.description !== targetTx.description) return t.id === id ? updatedTx : t;
-                     if ((t.amount < 0) !== (targetTx.amount < 0)) return t.id === id ? updatedTx : t;
-                     const isTransfer = t.type === 'TRANSFER';
-                     const isExpense = t.type === 'EXPENSE';
-                     const isIncome = t.type === 'INCOME';
-                     const hasData = (isTransfer && !!t.bucketId) || (isExpense && !!t.categoryMainId && !!t.categorySubId) || (isIncome && !!t.categoryMainId);
-                     const isSystemMatch = t.matchType === 'rule' || t.matchType === 'history';
-                     const autoApproved = isSystemMatch && ((isTransfer && settings.autoApproveTransfer) || (isExpense && settings.autoApproveExpense) || (isIncome && settings.autoApproveIncome));
-                     const isReady = hasData && (t.isManuallyApproved || autoApproved);
-                     if (isReady || t.isVerified) return t.id === id ? updatedTx : t;
+        const targetTx = transactions.find(t => t.id === id);
+        if (!targetTx) return;
+
+        const updatedTx = { ...targetTx, [field]: value };
+        
+        // Type specific logic
+        if (field === 'type' && value === 'TRANSFER') {
+            updatedTx.categoryMainId = undefined;
+            updatedTx.categorySubId = undefined;
+        }
+        if (field === 'type' && value === 'EXPENSE') {
+            updatedTx.bucketId = undefined;
+        }
+
+        // Apply changes to similar unverified transactions if changing key fields
+        if (field === 'bucketId' || field === 'categoryMainId' || field === 'categorySubId' || field === 'type') {
+             // We can do a mini-bulk update for convenience
+             const similar = unverifiedTransactions.filter(t => 
+                 t.id !== id && 
+                 t.description === targetTx.description &&
+                 (t.amount < 0) === (targetTx.amount < 0) &&
+                 !t.isManuallyApproved
+             );
+             
+             if (similar.length > 0) {
+                 similar.forEach(t => {
                      const propagated = { ...t, [field]: value };
                      if (field === 'type' && value === 'TRANSFER') {
                          propagated.categoryMainId = undefined;
@@ -788,36 +925,50 @@ export const TransactionsView: React.FC = () => {
                          propagated.bucketId = undefined;
                      }
                      propagated.matchType = 'history';
-                     return propagated;
+                     updateTransaction(propagated);
                  });
-            }
-            return prev.map(t => t.id === id ? updatedTx : t);
-        });
+             }
+        }
+        
+        updateTransaction(updatedTx);
     };
 
-    const handleUnapprove = (id: string) => {
-        setImportedTransactions(prev => prev.map(t => {
-            if (t.id !== id) return t;
-            return { ...t, isManuallyApproved: false, matchType: undefined };
-        }));
+    const handleUnapprove = async (id: string) => {
+        const tx = transactions.find(t => t.id === id);
+        if(tx) {
+            await updateTransaction({ ...tx, isManuallyApproved: false, matchType: undefined });
+        }
     };
 
     const handleCommit = async () => {
-        const ready = importedTransactions.filter(t => {
+        // Find all "Ready" unverified transactions
+        const ready = unverifiedTransactions.filter(t => {
             const isTransfer = t.type === 'TRANSFER';
             const isExpense = t.type === 'EXPENSE';
             const isIncome = t.type === 'INCOME';
             const hasData = (isTransfer && !!t.bucketId) || (isExpense && !!t.categoryMainId && !!t.categorySubId) || (isIncome && !!t.categoryMainId);
             const isAuto = (isTransfer && settings.autoApproveTransfer) || (isExpense && settings.autoApproveExpense) || (isIncome && settings.autoApproveIncome);
             const isSystemMatch = t.matchType === 'rule' || t.matchType === 'history';
-            return hasData && (t.isManuallyApproved || (isSystemMatch && isAuto));
+            
+            // Allow manual override OR auto-approved based on settings OR linked transfer
+            return hasData && (t.isManuallyApproved || (isSystemMatch && isAuto) || (isTransfer && !!t.linkedTransactionId));
         });
+
         if (ready.length === 0) return;
-        const verified = ready.map(t => ({ ...t, isVerified: true }));
-        await addTransactions(verified);
-        const remaining = importedTransactions.filter(t => !ready.find(r => r.id === t.id));
-        setImportedTransactions(remaining);
+        
+        const updates = ready.map(t => updateTransaction({ ...t, isVerified: true }));
+        await Promise.all(updates);
         setCurrentCardIndex(0);
+    };
+    
+    const handleClearUnverified = async () => {
+        if (confirm(`Detta tar bort alla ${unverifiedTransactions.length} transaktioner som ligger för granskning. Är du säker?`)) {
+            const ids = unverifiedTransactions.map(t => t.id);
+            for (const id of ids) {
+                await deleteTransaction(id);
+            }
+            setImportSearch('');
+        }
     };
 
     const openRuleModal = (tx: Transaction | null, existingRule?: ImportRule) => {
@@ -863,9 +1014,13 @@ export const TransactionsView: React.FC = () => {
             await addImportRule(baseRule);
         }
         setRuleModalOpen(false);
-        if (!editingRule && ruleTransaction) {
-            const reProcessed = await runImportPipeline(importedTransactions, transactions, [...importRules, baseRule], buckets);
-            setImportedTransactions(reProcessed);
+        // We can re-run pipeline on unverified transactions to apply the new rule
+        if (!editingRule) {
+            const { newTransactions: processed } = await runImportPipeline(unverifiedTransactions, transactions, [...importRules, baseRule], buckets);
+            // This will update them in DB
+            processed.forEach(t => {
+                if (t.matchType === 'rule') updateTransaction(t);
+            });
         }
     };
     
@@ -941,7 +1096,10 @@ export const TransactionsView: React.FC = () => {
                 
                 <div className="w-full flex flex-col gap-2">
                      <div className="flex bg-slate-800 p-1 rounded-lg w-full">
-                        <button onClick={() => setViewMode('import')} className={cn("flex-1 px-4 py-2 rounded text-sm font-medium transition-all", viewMode === 'import' ? "bg-blue-600 text-white shadow" : "text-slate-400 hover:text-white")}>Importera</button>
+                        <button onClick={() => setViewMode('import')} className={cn("flex-1 px-4 py-2 rounded text-sm font-medium transition-all relative", viewMode === 'import' ? "bg-blue-600 text-white shadow" : "text-slate-400 hover:text-white")}>
+                            Importera
+                            {unverifiedTransactions.length > 0 && <span className="absolute -top-1 -right-1 bg-rose-500 text-white text-[9px] w-4 h-4 rounded-full flex items-center justify-center">{unverifiedTransactions.length > 99 ? '99+' : unverifiedTransactions.length}</span>}
+                        </button>
                         <button onClick={() => setViewMode('history')} className={cn("flex-1 px-4 py-2 rounded text-sm font-medium transition-all", viewMode === 'history' ? "bg-blue-600 text-white shadow" : "text-slate-400 hover:text-white")}>Historik</button>
                         <button onClick={() => setViewMode('rules')} className={cn("flex-1 px-4 py-2 rounded text-sm font-medium transition-all", viewMode === 'rules' ? "bg-blue-600 text-white shadow" : "text-slate-400 hover:text-white")}>Regler</button>
                     </div>
@@ -959,14 +1117,36 @@ export const TransactionsView: React.FC = () => {
 
             {viewMode === 'import' && (
                 <div className="space-y-4">
-                    {importedTransactions.length === 0 ? (
-                        <div className="bg-slate-800/50 border-2 border-dashed border-slate-700 rounded-2xl p-8 flex flex-col items-center justify-center text-center space-y-4">
+                    {/* SUB TABS FOR IMPORT */}
+                    <div className="flex border-b border-slate-700 mb-4">
+                        <button 
+                            onClick={() => setImportTab('upload')}
+                            className={cn("px-6 py-2 text-sm font-bold border-b-2 transition-colors", importTab === 'upload' ? "border-blue-500 text-white" : "border-transparent text-slate-400 hover:text-white")}
+                        >
+                            <span className="flex items-center gap-2"><Upload size={14} /> Ladda upp</span>
+                        </button>
+                        <button 
+                            onClick={() => setImportTab('review')}
+                            className={cn("px-6 py-2 text-sm font-bold border-b-2 transition-colors", importTab === 'review' ? "border-blue-500 text-white" : "border-transparent text-slate-400 hover:text-white")}
+                        >
+                            <span className="flex items-center gap-2">
+                                <FileText size={14} /> 
+                                Granska
+                                {unverifiedTransactions.length > 0 && <span className="bg-rose-500 text-white text-[10px] px-2 py-0.5 rounded-full">{unverifiedTransactions.length}</span>}
+                            </span>
+                        </button>
+                    </div>
+
+                    {/* UPLOAD TAB */}
+                    {importTab === 'upload' && (
+                        <div className="bg-slate-800/50 border-2 border-dashed border-slate-700 rounded-2xl p-8 flex flex-col items-center justify-center text-center space-y-4 animate-in fade-in">
                             <div className="bg-slate-800 p-4 rounded-full">
                                 <Upload className="w-8 h-8 text-blue-400" />
                             </div>
                             <div>
                                 <h3 className="text-lg font-bold text-white">Ladda upp fil</h3>
-                                <p className="text-sm text-slate-400 mt-1">Stödjer CSV och Excel från din bank</p>
+                                <p className="text-sm text-slate-400 mt-1">Stödjer CSV och Excel från din bank.</p>
+                                <p className="text-xs text-slate-500 mt-2">Du kan ladda upp flera filer i rad. Nya transaktioner läggs till i granskningslistan.</p>
                             </div>
                             <select className="bg-slate-900 border border-slate-700 rounded-lg px-4 py-2 text-white w-64" value={selectedAccount} onChange={(e) => setSelectedAccount(e.target.value)}>
                                 <option value="">Välj konto...</option>
@@ -981,45 +1161,83 @@ export const TransactionsView: React.FC = () => {
                             </select>
                             <Button onClick={() => fileInputRef.current?.click()} disabled={!selectedAccount} className="w-64">Välj fil</Button>
                             <input type="file" ref={fileInputRef} className="hidden" accept=".csv,.xlsx,.xls" onChange={handleFileUpload} />
-                        </div>
-                    ) : (
-                        <div className="space-y-4">
-                            <div className="flex flex-col gap-2">
-                                <div className="flex gap-2">
-                                    <div className="flex-1 bg-slate-900 rounded-lg flex items-center px-3 border border-slate-700">
-                                        <Search size={16} className="text-slate-400 mr-2" />
-                                        <input placeholder="Sök transaktion..." className="bg-transparent border-none outline-none text-white text-sm w-full py-2 placeholder-slate-500" value={importSearch} onChange={(e) => setImportSearch(e.target.value)} />
-                                        {importSearch && <button onClick={() => setImportSearch('')}><X size={14} className="text-slate-400"/></button>}
+
+                            {uploadStats && (
+                                <div className="mt-4 p-4 bg-emerald-950/30 border border-emerald-500/30 rounded-xl flex flex-col gap-2 items-center w-full max-w-sm animate-in zoom-in">
+                                    <div className="flex items-center gap-2 text-emerald-400 font-bold">
+                                        <CheckCircle2 size={18} /> Filen inläst!
                                     </div>
-                                    <div className="flex bg-slate-900 rounded-lg p-1 border border-slate-700 shrink-0">
-                                        <button onClick={() => setViewFormat('list')} className={cn("p-1.5 rounded transition-colors", viewFormat === 'list' ? "bg-slate-700 text-white" : "text-slate-400 hover:text-white")} title="Lista"><LayoutList size={18} /></button>
-                                        <button onClick={() => setViewFormat('cards')} className={cn("p-1.5 rounded transition-colors", viewFormat === 'cards' ? "bg-slate-700 text-white" : "text-slate-400 hover:text-white")} title="Kort (Swipe)"><Smartphone size={18} /></button>
+                                    <div className="text-sm text-slate-300 text-center">
+                                        Hittade <span className="font-bold text-white">{uploadStats.count}</span> nya transaktioner.
+                                        {uploadStats.updatedCount ? (
+                                            <div className="text-xs text-emerald-300 mt-1">
+                                                Samt uppdaterade saldo på <span className="font-bold">{uploadStats.updatedCount}</span> befintliga transaktioner.
+                                            </div>
+                                        ) : null}
+                                        {uploadStats.matchedCount ? (
+                                            <div className="text-xs text-indigo-300 mt-1 font-bold">
+                                                <span className="font-bold">{uploadStats.matchedCount}</span> st matchades automatiskt som överföringar!
+                                            </div>
+                                        ) : null}
                                     </div>
-                                </div>
-                                <div className="flex justify-between items-center">
-                                    <div className="text-sm text-slate-400">Visar {filteredImportTransactions.length} av {importedTransactions.length}</div>
-                                    <div className="flex gap-2">
-                                        <Button variant="danger" onClick={() => { setImportedTransactions([]); setImportSearch(''); }} className="px-3 py-1.5 text-xs">Rensa</Button>
-                                        <Button variant="primary" onClick={handleCommit} className="px-3 py-1.5 text-xs">Bokför ({importedTransactions.filter(t => t.isManuallyApproved || ((t.matchType === 'rule' || t.matchType === 'history') && ((t.type === 'TRANSFER' && settings.autoApproveTransfer) || (t.type === 'EXPENSE' && settings.autoApproveExpense)))).length})</Button>
-                                    </div>
-                                </div>
-                            </div>
-                            {viewFormat === 'list' && (
-                                <div className="space-y-2">
-                                    {filteredImportTransactions.map((tx) => (
-                                        <TransactionRow key={tx.id} tx={tx} buckets={buckets} mainCategories={mainCategories} subCategories={subCategories} settings={settings} onChange={handleChange} onUnapprove={handleUnapprove} onCreateRule={(t) => openRuleModal(t)} onAiGuess={handleAiGuess} isAiLoading={isAiLoading} />
-                                    ))}
-                                    {filteredImportTransactions.length === 0 && <div className="text-center py-10 text-slate-500">Inga transaktioner matchade sökningen.</div>}
+                                    <Button onClick={() => setImportTab('review')} className="mt-2 bg-emerald-600 hover:bg-emerald-500 text-xs w-full">
+                                        Gå till Granskning
+                                    </Button>
                                 </div>
                             )}
-                            {viewFormat === 'cards' && (
-                                <div className="relative h-[600px] w-full max-w-md mx-auto">
-                                    {filteredImportTransactions.length > 0 ? (
-                                        <TransactionCard tx={filteredImportTransactions[currentCardIndex]} buckets={buckets} mainCategories={mainCategories} subCategories={subCategories} settings={settings} accounts={accounts} onChange={handleChange} onApprove={(id) => handleChange(id, 'isManuallyApproved', true)} onNext={() => setCurrentCardIndex(prev => Math.min(prev + 1, filteredImportTransactions.length - 1))} onPrev={() => setCurrentCardIndex(prev => Math.max(prev - 1, 0))} isFirst={currentCardIndex === 0} isLast={currentCardIndex === filteredImportTransactions.length - 1} />
-                                    ) : (
-                                        <div className="text-center py-10 text-slate-500">Inga transaktioner att visa.</div>
+                        </div>
+                    )}
+
+                    {/* REVIEW TAB */}
+                    {importTab === 'review' && (
+                        <div className="space-y-4 animate-in fade-in">
+                            {unverifiedTransactions.length === 0 ? (
+                                <div className="text-center py-20 bg-slate-900/50 rounded-2xl border border-slate-800">
+                                    <div className="inline-block p-4 bg-slate-800 rounded-full mb-3">
+                                        <CheckCircle2 className="w-8 h-8 text-emerald-500" />
+                                    </div>
+                                    <h3 className="text-white font-bold text-lg">Allt klart!</h3>
+                                    <p className="text-slate-400 text-sm">Inga transaktioner att granska.</p>
+                                </div>
+                            ) : (
+                                <div className="flex flex-col gap-2">
+                                    <div className="flex gap-2">
+                                        <div className="flex-1 bg-slate-900 rounded-lg flex items-center px-3 border border-slate-700">
+                                            <Search size={16} className="text-slate-400 mr-2" />
+                                            <input placeholder="Sök transaktion..." className="bg-transparent border-none outline-none text-white text-sm w-full py-2 placeholder-slate-500" value={importSearch} onChange={(e) => setImportSearch(e.target.value)} />
+                                            {importSearch && <button onClick={() => setImportSearch('')}><X size={14} className="text-slate-400"/></button>}
+                                        </div>
+                                        <div className="flex bg-slate-900 rounded-lg p-1 border border-slate-700 shrink-0">
+                                            <button onClick={() => setViewFormat('list')} className={cn("p-1.5 rounded transition-colors", viewFormat === 'list' ? "bg-slate-700 text-white" : "text-slate-400 hover:text-white")} title="Lista"><LayoutList size={18} /></button>
+                                            <button onClick={() => setViewFormat('cards')} className={cn("p-1.5 rounded transition-colors", viewFormat === 'cards' ? "bg-slate-700 text-white" : "text-slate-400 hover:text-white")} title="Kort (Swipe)"><Smartphone size={18} /></button>
+                                        </div>
+                                    </div>
+                                    <div className="flex justify-between items-center">
+                                        <div className="text-sm text-slate-400">Visar {filteredReviewTransactions.length} av {unverifiedTransactions.length}</div>
+                                        <div className="flex gap-2">
+                                            <Button variant="danger" onClick={handleClearUnverified} className="px-3 py-1.5 text-xs">Rensa alla</Button>
+                                            <Button variant="primary" onClick={handleCommit} className="px-3 py-1.5 text-xs">Bokför ({unverifiedTransactions.filter(t => t.isManuallyApproved || ((t.matchType === 'rule' || t.matchType === 'history') && ((t.type === 'TRANSFER' && settings.autoApproveTransfer) || (t.type === 'EXPENSE' && settings.autoApproveExpense))) || (t.type === 'TRANSFER' && t.linkedTransactionId)).length})</Button>
+                                        </div>
+                                    </div>
+                                    
+                                    {viewFormat === 'list' && (
+                                        <div className="space-y-2">
+                                            {filteredReviewTransactions.map((tx) => (
+                                                <TransactionRow key={tx.id} tx={tx} buckets={buckets} mainCategories={mainCategories} subCategories={subCategories} settings={settings} onChange={handleChange} onUnapprove={handleUnapprove} onCreateRule={(t) => openRuleModal(t)} onAiGuess={handleAiGuess} isAiLoading={isAiLoading} />
+                                            ))}
+                                            {filteredReviewTransactions.length === 0 && <div className="text-center py-10 text-slate-500">Inga transaktioner matchade sökningen.</div>}
+                                        </div>
                                     )}
-                                    <div className="text-center mt-4 text-sm text-slate-400">Kort {currentCardIndex + 1} av {filteredImportTransactions.length}</div>
+                                    {viewFormat === 'cards' && (
+                                        <div className="relative h-[600px] w-full max-w-md mx-auto">
+                                            {filteredReviewTransactions.length > 0 ? (
+                                                <TransactionCard tx={filteredReviewTransactions[currentCardIndex]} buckets={buckets} mainCategories={mainCategories} subCategories={subCategories} settings={settings} accounts={accounts} onChange={handleChange} onApprove={(id) => handleChange(id, 'isManuallyApproved', true)} onNext={() => setCurrentCardIndex(prev => Math.min(prev + 1, filteredReviewTransactions.length - 1))} onPrev={() => setCurrentCardIndex(prev => Math.max(prev - 1, 0))} isFirst={currentCardIndex === 0} isLast={currentCardIndex === filteredReviewTransactions.length - 1} />
+                                            ) : (
+                                                <div className="text-center py-10 text-slate-500">Inga transaktioner att visa.</div>
+                                            )}
+                                            <div className="text-center mt-4 text-sm text-slate-400">Kort {currentCardIndex + 1} av {filteredReviewTransactions.length}</div>
+                                        </div>
+                                    )}
                                 </div>
                             )}
                         </div>
@@ -1145,6 +1363,19 @@ export const TransactionsView: React.FC = () => {
                              <input type="number" placeholder="Min Belopp" className="bg-slate-800 border border-slate-600 rounded px-2 py-1.5 text-xs text-white outline-none" value={historyFilterAmountMin} onChange={(e) => setHistoryFilterAmountMin(e.target.value)} />
                              <input type="number" placeholder="Max Belopp" className="bg-slate-800 border border-slate-600 rounded px-2 py-1.5 text-xs text-white outline-none" value={historyFilterAmountMax} onChange={(e) => setHistoryFilterAmountMax(e.target.value)} />
                          </div>
+                         
+                         {/* Show Hidden Filter */}
+                         <div className="flex justify-end px-1">
+                             <label className="flex items-center gap-2 text-xs text-slate-400 cursor-pointer">
+                                 <input 
+                                    type="checkbox" 
+                                    checked={historyShowHidden} 
+                                    onChange={(e) => setHistoryShowHidden(e.target.checked)} 
+                                    className="rounded border-slate-600 bg-slate-800 text-blue-500 focus:ring-offset-0"
+                                 />
+                                 Visa dolda transaktioner
+                             </label>
+                         </div>
                      </div>
 
                      {/* Bulk Selection Actions */}
@@ -1200,7 +1431,8 @@ export const TransactionsView: React.FC = () => {
                                     className={cn(
                                         "bg-slate-800 p-3 rounded-lg border flex gap-3 items-start transition-all cursor-pointer group relative overflow-hidden",
                                         isSelected ? "border-blue-500 bg-blue-900/10" : "border-slate-700 hover:bg-slate-700/50",
-                                        isReimbursement ? "opacity-75 bg-slate-800/50 grayscale-[0.5]" : ""
+                                        isReimbursement ? "opacity-75 bg-slate-800/50 grayscale-[0.5]" : "",
+                                        tx.isHidden ? "opacity-60 border-dashed border-slate-600 bg-slate-800/20" : ""
                                     )}
                                     onClick={() => toggleHistorySelection(tx.id)}
                                  >
@@ -1211,6 +1443,7 @@ export const TransactionsView: React.FC = () => {
                                      <div className="flex-1 min-w-0">
                                          <div className="flex justify-between items-start">
                                              <div className="text-white font-medium truncate pr-2 group flex items-center gap-2">
+                                                {tx.isHidden && <EyeOff size={14} className="text-slate-500" />}
                                                 {isReimbursement ? (
                                                     <span className="flex items-center gap-1 text-slate-400 italic">
                                                         <Link size={12} /> {tx.description} (Täcker utlägg)
@@ -1243,6 +1476,9 @@ export const TransactionsView: React.FC = () => {
                                                  <div className={cn("font-mono font-bold whitespace-nowrap", isReimbursement ? "text-slate-500" : "text-white")}>
                                                      {isReimbursement ? formatMoney(0) : formatMoney(tx.amount + reimbursedAmount)}
                                                  </div>
+                                                 {tx.balance !== undefined && !isReimbursement && (
+                                                     <div className="text-[10px] text-slate-500 font-mono mt-0.5">Saldo: {formatMoney(tx.balance)}</div>
+                                                 )}
                                                  {(reimbursedAmount > 0 || isReimbursement) && (
                                                      <div className={cn("text-[10px] font-medium flex items-center justify-end gap-1", isReimbursement ? "text-slate-500 line-through" : "text-emerald-400")}>
                                                          <Link size={8} /> Original: {formatMoney(tx.amount)}
@@ -1578,6 +1814,30 @@ export const TransactionsView: React.FC = () => {
                                     {formatMoney(editingTransaction.amount)}
                                 </div>
                             </div>
+                        </div>
+
+                        {/* Visibility Toggle */}
+                        <div className="bg-slate-900/30 p-3 rounded-lg border border-slate-700/50">
+                            <label className="flex items-center justify-between cursor-pointer">
+                                <div>
+                                    <div className="text-sm text-slate-300 font-medium">Dölj transaktion</div>
+                                    <div className="text-[10px] text-slate-500">Exkludera från historik och statistik</div>
+                                </div>
+                                <div 
+                                    onClick={() => setEditIsHidden(!editIsHidden)}
+                                    className={cn(
+                                        "w-10 h-6 rounded-full p-1 transition-colors relative",
+                                        editIsHidden ? "bg-rose-500" : "bg-slate-600"
+                                    )}
+                                >
+                                    <div className={cn(
+                                        "w-4 h-4 bg-white rounded-full shadow-sm transition-transform flex items-center justify-center",
+                                        editIsHidden ? "translate-x-4" : ""
+                                    )}>
+                                        {editIsHidden ? <EyeOff size={10} className="text-rose-500"/> : <Eye size={10} className="text-slate-600"/>}
+                                    </div>
+                                </div>
+                            </label>
                         </div>
 
                         {editingTransaction.originalText && (

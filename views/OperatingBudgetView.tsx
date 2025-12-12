@@ -3,7 +3,7 @@ import React, { useMemo, useState } from 'react';
 import { useApp } from '../store';
 import { useBudgetMonth } from '../hooks/useBudgetMonth';
 import { formatMoney, getEffectiveBudgetGroupData, calculateFixedBucketCost, calculateDailyBucketCost, calculateGoalBucketCost, calculateReimbursementMap, getEffectiveAmount } from '../utils';
-import { ChevronRight, ChevronDown, Check, AlertTriangle, PieChart, Edit2, Plus, Trash2, Settings, ArrowRightLeft, Rocket, Calendar, Plane, RefreshCw, Lock, ChevronUp } from 'lucide-react';
+import { ChevronRight, ChevronDown, Check, AlertTriangle, PieChart, Edit2, Plus, Trash2, Settings, ArrowRightLeft, Rocket, Calendar, Plane, RefreshCw, Lock, ChevronUp, BarChart3 } from 'lucide-react';
 import { BudgetProgressBar } from '../components/BudgetProgressBar';
 import { cn, Button, Modal, Input } from '../components/components';
 import { BudgetGroup, SubCategory, Bucket } from '../types';
@@ -83,6 +83,7 @@ export const OperatingBudgetView: React.FC = () => {
   const data = useMemo(() => {
     // 1. Filter Transactions (Expenses Only for this Month Interval)
     const txForMonth = transactions.filter(t => {
+        if (t.isHidden) return false;
         const isExpense = t.type === 'EXPENSE' || (!t.type && t.amount < 0);
         const inRange = t.date >= startStr && t.date <= endStr;
         return isExpense && inRange;
@@ -99,6 +100,7 @@ export const OperatingBudgetView: React.FC = () => {
         // B. Calculate Spent PREVIOUSLY (Lifetime before current month start)
         // We use the global 'transactions' list for this, filtering by date < startStr
         const previousTxs = transactions.filter(t => 
+            !t.isHidden &&
             t.bucketId === b.id && 
             (t.type === 'EXPENSE' || t.amount < 0) &&
             t.date < startStr
@@ -152,8 +154,8 @@ export const OperatingBudgetView: React.FC = () => {
             // Handle unassigned subs within main
             const unassignedTxs = mainTxs.filter(t => !t.categorySubId);
             if (unassignedTxs.length > 0) {
-                const unSpent = unassignedTxs.reduce((sum, t) => sum + Math.abs(getEffectiveAmount(t, reimbursementMap)), 0);
-                subs.push({ id: 'unassigned', name: 'Övrigt', spent: unSpent, transactions: unassignedTxs });
+                const unTotal = unassignedTxs.reduce((sum, t) => sum + Math.abs(getEffectiveAmount(t, reimbursementMap)), 0);
+                subs.push({ id: 'unassigned', name: 'Övrigt', spent: unTotal, transactions: unassignedTxs });
             }
 
             return { id: mainId, name: mainCat?.name || 'Okänd', spent: mainSpent, subs };
@@ -399,7 +401,8 @@ export const OperatingBudgetView: React.FC = () => {
               name: '',
               icon: '📁',
               monthlyData: {},
-              linkedBucketIds: []
+              linkedBucketIds: [],
+              forecastType: 'VARIABLE'
           });
           setEditingLimit(0);
           setUseAutoLimit(false);
@@ -860,7 +863,7 @@ export const OperatingBudgetView: React.FC = () => {
                             onClick={() => setShowDetails(!showDetails)}
                             className="flex items-center justify-between w-full p-2 text-sm text-slate-400 hover:text-white transition-colors"
                         >
-                            <span className="flex items-center gap-2"><Settings className="w-4 h-4" /> Inställningar (Namn, Källa, etc)</span>
+                            <span className="flex items-center gap-2"><Settings className="w-4 h-4" /> Inställningar (Namn, Typ, Källa)</span>
                             {showDetails ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
                         </button>
                         
@@ -868,9 +871,41 @@ export const OperatingBudgetView: React.FC = () => {
                             <div className="space-y-4 pt-4 animate-in slide-in-from-top-2">
                                 <Input label="Namn" value={editingGroup.name} onChange={e => setEditingGroup({...editingGroup, name: e.target.value})} />
                                 
+                                {/* FORECAST TYPE SELECTOR */}
+                                <div>
+                                    <label className="text-xs font-bold text-slate-400 uppercase tracking-wider block mb-2">Prognostyp</label>
+                                    <div className="flex bg-slate-900 p-1 rounded-lg">
+                                        <button 
+                                            onClick={() => setEditingGroup({...editingGroup, forecastType: 'VARIABLE'})}
+                                            className={cn(
+                                                "flex-1 px-4 py-2 rounded-md text-xs font-bold transition-all flex items-center justify-center gap-2",
+                                                (!editingGroup.forecastType || editingGroup.forecastType === 'VARIABLE') ? "bg-indigo-600 text-white shadow" : "text-slate-400 hover:text-white"
+                                            )}
+                                        >
+                                            <BarChart3 size={14} />
+                                            Rörlig (Mat/Nöje)
+                                        </button>
+                                        <button 
+                                            onClick={() => setEditingGroup({...editingGroup, forecastType: 'FIXED'})}
+                                            className={cn(
+                                                "flex-1 px-4 py-2 rounded-md text-xs font-bold transition-all flex items-center justify-center gap-2",
+                                                editingGroup.forecastType === 'FIXED' ? "bg-blue-600 text-white shadow" : "text-slate-400 hover:text-white"
+                                            )}
+                                        >
+                                            <Calendar size={14} />
+                                            Fast (Räkningar)
+                                        </button>
+                                    </div>
+                                    <div className="mt-2 text-[10px] text-slate-500 italic px-1">
+                                        {(!editingGroup.forecastType || editingGroup.forecastType === 'VARIABLE') 
+                                            ? "Prognos baseras på snittförbrukning hittills + kvarvarande dagar." 
+                                            : "Prognos antar att hela budgetbeloppet kommer spenderas (om det inte redan överskridits)."}
+                                    </div>
+                                </div>
+
                                 {/* Auto Logic in Expanded Mode */}
                                 {calculatedFunding > 0 && (
-                                   <div className="bg-slate-800/50 p-3 rounded-xl border border-slate-700 flex justify-between items-center">
+                                   <div className="bg-slate-800/50 p-3 rounded-xl border border-slate-700 flex justify-between items-center mt-4">
                                        <div className="text-xs text-slate-400">
                                           <div>Finansiering (Kassaflöde)</div>
                                           <div className="font-mono text-white font-bold">{formatMoney(calculatedFunding)}</div>
@@ -1069,12 +1104,4 @@ export const OperatingBudgetView: React.FC = () => {
                           <Button variant="danger" className="w-full justify-start text-sm" onClick={() => handleDelete('THIS_MONTH')}>Enbart denna månad</Button>
                           <Button variant="danger" className="w-full justify-start text-sm" onClick={() => handleDelete('THIS_AND_FUTURE')}>Denna och framtida</Button>
                           <Button variant="danger" className="w-full justify-start text-sm" onClick={() => handleDelete('ALL')}>Radera helt</Button>
-                          <Button variant="secondary" className="w-full" onClick={() => setDeleteMode(false)}>Avbryt</Button>
-                      </div>
-                  )}
-              </div>
-          )}
-      </Modal>
-    </div>
-  );
-};
+                          <Button variant="secondary" className="w-full" onClick={() => setDeleteMode(false)}>Avbry

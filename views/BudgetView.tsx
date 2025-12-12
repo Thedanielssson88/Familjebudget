@@ -2,6 +2,7 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { useApp } from '../store';
 import { OperatingBudgetView } from './OperatingBudgetView';
+import { IncomeView } from './IncomeView';
 import { Bucket, BucketData, Account } from '../types';
 import { calculateDailyBucketCost, calculateFixedBucketCost, calculateGoalBucketCost, formatMoney, generateId, getBudgetInterval, isBucketActiveInMonth, getEffectiveBucketData, calculateSavedAmount } from '../utils';
 import { Card, Button, Input, Modal, cn } from '../components/components';
@@ -23,7 +24,7 @@ const DREAM_IMAGES = [
 ];
 
 export const BudgetView: React.FC = () => {
-  const [activeTab, setActiveTab] = useState<'transfers' | 'operating'>('transfers');
+  const [activeTab, setActiveTab] = useState<'income' | 'transfers' | 'operating'>('income');
 
   return (
     <div className="space-y-6 pb-24 animate-in slide-in-from-right duration-300">
@@ -32,36 +33,48 @@ export const BudgetView: React.FC = () => {
       <div className="flex flex-col gap-4">
           <header>
             <h1 className="text-3xl font-bold text-white mb-1">Budget & Ekonomi</h1>
-            <p className="text-slate-400 text-sm">Hantera dina överföringar och följ upp dina kostnader.</p>
+            <p className="text-slate-400 text-sm">Hantera inkomster, överföringar och utgifter.</p>
           </header>
 
-          <div className="bg-slate-800 p-1 rounded-xl flex gap-1 shadow-lg border border-slate-700">
+          <div className="bg-slate-800 p-1 rounded-xl flex gap-1 shadow-lg border border-slate-700 overflow-x-auto no-scrollbar">
+              <button 
+                onClick={() => setActiveTab('income')}
+                className={cn(
+                    "flex-1 py-3 px-4 rounded-lg text-sm font-bold flex items-center justify-center gap-2 transition-all whitespace-nowrap",
+                    activeTab === 'income' ? "bg-emerald-600 text-white shadow-md" : "text-slate-400 hover:text-white hover:bg-slate-700"
+                )}
+              >
+                  <Wallet size={16} />
+                  Inkomst
+              </button>
               <button 
                 onClick={() => setActiveTab('transfers')}
                 className={cn(
-                    "flex-1 py-3 px-4 rounded-lg text-sm font-bold flex items-center justify-center gap-2 transition-all",
+                    "flex-1 py-3 px-4 rounded-lg text-sm font-bold flex items-center justify-center gap-2 transition-all whitespace-nowrap",
                     activeTab === 'transfers' ? "bg-blue-600 text-white shadow-md" : "text-slate-400 hover:text-white hover:bg-slate-700"
                 )}
               >
                   <ArrowRightLeft size={16} />
-                  Kassaflöde (Lön)
+                  Kassaflöde
               </button>
               <button 
                 onClick={() => setActiveTab('operating')}
                 className={cn(
-                    "flex-1 py-3 px-4 rounded-lg text-sm font-bold flex items-center justify-center gap-2 transition-all",
-                    activeTab === 'operating' ? "bg-emerald-600 text-white shadow-md" : "text-slate-400 hover:text-white hover:bg-slate-700"
+                    "flex-1 py-3 px-4 rounded-lg text-sm font-bold flex items-center justify-center gap-2 transition-all whitespace-nowrap",
+                    activeTab === 'operating' ? "bg-indigo-600 text-white shadow-md" : "text-slate-400 hover:text-white hover:bg-slate-700"
                 )}
               >
                   <PieChart size={16} />
-                  Drift (Uppföljning)
+                  Drift
               </button>
           </div>
       </div>
 
       {/* VIEW CONTENT */}
       <div className="min-h-[400px]">
-          {activeTab === 'transfers' ? (
+          {activeTab === 'income' ? (
+              <IncomeView />
+          ) : activeTab === 'transfers' ? (
               <TransfersViewContent />
           ) : (
               <OperatingBudgetView />

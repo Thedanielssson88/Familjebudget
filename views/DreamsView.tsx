@@ -1,12 +1,11 @@
 
-
 import React, { useEffect, useState, useMemo } from 'react';
 import { useApp } from '../store';
 import { calculateSavedAmount, calculateGoalBucketCost, formatMoney, generateId, calculateReimbursementMap, getEffectiveAmount } from '../utils';
 import { PieChart, Pie, Cell, ResponsiveContainer } from 'recharts';
 import { format, parseISO, isValid, addMonths, differenceInMonths } from 'date-fns';
 import { sv } from 'date-fns/locale';
-import { Archive, CheckCircle, Pause, Play, Rocket, TrendingUp, Calendar, Trash2, Settings, Save, Search, Receipt, CheckSquare, Square, X, Unlink, Wallet, PiggyBank, PieChart as PieChartIcon, ChevronDown, ChevronRight, Plus, Target, Image as ImageIcon } from 'lucide-react';
+import { Archive, CheckCircle, Pause, Play, Rocket, TrendingUp, Calendar, Trash2, Settings, Save, Search, Receipt, CheckSquare, Square, X, Unlink, Wallet, PiggyBank, PieChart as PieChartIcon, ChevronDown, ChevronRight, Plus, Target, Image as ImageIcon, Link } from 'lucide-react';
 import { cn, Button, Modal, Input } from '../components/components';
 import { Bucket, Transaction } from '../types';
 
@@ -476,12 +475,17 @@ const DreamCard: React.FC<DreamCardProps> = ({ goal, isArchived, selectedMonth, 
 };
 
 export const DreamsView: React.FC = () => {
-    const { buckets, updateBucket, deleteBucket, archiveBucket, selectedMonth, addBucket, accounts } = useApp();
+    const { buckets, updateBucket, deleteBucket, archiveBucket, selectedMonth, addBucket, accounts, transactions, updateTransaction } = useApp();
     const [showArchived, setShowArchived] = useState(false);
     
     // Edit/Create Modal State
     const [isEditModalOpen, setIsEditModalOpen] = useState(false);
     const [editingGoal, setEditingGoal] = useState<Bucket | null>(null);
+
+    // Manual Linker State (Inside Edit Modal)
+    const [candidateTxs, setCandidateTxs] = useState<Transaction[]>([]);
+    const [selectedCandidateIds, setSelectedCandidateIds] = useState<Set<string>>(new Set());
+    const [hasScanned, setHasScanned] = useState(false);
 
     const goals = useMemo(() => {
         return buckets
@@ -489,8 +493,6 @@ export const DreamsView: React.FC = () => {
             .filter(b => showArchived ? !!b.archivedDate : !b.archivedDate)
             .sort((a, b) => (a.targetDate || '') > (b.targetDate || '') ? 1 : -1);
     }, [buckets, showArchived]);
-
-    const { transactions } = useApp();
 
     const handleArchive = (id: string, name: string) => {
         if (confirm(`Är du säker på att du vill arkivera "${name}"? Det avslutar sparandet men sparar historiken.`)) {
@@ -505,6 +507,11 @@ export const DreamsView: React.FC = () => {
     };
 
     const openEditModal = (goal?: Bucket) => {
+        // Reset Linker State
+        setCandidateTxs([]);
+        setSelectedCandidateIds(new Set());
+        setHasScanned(false);
+
         if (goal) {
             setEditingGoal(goal);
         } else {
@@ -535,6 +542,72 @@ export const DreamsView: React.FC = () => {
             await addBucket(editingGoal);
         }
         setIsEditModalOpen(false);
+    };
+
+    // --- MANUAL LINKER LOGIC ---
+    const handleScanForTransactions = () => {
+        if (!editingGoal?.eventStartDate || !editingGoal.eventEndDate || !editingGoal.id) return;
+        
+        const start = editingGoal.eventStartDate;
+        const end = editingGoal.eventEndDate;
+
+        // Find Expenses within range that are either unlinked OR linked to this specific goal
+        const candidates = transactions.filter(t => {
+            const inRange = t.date >= start && t.date <= end;
+            // Logic: Expense usually means negative amount. 
+            // Also strictly exclude transfers/incomes if typed.
+            const isExpense = t.amount < 0 && t.type !== 'INCOME' && t.type !== 'TRANSFER'; 
+            
+            const linkedToThis = t.bucketId === editingGoal.id;
+            const notLinked = !t.bucketId;
+
+            // Note: The prompt says "show transactions from all accounts", not just the one linked to the goal.
+            return inRange && isExpense && (linkedToThis || notLinked);
+        }).sort((a,b) => b.date.localeCompare(a.date));
+
+        setCandidateTxs(candidates);
+        setHasScanned(true);
+        
+        // Pre-select those that are already linked
+        const preSelected = new Set(candidates.filter(t => t.bucketId === editingGoal.id).map(t => t.id));
+        setSelectedCandidateIds(preSelected);
+    };
+
+    const toggleCandidateSelection = (id: string) => {
+        const next = new Set(selectedCandidateIds);
+        if (next.has(id)) next.delete(id); else next.add(id);
+        setSelectedCandidateIds(next);
+    };
+
+    const handleSaveLinkedTransactions = async () => {
+        if (!editingGoal) return;
+        
+        const updates = candidateTxs.map(tx => {
+            const isSelected = selectedCandidateIds.has(tx.id);
+            const isCurrentlyLinked = tx.bucketId === editingGoal.id;
+
+            if (isSelected && !isCurrentlyLinked) {
+                // Link it
+                return updateTransaction({
+                    ...tx,
+                    bucketId: editingGoal.id,
+                    type: 'EXPENSE' // Ensure it is treated as expense
+                });
+            } else if (!isSelected && isCurrentlyLinked) {
+                // Unlink it
+                return updateTransaction({
+                    ...tx,
+                    bucketId: undefined
+                });
+            }
+            return Promise.resolve();
+        });
+        
+        await Promise.all(updates);
+        
+        // Refresh scan to show updated state (visual feedback)
+        handleScanForTransactions();
+        alert(`Uppdaterade kopplingar för drömmen.`);
     };
 
     return (
@@ -624,19 +697,20 @@ export const DreamsView: React.FC = () => {
                             <Input label="Slutdatum (Mål)" type="month" value={editingGoal.targetDate} onChange={e => setEditingGoal({...editingGoal, targetDate: e.target.value})} />
                         </div>
 
-                        {/* Event Dates (Optional) */}
+                        {/* Event Dates (With Manual Linker) */}
                         <div className="bg-slate-800/50 p-3 rounded-xl border border-slate-700/50 space-y-3">
                             <div className="flex items-center gap-2 text-purple-300">
                                 <Calendar size={16} />
                                 <span className="text-xs font-bold uppercase">Resa / Event (Datum)</span>
                             </div>
                             <p className="text-[10px] text-slate-400">
-                                Om detta är en resa, ange exakta datum här för att automatiskt koppla korttransaktioner under resan till detta mål.
+                                Ange exakta datum för att automatiskt koppla korttransaktioner under resan (vid import), eller sök upp befintliga transaktioner manuellt.
                             </p>
                             <div className="grid grid-cols-2 gap-4">
                                 <Input label="Start (Dag)" type="date" value={editingGoal.eventStartDate || ''} onChange={e => setEditingGoal({...editingGoal, eventStartDate: e.target.value})} />
                                 <Input label="Slut (Dag)" type="date" value={editingGoal.eventEndDate || ''} onChange={e => setEditingGoal({...editingGoal, eventEndDate: e.target.value})} />
                             </div>
+                            
                             <label className="flex items-center gap-2 text-xs text-slate-300 cursor-pointer">
                                 <input 
                                     type="checkbox" 
@@ -644,40 +718,109 @@ export const DreamsView: React.FC = () => {
                                     onChange={(e) => setEditingGoal({...editingGoal, autoTagEvent: e.target.checked})}
                                     className="rounded border-slate-600 bg-slate-900 text-purple-500 focus:ring-purple-500"
                                 />
-                                Auto-koppla transaktioner under dessa datum
+                                Auto-koppla vid import
                             </label>
+
+                            {/* MANUAL LINKER SECTION */}
+                            <div className="pt-2 border-t border-slate-700/50">
+                                <Button 
+                                    variant="secondary" 
+                                    onClick={handleScanForTransactions}
+                                    disabled={!editingGoal.eventStartDate || !editingGoal.eventEndDate}
+                                    className="w-full text-xs h-auto py-2"
+                                >
+                                    <Search size={12} className="mr-2"/> Hitta utgifter i intervallet
+                                </Button>
+
+                                {hasScanned && (
+                                    <div className="mt-3 bg-slate-900 rounded-lg border border-slate-700 overflow-hidden animate-in slide-in-from-top-2">
+                                        {candidateTxs.length === 0 ? (
+                                            <div className="p-3 text-center text-xs text-slate-500">Inga utgifter hittades inom intervallet.</div>
+                                        ) : (
+                                            <>
+                                                <div className="p-2 bg-slate-800 border-b border-slate-700 flex justify-between items-center">
+                                                    <span className="text-[10px] font-bold uppercase text-slate-400">Hittade ({candidateTxs.length})</span>
+                                                    <button 
+                                                        onClick={() => {
+                                                            if (selectedCandidateIds.size === candidateTxs.length) setSelectedCandidateIds(new Set());
+                                                            else setSelectedCandidateIds(new Set(candidateTxs.map(t => t.id)));
+                                                        }}
+                                                        className="text-[10px] text-purple-300 hover:text-purple-200"
+                                                    >
+                                                        {selectedCandidateIds.size === candidateTxs.length ? "Avmarkera alla" : "Välj alla"}
+                                                    </button>
+                                                </div>
+                                                <div className="max-h-40 overflow-y-auto no-scrollbar p-1 space-y-1">
+                                                    {candidateTxs.map(tx => {
+                                                        const account = accounts.find(a => a.id === tx.accountId);
+                                                        return (
+                                                        <div 
+                                                            key={tx.id} 
+                                                            onClick={() => toggleCandidateSelection(tx.id)}
+                                                            className={cn(
+                                                                "flex items-center gap-2 p-2 rounded cursor-pointer transition-colors border",
+                                                                selectedCandidateIds.has(tx.id) ? "bg-purple-900/30 border-purple-500/50" : "bg-transparent border-transparent hover:bg-white/5"
+                                                            )}
+                                                        >
+                                                            <div className={cn("w-3 h-3 rounded-sm border flex items-center justify-center", selectedCandidateIds.has(tx.id) ? "bg-purple-500 border-purple-500" : "border-slate-600")}>
+                                                                {selectedCandidateIds.has(tx.id) && <CheckCircle size={8} className="text-white"/>}
+                                                            </div>
+                                                            <div className="flex-1 min-w-0">
+                                                                <div className="text-xs text-white truncate">{tx.description}</div>
+                                                                <div className="text-[10px] text-slate-500 flex items-center gap-1">
+                                                                    <span>{tx.date}</span>
+                                                                    <span className="text-slate-600">•</span>
+                                                                    <span>{account?.icon} {account?.name}</span>
+                                                                </div>
+                                                            </div>
+                                                            <div className="text-xs font-mono text-slate-300">{formatMoney(tx.amount)}</div>
+                                                        </div>
+                                                    )})}
+                                                </div>
+                                                <div className="p-2 border-t border-slate-700">
+                                                    <Button 
+                                                        onClick={handleSaveLinkedTransactions}
+                                                        className="w-full text-xs h-8 bg-purple-600 hover:bg-purple-500"
+                                                    >
+                                                        <Save size={12} className="mr-2"/> Spara kopplingar ({selectedCandidateIds.size})
+                                                    </Button>
+                                                </div>
+                                            </>
+                                        )}
+                                    </div>
+                                )}
+                            </div>
                         </div>
 
                         {/* Payment Source */}
-                        <div className="space-y-2">
-                            <label className="text-xs font-medium text-slate-400 uppercase tracking-wider block">Finansiering</label>
+                        <div className="space-y-3 pt-2">
+                            <div className="text-xs font-medium text-slate-400 uppercase">Finansiering</div>
                             <div className="flex flex-col gap-2">
                                 <button 
-                                    onClick={() => setEditingGoal({...editingGoal, paymentSource: 'INCOME'})}
-                                    className={cn("p-3 rounded-xl border text-left flex items-center gap-3 transition-colors", (!editingGoal.paymentSource || editingGoal.paymentSource === 'INCOME') ? "bg-emerald-500/20 border-emerald-500 text-white" : "border-slate-700 text-slate-400 hover:bg-slate-800")}
+                                onClick={() => setEditingGoal({...editingGoal, paymentSource: 'INCOME'})}
+                                className={cn("p-3 rounded-xl border text-left flex items-center gap-3", (!editingGoal.paymentSource || editingGoal.paymentSource === 'INCOME') ? "bg-purple-500/20 border-purple-500 text-white" : "border-slate-700 text-slate-400")}
                                 >
                                     <Wallet className="w-5 h-5" />
                                     <div>
-                                        <div className="font-bold text-sm">Från Månadslön</div>
-                                        <div className="text-[10px] opacity-70">Minskar månadens utrymme</div>
+                                        <div className="font-bold text-sm">Från Månadslön (Budget)</div>
+                                        <div className="text-[10px] opacity-70">Skapar ett månadssparande som minskar fickpengar</div>
                                     </div>
                                 </button>
                                 <button 
-                                    onClick={() => setEditingGoal({...editingGoal, paymentSource: 'BALANCE'})}
-                                    className={cn("p-3 rounded-xl border text-left flex items-center gap-3 transition-colors", editingGoal.paymentSource === 'BALANCE' ? "bg-amber-500/20 border-amber-500 text-white" : "border-slate-700 text-slate-400 hover:bg-slate-800")}
+                                onClick={() => setEditingGoal({...editingGoal, paymentSource: 'BALANCE'})}
+                                className={cn("p-3 rounded-xl border text-left flex items-center gap-3", editingGoal.paymentSource === 'BALANCE' ? "bg-amber-500/20 border-amber-500 text-white" : "border-slate-700 text-slate-400")}
                                 >
                                     <PiggyBank className="w-5 h-5" />
                                     <div>
-                                        <div className="font-bold text-sm">Från Saldo / Sparade Medel</div>
-                                        <div className="text-[10px] opacity-70">Påverkar ej budgeten (Bara uppföljning)</div>
+                                        <div className="font-bold text-sm">Från Kontosaldo / Sparade Medel</div>
+                                        <div className="text-[10px] opacity-70">Påverkar ej månadens utrymme. Enbart för uppföljning av spenderande.</div>
                                     </div>
                                 </button>
                             </div>
                         </div>
 
-                        {/* Background Image Selection */}
                         <div className="space-y-2">
-                            <label className="text-xs font-medium text-slate-400 uppercase tracking-wider block">Välj Tema</label>
+                            <label className="text-xs font-medium text-slate-400 uppercase tracking-wider">Välj Bild</label>
                             <div className="flex gap-2 overflow-x-auto pb-2 no-scrollbar">
                                 {DREAM_IMAGES.map((img, i) => (
                                     <button 
@@ -691,7 +834,7 @@ export const DreamsView: React.FC = () => {
                             </div>
                         </div>
 
-                        <Button onClick={handleSaveGoal} disabled={!editingGoal.name} className="w-full mt-4">Spara Dröm</Button>
+                        <Button onClick={handleSaveGoal} disabled={!editingGoal.name} className="w-full bg-purple-600 hover:bg-purple-500">Spara Dröm</Button>
                     </div>
                 )}
             </Modal>

@@ -1,5 +1,6 @@
+
 import { format } from 'date-fns';
-import { Transaction, ImportRule, Bucket, MainCategory, SubCategory } from '../types';
+import { Transaction, ImportRule, Bucket, MainCategory, SubCategory, TransactionType } from '../types';
 import { generateId } from '../utils';
 import { db } from '../db';
 import * as XLSX from 'xlsx'; // Använd statisk import för stabilitet
@@ -68,6 +69,7 @@ export const parseBankFile = async (file: File, accountId: string): Promise<Tran
                             const dateIdx = headerRow.findIndex((c: any) => c?.toString().toLowerCase().includes('datum'));
                             const textIdx = headerRow.findIndex((c: any) => c?.toString().toLowerCase().includes('text') || c?.toString().toLowerCase().includes('rubrik'));
                             const amountIdx = headerRow.findIndex((c: any) => c?.toString().toLowerCase().includes('belopp'));
+                            const balanceIdx = headerRow.findIndex((c: any) => c?.toString().toLowerCase().includes('saldo') || c?.toString().toLowerCase().includes('balance'));
 
                             // Fallback om vi inte hittar exakta rubriker (gissa baserat på din filstruktur)
                             // Din fil: ,Datum,Kategori,Underkategori,Text,Belopp...
@@ -75,6 +77,7 @@ export const parseBankFile = async (file: File, accountId: string): Promise<Tran
                             const dIdx = dateIdx > -1 ? dateIdx : 1;
                             const tIdx = textIdx > -1 ? textIdx : 4;
                             const aIdx = amountIdx > -1 ? amountIdx : 5;
+                            // No fallback for balance if not found, it is optional
 
                             const dataRows = results.data.slice(headerRowIndex + 1);
                             
@@ -87,6 +90,7 @@ export const parseBankFile = async (file: File, accountId: string): Promise<Tran
                                     date: parseDate(row[dIdx]),
                                     description: row[tIdx] || 'Okänd transaktion',
                                     amount: parseAmount(row[aIdx]),
+                                    balance: balanceIdx > -1 ? parseAmount(row[balanceIdx]) : undefined,
                                     isVerified: false,
                                     source: 'import' as const
                                 };
@@ -131,6 +135,7 @@ export const parseBankFile = async (file: File, accountId: string): Promise<Tran
                     const dateIdx = headerRow.findIndex((c: any) => c?.toString().toLowerCase().includes('datum'));
                     const textIdx = headerRow.findIndex((c: any) => c?.toString().toLowerCase().includes('text') || c?.toString().toLowerCase().includes('rubrik'));
                     const amountIdx = headerRow.findIndex((c: any) => c?.toString().toLowerCase().includes('belopp'));
+                    const balanceIdx = headerRow.findIndex((c: any) => c?.toString().toLowerCase().includes('saldo') || c?.toString().toLowerCase().includes('balance'));
 
                     const dIdx = dateIdx > -1 ? dateIdx : 0;
                     const tIdx = textIdx > -1 ? textIdx : 3;
@@ -143,6 +148,7 @@ export const parseBankFile = async (file: File, accountId: string): Promise<Tran
                          date: parseDate(row[dIdx]),
                          description: (row[tIdx] || '').toString(),
                          amount: parseAmount(row[aIdx]),
+                         balance: balanceIdx > -1 ? parseAmount(row[balanceIdx]) : undefined,
                          isVerified: false,
                          source: 'import' as const
                     })).filter(t => t.amount !== 0);
@@ -211,23 +217,39 @@ export const runImportPipeline = async (
     existingTransactions: Transaction[],
     rules: ImportRule[],
     buckets: Bucket[]
-): Promise<Transaction[]> => {
+): Promise<{ newTransactions: Transaction[], updatedTransactions: Transaction[] }> => {
     
-    // 1. DUPLICATE CHECK
-    // IMPORTANT: We check against 'originalText' (if renamed) AND 'originalDate' (if date changed)
-    // to match against the raw data from the file.
-    const existingHashes = new Set(existingTransactions.map(t => 
-        `${t.originalDate || t.date}_${t.amount}_${(t.originalText || t.description).trim()}`
-    ));
-    
-    let processed = rawTransactions.filter(t => {
-        // Raw transactions from file always have the bank text in 'description' and date in 'date'.
+    // 1. DUPLICATE & UPDATE CHECK
+    const existingMap = new Map<string, Transaction>();
+    existingTransactions.forEach(t => {
+        const hash = `${t.originalDate || t.date}_${t.amount}_${(t.originalText || t.description).trim()}`;
+        existingMap.set(hash, t);
+    });
+
+    const toCreate: Transaction[] = [];
+    const toUpdate: Transaction[] = [];
+
+    rawTransactions.forEach(t => {
         const hash = `${t.date}_${t.amount}_${t.description.trim()}`;
-        return !existingHashes.has(hash);
+        const existing = existingMap.get(hash);
+
+        if (existing) {
+            // Check if we should update the balance
+            // If existing lacks balance AND incoming has balance
+            if (existing.balance === undefined && t.balance !== undefined) {
+                toUpdate.push({
+                    ...existing,
+                    balance: t.balance
+                });
+            }
+            // Otherwise, it's a duplicate, do nothing
+        } else {
+            toCreate.push(t);
+        }
     });
 
     // 2. APPLY RULES (Highest Priority)
-    processed = processed.map(t => {
+    let processed = toCreate.map((t): Transaction => {
         const lowerDesc = t.description.toLowerCase();
         const txSign = t.amount < 0 ? 'negative' : 'positive';
 
@@ -253,7 +275,7 @@ export const runImportPipeline = async (
         });
 
         if (matchedRule) {
-            const type = matchedRule.targetType || (matchedRule.targetBucketId ? 'TRANSFER' : 'EXPENSE');
+            const type: TransactionType = matchedRule.targetType || (matchedRule.targetBucketId ? 'TRANSFER' : 'EXPENSE');
             
             if (type === 'TRANSFER') {
                 return { 
@@ -319,9 +341,6 @@ export const runImportPipeline = async (
         // If already matched by Rule, skip completely.
         if (t.matchType === 'rule') return t;
 
-        // If matched by History or Event, we still might want to run AI for category if missing?
-        // But for now, let's respect previous matches for Type.
-        
         const lowerDesc = t.description.toLowerCase();
 
         // A. Smart Transfer Detection (Keywords)
@@ -360,5 +379,8 @@ export const runImportPipeline = async (
         return t;
     });
 
-    return processed;
+    return { 
+        newTransactions: processed,
+        updatedTransactions: toUpdate
+    };
 };

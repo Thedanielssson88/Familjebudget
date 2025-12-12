@@ -1,3 +1,4 @@
+
 import React, { useState, useMemo } from 'react';
 import { useApp } from '../store';
 import { useBudgetMonth } from '../hooks/useBudgetMonth';
@@ -91,7 +92,7 @@ export const IncomeView: React.FC = () => {
   };
 
   return (
-    <div className="space-y-6 pb-24 animate-in slide-in-from-right duration-300">
+    <div className="space-y-6 animate-in slide-in-from-right duration-300">
       <header className="mb-6">
         <div className="flex items-center justify-between">
             <div>

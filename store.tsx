@@ -1,3 +1,4 @@
+
 import React, { createContext, useContext, useEffect, useState } from 'react';
 import { Account, AppSettings, Bucket, GlobalState, User, MonthKey, Transaction, ImportRule, MainCategory, SubCategory, BudgetGroup, BudgetGroupData, IgnoredSubscription } from './types';
 import { format, addMonths, parseISO } from 'date-fns';
@@ -66,6 +67,7 @@ const AppSettingsSchema = z.object({
   autoApproveIncome: z.boolean().optional(),
   autoApproveTransfer: z.boolean().optional(),
   autoApproveExpense: z.boolean().optional(),
+  autoApproveSmartTransfers: z.boolean().optional(),
 });
 
 const MainCategorySchema = z.object({
@@ -93,7 +95,8 @@ const BudgetGroupSchema = z.object({
     name: z.string(),
     monthlyData: z.record(z.string(), BudgetGroupDataSchema).optional().default({}),
     isCatchAll: z.boolean().optional(),
-    icon: z.string().optional()
+    icon: z.string().optional(),
+    forecastType: z.enum(['FIXED', 'VARIABLE']).optional()
 });
 
 const TransactionSchema = z.object({
@@ -102,6 +105,7 @@ const TransactionSchema = z.object({
     date: z.string(),
     amount: z.number(),
     description: z.string(),
+    balance: z.number().optional(), // Added balance
     type: z.enum(['EXPENSE', 'TRANSFER', 'INCOME']).optional(),
     linkedTransactionId: z.string().optional(),
     linkedExpenseId: z.string().optional(),
@@ -111,7 +115,8 @@ const TransactionSchema = z.object({
     isVerified: z.boolean(),
     source: z.enum(['manual', 'import']),
     originalText: z.string().optional(),
-    originalDate: z.string().optional()
+    originalDate: z.string().optional(),
+    isHidden: z.boolean().optional()
 });
 
 const ImportRuleSchema = z.object({
@@ -195,7 +200,8 @@ const defaultSettings: AppSettings = {
     payday: 25,
     autoApproveIncome: false,
     autoApproveTransfer: false,
-    autoApproveExpense: true 
+    autoApproveExpense: true,
+    autoApproveSmartTransfers: true // Default to true as it is very useful
 };
 
 // Helper for chunking arrays
@@ -347,9 +353,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
         if (loadedGroups.length === 0) {
             const defaultGroups: BudgetGroup[] = [
-                { id: generateId(), name: 'Hushåll & Drift', monthlyData: { "2023-01": { limit: 15000 } }, icon: '🏠' },
-                { id: generateId(), name: 'Nöje & Lyx', monthlyData: { "2023-01": { limit: 5000 } }, icon: '🎉' },
-                { id: generateId(), name: 'Övrigt / Obudgeterat', monthlyData: { "2023-01": { limit: 0 } }, isCatchAll: true, icon: '❓' }
+                { id: generateId(), name: 'Hushåll & Drift', monthlyData: { "2023-01": { limit: 15000 } }, icon: '🏠', forecastType: 'FIXED' },
+                { id: generateId(), name: 'Nöje & Lyx', monthlyData: { "2023-01": { limit: 5000 } }, icon: '🎉', forecastType: 'VARIABLE' },
+                { id: generateId(), name: 'Övrigt / Obudgeterat', monthlyData: { "2023-01": { limit: 0 } }, isCatchAll: true, icon: '❓', forecastType: 'VARIABLE' }
             ];
             await db.budgetGroups.bulkAdd(defaultGroups);
             loadedGroups = defaultGroups;
@@ -599,7 +605,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           icon,
           monthlyData: {
              [selectedMonth]: { limit, isExplicitlyDeleted: false }
-          }
+          },
+          forecastType: 'VARIABLE' // Default
       };
       await db.budgetGroups.add(newGroup);
       setBudgetGroups(prev => [...prev, newGroup]);

@@ -1,23 +1,25 @@
+
 import React, { useState, useEffect } from 'react';
 import { AppProvider, useApp } from './store';
-import { IncomeView } from './views/IncomeView';
+import { IncomeView } from './views/IncomeView'; // Still needed if referenced, but actually we can remove if only BudgetView uses it. Wait, BudgetView imports it.
 import { BudgetView } from './views/BudgetView';
-import { DashboardView } from './views/DashboardView';
+import { DashboardView } from './views/DashboardView'; // Keep file name, rename UI
+import { HomeDashboardView } from './views/HomeDashboardView'; // NEW
 import { StatsView } from './views/StatsView';
 import { DreamsView } from './views/DreamsView';
 import { TransactionsView } from './views/TransactionsView';
 import { SettingsCategories } from './views/SettingsCategories';
 import { OperatingBudgetView } from './views/OperatingBudgetView';
-import { LayoutGrid, Wallet, PieChart, ArrowLeftRight, Calendar, Settings, Sparkles, Cloud, RefreshCw, Trash2, Download, Receipt, Database, AlertTriangle } from 'lucide-react';
+import { LayoutGrid, Wallet, PieChart, ArrowLeftRight, Calendar, Settings, Sparkles, Cloud, RefreshCw, Trash2, Download, Receipt, Database, AlertTriangle, Home } from 'lucide-react';
 import { cn, Button } from './components/components';
 import { format, subMonths, addMonths } from 'date-fns';
 import { sv } from 'date-fns/locale';
 import { initGoogleDrive, loginToGoogle, listBackups, createBackupFile, loadBackupFile, deleteBackupFile, DriveFile } from './services/googleDrive';
 
-type View = 'income' | 'budget' | 'dashboard' | 'dreams' | 'transactions';
+type View = 'home' | 'budget' | 'dashboard' | 'dreams' | 'transactions';
 
 const MainApp = () => {
-  const [currentView, setCurrentView] = useState<View>('dashboard');
+  const [currentView, setCurrentView] = useState<View>('home');
   const { selectedMonth, setMonth, settings, setPayday, updateSettings, getExportData, importData, deleteAllTransactions } = useApp();
   const [showSettings, setShowSettings] = useState(false);
   
@@ -89,8 +91,11 @@ const MainApp = () => {
           const success = await importData(jsonContent);
           
           if (success) {
-              setBackupStatus('Återställd!');
-              window.location.reload(); // Reload to refresh state cleanly
+              setBackupStatus('Återställd! Laddar om...');
+              // Give the user a moment to see the success message before reloading
+              setTimeout(() => {
+                  window.location.reload(); 
+              }, 2000);
           } else {
               setBackupStatus('Filen var ogiltig');
           }
@@ -137,12 +142,12 @@ const MainApp = () => {
   
   const renderView = () => {
     switch (currentView) {
-      case 'income': return <IncomeView />;
+      case 'home': return <HomeDashboardView onNavigate={setCurrentView} />;
       case 'budget': return <BudgetView />; 
       case 'dashboard': return <DashboardView />;
       case 'dreams': return <DreamsView />;
       case 'transactions': return <TransactionsView />;
-      default: return <DashboardView />;
+      default: return <HomeDashboardView onNavigate={setCurrentView} />;
     }
   };
 
@@ -215,12 +220,25 @@ const MainApp = () => {
                         </div>
 
                         <div className="flex items-center justify-between bg-slate-800 p-3 rounded-lg border border-slate-700">
-                            <span className="text-sm">Överföringar</span>
+                            <span className="text-sm">Överföringar (Via Regel)</span>
                             <div 
                                 className={cn("w-10 h-6 rounded-full p-1 cursor-pointer transition-colors", settings.autoApproveTransfer ? "bg-emerald-500" : "bg-slate-700")}
                                 onClick={() => updateSettings({ autoApproveTransfer: !settings.autoApproveTransfer })}
                             >
                                 <div className={cn("w-4 h-4 bg-white rounded-full shadow-md transform transition-transform", settings.autoApproveTransfer ? "translate-x-4" : "")} />
+                            </div>
+                        </div>
+
+                        <div className="flex items-center justify-between bg-slate-800 p-3 rounded-lg border border-slate-700">
+                            <span className="text-sm flex flex-col">
+                                <span>Smarta Överföringar</span>
+                                <span className="text-[10px] text-slate-500">Länka liknande par automatiskt</span>
+                            </span>
+                            <div 
+                                className={cn("w-10 h-6 rounded-full p-1 cursor-pointer transition-colors", settings.autoApproveSmartTransfers ? "bg-emerald-500" : "bg-slate-700")}
+                                onClick={() => updateSettings({ autoApproveSmartTransfers: !settings.autoApproveSmartTransfers })}
+                            >
+                                <div className={cn("w-4 h-4 bg-white rounded-full shadow-md transform transition-transform", settings.autoApproveSmartTransfers ? "translate-x-4" : "")} />
                             </div>
                         </div>
                     </div>
@@ -324,9 +342,9 @@ const MainApp = () => {
       </main>
 
       {/* BOTTOM NAV */}
-      <nav className="fixed bottom-0 left-0 right-0 bg-surface/90 backdrop-blur-lg border-t border-slate-800 pb-safe pt-2 px-4 pb-6 z-50">
+      <nav className="fixed bottom-0 left-0 right-0 bg-surface/90 backdrop-blur-lg border-t border-slate-800 pb-safe pt-2 px-2 pb-6 z-50">
         <div className="flex justify-between items-center max-w-lg mx-auto">
-            <NavButton active={currentView === 'income'} onClick={() => setCurrentView('income')} icon={<Wallet />} label="Inkomst" />
+            <NavButton active={currentView === 'home'} onClick={() => setCurrentView('home')} icon={<Home />} label="Hem" />
             <NavButton active={currentView === 'budget'} onClick={() => setCurrentView('budget')} icon={<PieChart />} label="Budget" />
             <NavButton active={currentView === 'dashboard'} onClick={() => setCurrentView('dashboard')} icon={<LayoutGrid />} label="Översikt" />
             <NavButton active={currentView === 'dreams'} onClick={() => setCurrentView('dreams')} icon={<Sparkles />} label="Drömmar" />
@@ -343,9 +361,9 @@ const NavButton = ({ active, onClick, icon, label }: { active: boolean, onClick:
         className={cn("flex flex-col items-center gap-1 transition-all duration-200 w-16", active ? "text-blue-400 scale-110" : "text-slate-500 hover:text-slate-300")}
     >
         <div className={cn("p-1 rounded-xl transition-all", active && "bg-blue-500/10")}>
-            {React.cloneElement(icon as React.ReactElement<any>, { size: 24, strokeWidth: active ? 2.5 : 2 })}
+            {React.cloneElement(icon as React.ReactElement<any>, { size: 22, strokeWidth: active ? 2.5 : 2 })}
         </div>
-        <span className="text-[10px] font-medium">{label}</span>
+        <span className="text-[9px] font-medium">{label}</span>
     </button>
 );
 

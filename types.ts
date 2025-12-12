@@ -1,5 +1,4 @@
 
-
 export type MonthKey = string; // Format: "YYYY-MM"
 
 export interface User {
@@ -72,12 +71,12 @@ export interface BudgetGroupData {
 export interface BudgetGroup {
   id: string;
   name: string;
-  // monthlyLimit: number; // DEPRECATED: Replaced by monthlyData
   monthlyData: Record<MonthKey, BudgetGroupData>; 
   // LINK TO CASH FLOW: Which buckets fund this group?
   linkedBucketIds?: string[];
   isCatchAll?: boolean; // If true, this is the "Other/Unbudgeted" group
-  icon?: string; 
+  icon?: string;
+  forecastType?: 'FIXED' | 'VARIABLE'; // Determines how forecast calculates projection
 }
 
 export interface SubCategory {
@@ -98,6 +97,8 @@ export interface Transaction {
   amount: number;
   description: string;
   
+  balance?: number; // Account balance after transaction
+
   type?: TransactionType; // New: Distinguish between consumption (Expense) and movement (Transfer)
   
   linkedTransactionId?: string; // If matched with another transaction (e.g. internal transfer)
@@ -121,6 +122,8 @@ export interface Transaction {
   aiSuggested?: boolean; // Deprecated, use matchType
   ruleMatch?: boolean; // Deprecated, use matchType
   isManuallyApproved?: boolean; // Transient state for UI during import
+  
+  isHidden?: boolean; // If true, ignored in calculations and history
 }
 
 export interface ImportRule {
@@ -149,6 +152,7 @@ export interface AppSettings {
   autoApproveIncome?: boolean;
   autoApproveTransfer?: boolean;
   autoApproveExpense?: boolean;
+  autoApproveSmartTransfers?: boolean; // New setting
 }
 
 export interface GlobalState {
