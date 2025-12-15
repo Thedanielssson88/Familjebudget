@@ -10,13 +10,14 @@ import { DreamsView } from './views/DreamsView';
 import { TransactionsView } from './views/TransactionsView';
 import { SettingsCategories } from './views/SettingsCategories';
 import { OperatingBudgetView } from './views/OperatingBudgetView';
+import { HousingCalculator } from './views/HousingCalculator';
 import { LayoutGrid, Wallet, PieChart, ArrowLeftRight, Calendar, Settings, Sparkles, Cloud, RefreshCw, Trash2, Download, Receipt, Database, AlertTriangle, Home } from 'lucide-react';
 import { cn, Button } from './components/components';
 import { format, subMonths, addMonths } from 'date-fns';
 import { sv } from 'date-fns/locale';
 import { initGoogleDrive, loginToGoogle, listBackups, createBackupFile, loadBackupFile, deleteBackupFile, DriveFile } from './services/googleDrive';
 
-type View = 'home' | 'budget' | 'dashboard' | 'dreams' | 'transactions';
+type View = 'home' | 'budget' | 'dashboard' | 'dreams' | 'transactions' | 'housing-calculator';
 
 const MainApp = () => {
   const [currentView, setCurrentView] = useState<View>('home');
@@ -145,7 +146,8 @@ const MainApp = () => {
       case 'home': return <HomeDashboardView onNavigate={setCurrentView} />;
       case 'budget': return <BudgetView />; 
       case 'dashboard': return <DashboardView />;
-      case 'dreams': return <DreamsView />;
+      case 'dreams': return <DreamsView onNavigate={setCurrentView} />;
+      case 'housing-calculator': return <HousingCalculator onBack={() => setCurrentView('dreams')} />;
       case 'transactions': return <TransactionsView />;
       default: return <HomeDashboardView onNavigate={setCurrentView} />;
     }
@@ -342,15 +344,17 @@ const MainApp = () => {
       </main>
 
       {/* BOTTOM NAV */}
-      <nav className="fixed bottom-0 left-0 right-0 bg-surface/90 backdrop-blur-lg border-t border-slate-800 pb-safe pt-2 px-2 pb-6 z-50">
-        <div className="flex justify-between items-center max-w-lg mx-auto">
-            <NavButton active={currentView === 'home'} onClick={() => setCurrentView('home')} icon={<Home />} label="Hem" />
-            <NavButton active={currentView === 'budget'} onClick={() => setCurrentView('budget')} icon={<PieChart />} label="Budget" />
-            <NavButton active={currentView === 'dashboard'} onClick={() => setCurrentView('dashboard')} icon={<LayoutGrid />} label="Översikt" />
-            <NavButton active={currentView === 'dreams'} onClick={() => setCurrentView('dreams')} icon={<Sparkles />} label="Drömmar" />
-            <NavButton active={currentView === 'transactions'} onClick={() => setCurrentView('transactions')} icon={<Receipt />} label="Import" />
-        </div>
-      </nav>
+      {currentView !== 'housing-calculator' && (
+          <nav className="fixed bottom-0 left-0 right-0 bg-surface/90 backdrop-blur-lg border-t border-slate-800 pb-safe pt-2 px-2 pb-6 z-50">
+            <div className="flex justify-between items-center max-w-lg mx-auto">
+                <NavButton active={currentView === 'home'} onClick={() => setCurrentView('home')} icon={<Home />} label="Hem" />
+                <NavButton active={currentView === 'budget'} onClick={() => setCurrentView('budget')} icon={<PieChart />} label="Budget" />
+                <NavButton active={currentView === 'dashboard'} onClick={() => setCurrentView('dashboard')} icon={<LayoutGrid />} label="Översikt" />
+                <NavButton active={currentView === 'dreams' || currentView === 'housing-calculator'} onClick={() => setCurrentView('dreams')} icon={<Sparkles />} label="Drömmar" />
+                <NavButton active={currentView === 'transactions'} onClick={() => setCurrentView('transactions')} icon={<Receipt />} label="Import" />
+            </div>
+          </nav>
+      )}
     </div>
   );
 };

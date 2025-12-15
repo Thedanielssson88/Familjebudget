@@ -36,7 +36,9 @@ const BucketSchema = z.object({
   // New Event Fields
   eventStartDate: z.string().optional(),
   eventEndDate: z.string().optional(),
-  autoTagEvent: z.boolean().optional()
+  autoTagEvent: z.boolean().optional(),
+  // New Group Link
+  budgetGroupId: z.string().optional()
 });
 
 const UserIncomeDataSchema = z.object({
@@ -96,7 +98,8 @@ const BudgetGroupSchema = z.object({
     monthlyData: z.record(z.string(), BudgetGroupDataSchema).optional().default({}),
     isCatchAll: z.boolean().optional(),
     icon: z.string().optional(),
-    forecastType: z.enum(['FIXED', 'VARIABLE']).optional()
+    forecastType: z.enum(['FIXED', 'VARIABLE']).optional(),
+    defaultAccountId: z.string().optional()
 });
 
 const TransactionSchema = z.object({

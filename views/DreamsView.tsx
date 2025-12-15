@@ -5,7 +5,7 @@ import { calculateSavedAmount, calculateGoalBucketCost, formatMoney, generateId,
 import { PieChart, Pie, Cell, ResponsiveContainer } from 'recharts';
 import { format, parseISO, isValid, addMonths, differenceInMonths } from 'date-fns';
 import { sv } from 'date-fns/locale';
-import { Archive, CheckCircle, Pause, Play, Rocket, TrendingUp, Calendar, Trash2, Settings, Save, Search, Receipt, CheckSquare, Square, X, Unlink, Wallet, PiggyBank, PieChart as PieChartIcon, ChevronDown, ChevronRight, Plus, Target, Image as ImageIcon, Link } from 'lucide-react';
+import { Archive, CheckCircle, Pause, Play, Rocket, TrendingUp, Calendar, Trash2, Settings, Save, Search, Receipt, CheckSquare, Square, X, Unlink, Wallet, PiggyBank, PieChart as PieChartIcon, ChevronDown, ChevronRight, Plus, Target, Image as ImageIcon, Link, Calculator, ArrowRight } from 'lucide-react';
 import { cn, Button, Modal, Input } from '../components/components';
 import { Bucket, Transaction } from '../types';
 
@@ -178,7 +178,7 @@ const DreamCard: React.FC<DreamCardProps> = ({ goal, isArchived, selectedMonth, 
     else if (goal.targetDate) {
         const targetD = parseISO(`${goal.targetDate}-01`);
         if (isValid(targetD)) {
-            dateLabel = format(targetD, 'MMMM yyyy', {locale: sv});
+            dateLabel = format(targetD, 'MMM yyyy', {locale: sv});
         }
     }
 
@@ -196,148 +196,136 @@ const DreamCard: React.FC<DreamCardProps> = ({ goal, isArchived, selectedMonth, 
     const opacity = isPaused ? "opacity-90" : "";
 
     return (
-        <div className={cn("relative w-full rounded-3xl overflow-hidden shadow-2xl group bg-slate-800 transition-all border border-slate-700/50", grayscale, opacity)}>
-            {/* Background Image Container */}
-            <div className="absolute inset-0 h-full z-0">
+        <div className={cn("relative w-full rounded-xl overflow-hidden shadow-lg group bg-slate-800 transition-all border border-slate-700/50", grayscale, opacity)}>
+            {/* Background Image Container - Now just fills the minimal container */}
+            <div className="absolute inset-0 z-0">
                 <div 
                     className="absolute inset-0 bg-cover bg-center transition-transform duration-700 group-hover:scale-105"
                     style={{ 
                         backgroundImage: `url(${goal.backgroundImage || 'https://images.unsplash.com/photo-1469854523086-cc02fe5d8800?q=80&w=2021&auto=format&fit=crop'})` 
                     }}
                 />
-                <div className="absolute inset-0 bg-gradient-to-t from-slate-900 via-slate-900/60 to-transparent" />
+                <div className="absolute inset-0 bg-gradient-to-r from-slate-900 via-slate-900/80 to-slate-900/30" />
             </div>
 
-            {/* Top Controls */}
-            <div className="absolute top-0 left-0 right-0 p-4 flex justify-between items-start z-20">
-                {!isArchived && goal.paymentSource !== 'BALANCE' ? (
-                    <button 
-                        onClick={handlePauseToggle}
-                        className={cn(
-                            "flex items-center gap-2 px-3 py-1.5 rounded-full backdrop-blur-md border transition-all text-xs font-bold uppercase tracking-wider shadow-lg",
-                            isPaused 
-                                ? "bg-amber-500/20 border-amber-500/50 text-amber-300 hover:bg-amber-500/30"
-                                : "bg-black/30 border-white/10 text-white/80 hover:bg-black/50 hover:text-white"
-                        )}
-                    >
-                        {isPaused ? (
-                            <>
-                                <Play className="w-3 h-3 fill-current" /> Pausad
-                            </>
-                        ) : (
-                            <>
-                                <Pause className="w-3 h-3 fill-current" /> Pausa
-                            </>
-                        )}
-                    </button>
-                ) : <div></div> /* Spacer */}
-
-                <div className="flex gap-2">
-                    {!isArchived && (
-                        <button 
-                            onClick={(e) => { e.stopPropagation(); setIsStatsOpen(true); }}
-                            className="bg-black/30 hover:bg-black/50 text-white/80 hover:text-white p-2 rounded-full transition-all backdrop-blur-md border border-white/10 z-50"
-                            title="Statistik"
-                        >
-                            <PieChartIcon className="w-4 h-4" />
-                        </button>
-                    )}
-                    {!isArchived && (
-                        <button 
-                            onClick={(e) => { e.stopPropagation(); onEdit(goal); }}
-                            className="bg-black/30 hover:bg-black/50 text-white/80 hover:text-white p-2 rounded-full transition-all backdrop-blur-md border border-white/10 z-50"
-                            title="Inställningar"
-                        >
-                            <Settings className="w-4 h-4" />
-                        </button>
-                    )}
-                    {!isArchived ? (
-                        <button 
-                            onClick={(e) => { 
-                                e.preventDefault();
-                                e.stopPropagation(); 
-                                onArchive(goal.id, goal.name); 
-                            }}
-                            className="bg-black/30 hover:bg-black/50 text-white/80 hover:text-white p-2 rounded-full transition-all backdrop-blur-md border border-white/10 z-50"
-                            title="Arkivera / Avsluta sparande"
-                        >
-                            <Archive className="w-4 h-4" />
-                        </button>
-                    ) : (
-                        <button 
-                            onClick={(e) => { 
-                                e.preventDefault();
-                                e.stopPropagation(); 
-                                onDelete(goal.id, goal.name); 
-                            }}
-                            className="bg-red-500/20 hover:bg-red-500/40 text-red-300 hover:text-white p-2 rounded-full transition-all backdrop-blur-md border border-red-500/10 z-50"
-                            title="Ta bort permanent"
-                        >
-                            <Trash2 className="w-4 h-4" />
-                        </button>
-                    )}
-                </div>
-            </div>
-
-            {/* Main Content - Compact */}
-            <div className="relative z-10 p-5 pt-16 flex flex-col h-full justify-end">
-                <div className="flex items-end justify-between">
-                    <div className="flex-1 min-w-0 pr-4">
-                        <div className="flex items-center gap-2 mb-0.5">
-                            <h2 className="text-xl font-bold leading-none text-white drop-shadow-lg truncate">{goal.name}</h2>
-                            {isArchived && <CheckCircle className="w-5 h-5 text-emerald-400 shrink-0" />}
+            {/* Main Content - Minimal Layout */}
+            <div className="relative z-10 p-3 flex flex-col gap-2">
+                
+                {/* Header Row: Title & Actions */}
+                <div className="flex justify-between items-start">
+                    <div className="flex-1 min-w-0 pr-2">
+                        <div className="flex items-center gap-2">
+                            {isArchived && <CheckCircle className="w-4 h-4 text-emerald-400 shrink-0" />}
+                            <h2 className="text-lg font-bold leading-tight text-white drop-shadow-md truncate">{goal.name}</h2>
                         </div>
-                        <p className="text-sm text-slate-300 mb-2 font-medium drop-shadow-md flex items-center gap-1">
-                            {isArchived ? (
-                                <span>Avslutad: {goal.archivedDate}</span>
-                            ) : (
-                                <>
-                                    <span>{dateLabel}</span>
-                                    {!isPaused && simulatedExtra === 0 && goal.paymentSource !== 'BALANCE' && (
-                                        <span className="text-slate-400 text-xs px-1 py-0.5">
-                                            • {formatMoney(currentMonthlyRate)}/mån
-                                        </span>
-                                    )}
-                                    {goal.paymentSource === 'BALANCE' && (
-                                        <span className="text-amber-400 text-xs bg-black/40 px-1.5 py-0.5 rounded flex items-center gap-1">
-                                            <PiggyBank size={10} /> Saldo
-                                        </span>
-                                    )}
-                                </>
-                            )}
-                        </p>
                         
-                        <div className="space-y-0.5">
-                            <div className="text-[10px] font-bold uppercase tracking-widest text-purple-300 drop-shadow-md">
-                                {isArchived ? "Totalt Sparat" : (goal.paymentSource === 'BALANCE' ? "Tillgängligt Saldo" : "Kvar till drömmen")}
-                            </div>
-                            <div className="text-3xl font-bold font-mono tracking-tighter text-white drop-shadow-lg">
-                                {isArchived || goal.paymentSource === 'BALANCE' ? (
-                                    <span>{formatMoney(goal.paymentSource === 'BALANCE' ? goal.targetAmount : saved)}</span>
+                        <div className="flex items-center gap-2 mt-0.5">
+                            {/* Status Badge */}
+                            {!isArchived && goal.paymentSource !== 'BALANCE' && (
+                                <button 
+                                    onClick={handlePauseToggle}
+                                    className={cn(
+                                        "text-[10px] px-1.5 py-0.5 rounded font-bold uppercase tracking-wide flex items-center gap-1 border transition-all",
+                                        isPaused 
+                                            ? "bg-amber-500/20 border-amber-500/50 text-amber-300 hover:bg-amber-500/30"
+                                            : "bg-black/30 border-white/10 text-white/70 hover:bg-white/20 hover:text-white"
+                                    )}
+                                >
+                                    {isPaused ? <Play size={8} className="fill-current"/> : <Pause size={8} className="fill-current"/>}
+                                    {isPaused ? "Pausad" : "Aktiv"}
+                                </button>
+                            )}
+                            
+                            <p className="text-xs text-slate-300 font-medium drop-shadow-sm truncate">
+                                {isArchived ? (
+                                    <span>Klar {goal.archivedDate}</span>
                                 ) : (
-                                    <AnimatedNumber value={remaining} />
+                                    <span>{dateLabel}</span>
                                 )}
-                            </div>
-                            {/* NEW: Total Booked Amount Indicator */}
+                            </p>
+                        </div>
+                    </div>
+
+                    {/* Actions Row */}
+                    <div className="flex gap-1 shrink-0">
+                        {!isArchived && (
+                            <>
+                                <button 
+                                    onClick={(e) => { e.stopPropagation(); setIsStatsOpen(true); }}
+                                    className="p-1.5 bg-black/20 hover:bg-black/40 text-white/70 hover:text-white rounded transition-colors"
+                                    title="Statistik"
+                                >
+                                    <PieChartIcon className="w-3.5 h-3.5" />
+                                </button>
+                                <button 
+                                    onClick={(e) => { e.stopPropagation(); onEdit(goal); }}
+                                    className="p-1.5 bg-black/20 hover:bg-black/40 text-white/70 hover:text-white rounded transition-colors"
+                                    title="Inställningar"
+                                >
+                                    <Settings className="w-3.5 h-3.5" />
+                                </button>
+                                <button 
+                                    onClick={(e) => { e.preventDefault(); e.stopPropagation(); onArchive(goal.id, goal.name); }}
+                                    className="p-1.5 bg-black/20 hover:bg-black/40 text-white/70 hover:text-white rounded transition-colors"
+                                    title="Arkivera"
+                                >
+                                    <Archive className="w-3.5 h-3.5" />
+                                </button>
+                            </>
+                        )}
+                        {isArchived && (
+                            <button 
+                                onClick={(e) => { e.preventDefault(); e.stopPropagation(); onDelete(goal.id, goal.name); }}
+                                className="p-1.5 bg-rose-500/20 hover:bg-rose-500/40 text-rose-300 hover:text-white rounded transition-colors"
+                                title="Ta bort permanent"
+                            >
+                                <Trash2 className="w-3.5 h-3.5" />
+                            </button>
+                        )}
+                    </div>
+                </div>
+
+                {/* Data Row: Amount & Chart */}
+                <div className="flex items-end justify-between mt-1">
+                    <div>
+                        <div className="text-[9px] font-bold uppercase tracking-widest text-purple-300 drop-shadow-sm mb-0.5">
+                            {isArchived ? "Totalt Sparat" : (goal.paymentSource === 'BALANCE' ? "Tillgängligt Saldo" : "Kvar till drömmen")}
+                        </div>
+                        <div className="text-2xl font-bold font-mono tracking-tight text-white drop-shadow-md leading-none">
+                            {isArchived || goal.paymentSource === 'BALANCE' ? (
+                                <span>{formatMoney(goal.paymentSource === 'BALANCE' ? goal.targetAmount : saved)}</span>
+                            ) : (
+                                <AnimatedNumber value={remaining} />
+                            )}
+                        </div>
+                        
+                        {/* Meta Data (Monthly Rate or Booked) */}
+                        <div className="flex gap-2 mt-1">
+                            {!isArchived && !isPaused && simulatedExtra === 0 && goal.paymentSource !== 'BALANCE' && (
+                                <span className="text-slate-300 text-[10px] bg-black/20 px-1.5 py-0.5 rounded backdrop-blur-sm">
+                                    Spara: {formatMoney(currentMonthlyRate)}/mån
+                                </span>
+                            )}
+                            
                             {totalBooked > 0 && (
                                 <div 
                                     onClick={(e) => { e.stopPropagation(); setIsStatsOpen(true); }}
-                                    className="text-xs text-white/80 bg-black/40 inline-flex items-center gap-1 px-2 py-1 rounded-md backdrop-blur-sm mt-1 border border-white/10 cursor-pointer hover:bg-black/60 transition-colors"
+                                    className="text-[10px] text-white/90 bg-rose-500/20 px-1.5 py-0.5 rounded cursor-pointer hover:bg-rose-500/30 transition-colors flex items-center gap-1 border border-rose-500/30"
                                 >
-                                    <Receipt size={10} /> Bokfört: <span className="font-mono font-bold text-rose-300">-{formatMoney(totalBooked)}</span> <ChevronRight size={10} />
+                                    <Receipt size={8} /> Utgifter: -{formatMoney(totalBooked)}
                                 </div>
                             )}
                         </div>
                     </div>
 
-                    {/* Donut Chart */}
-                    <div className="w-20 h-20 relative shrink-0">
+                    {/* Compact Chart */}
+                    <div className="w-12 h-12 relative shrink-0 opacity-90">
                         <ResponsiveContainer width="100%" height="100%">
                             <PieChart>
                                 <Pie
                                     data={chartData}
-                                    innerRadius={30}
-                                    outerRadius={40}
+                                    innerRadius={18}
+                                    outerRadius={24}
                                     startAngle={90}
                                     endAngle={-270}
                                     dataKey="value"
@@ -348,28 +336,28 @@ const DreamCard: React.FC<DreamCardProps> = ({ goal, isArchived, selectedMonth, 
                                 </Pie>
                             </PieChart>
                         </ResponsiveContainer>
-                        <div className="absolute inset-0 flex items-center justify-center font-bold text-sm text-white drop-shadow-md">
+                        <div className="absolute inset-0 flex items-center justify-center font-bold text-[10px] text-white drop-shadow-md">
                             {Math.round(progress)}%
                         </div>
                     </div>
                 </div>
 
-                {/* SIMULATOR SECTION */}
+                {/* SIMULATOR SECTION (Compact) */}
                 {!isArchived && !isPaused && goal.paymentSource !== 'BALANCE' && (
-                    <div className="mt-4 pt-3 border-t border-white/10">
+                    <div className="mt-1 pt-2 border-t border-white/10">
                         <button 
                             onClick={() => setIsSimulating(!isSimulating)}
-                            className="flex items-center gap-2 text-xs font-bold text-purple-300 hover:text-purple-200 transition-colors uppercase tracking-wider mb-2"
+                            className="flex items-center gap-1.5 text-[10px] font-bold text-purple-300 hover:text-purple-200 transition-colors uppercase tracking-wider"
                         >
-                            <Rocket className="w-4 h-4" /> 
-                            {isSimulating ? "Dölj Simulator" : "Simulera ökat sparande"}
+                            <Rocket className="w-3 h-3" /> 
+                            {isSimulating ? "Dölj Simulator" : "Öka takten?"}
                         </button>
                         
                         {isSimulating && (
-                            <div className="bg-purple-900/30 rounded-xl p-3 border border-purple-500/30 animate-in slide-in-from-top-2">
-                                <div className="flex justify-between items-center mb-2">
-                                    <span className="text-xs text-purple-200">Lägg till extra:</span>
-                                    <span className="text-sm font-bold text-white font-mono">+{formatMoney(simulatedExtra)}/mån</span>
+                            <div className="bg-purple-900/40 rounded-lg p-2 mt-2 border border-purple-500/30 animate-in slide-in-from-top-1">
+                                <div className="flex justify-between items-center mb-1">
+                                    <span className="text-[10px] text-purple-200">Extra insättning:</span>
+                                    <span className="text-xs font-bold text-white font-mono">+{formatMoney(simulatedExtra)}/mån</span>
                                 </div>
                                 <input 
                                     type="range"
@@ -378,17 +366,12 @@ const DreamCard: React.FC<DreamCardProps> = ({ goal, isArchived, selectedMonth, 
                                     step="100"
                                     value={simulatedExtra}
                                     onChange={(e) => setSimulatedExtra(Number(e.target.value))}
-                                    className="w-full h-2 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-purple-500 mb-3"
+                                    className="w-full h-1.5 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-purple-500 mb-1"
                                 />
                                 {simulatedExtra > 0 && (
-                                    <div className="text-xs text-purple-100 flex items-start gap-2 bg-purple-500/20 p-2 rounded">
-                                        <TrendingUp className="w-4 h-4 shrink-0 mt-0.5 text-emerald-400" />
-                                        <div>
-                                            Ni blir klara <span className="font-bold text-emerald-300">{format(projectedDate, 'MMMM yyyy', {locale: sv})}</span>.
-                                            <div className="text-purple-300 mt-0.5">
-                                                Det är <span className="font-bold">{monthsSaved} månader</span> tidigare!
-                                            </div>
-                                        </div>
+                                    <div className="text-[10px] text-purple-100 leading-tight">
+                                        Ni blir klara <span className="font-bold text-emerald-300">{format(projectedDate, 'MMM yyyy', {locale: sv})}</span>. 
+                                        (<span className="font-bold">{monthsSaved} mån</span> tidigare!)
                                     </div>
                                 )}
                             </div>
@@ -474,7 +457,7 @@ const DreamCard: React.FC<DreamCardProps> = ({ goal, isArchived, selectedMonth, 
     );
 };
 
-export const DreamsView: React.FC = () => {
+export const DreamsView: React.FC<{ onNavigate?: (view: any) => void }> = ({ onNavigate }) => {
     const { buckets, updateBucket, deleteBucket, archiveBucket, selectedMonth, addBucket, accounts, transactions, updateTransaction } = useApp();
     const [showArchived, setShowArchived] = useState(false);
     
@@ -612,25 +595,45 @@ export const DreamsView: React.FC = () => {
 
     return (
         <div className="space-y-6 pb-24 animate-in slide-in-from-right duration-300">
-            <header className="flex justify-between items-start">
-                <div>
-                    <h1 className="text-3xl font-bold text-transparent bg-clip-text bg-gradient-to-r from-purple-400 to-pink-400">Drömmar & Mål</h1>
-                    <p className="text-slate-400">Visualisera och nå dina sparmål.</p>
+            <header className="flex flex-col gap-4">
+                <div className="flex justify-between items-start">
+                    <div>
+                        <h1 className="text-3xl font-bold text-transparent bg-clip-text bg-gradient-to-r from-purple-400 to-pink-400">Drömmar & Mål</h1>
+                        <p className="text-slate-400">Visualisera och nå dina sparmål.</p>
+                    </div>
+                    <div className="flex bg-slate-800 p-1 rounded-lg">
+                        <button 
+                            onClick={() => setShowArchived(false)} 
+                            className={cn("px-3 py-1.5 text-xs font-bold rounded transition-all", !showArchived ? "bg-purple-600 text-white" : "text-slate-400 hover:text-white")}
+                        >
+                            Aktiva
+                        </button>
+                        <button 
+                            onClick={() => setShowArchived(true)} 
+                            className={cn("px-3 py-1.5 text-xs font-bold rounded transition-all", showArchived ? "bg-slate-600 text-white" : "text-slate-400 hover:text-white")}
+                        >
+                            Arkiverade
+                        </button>
+                    </div>
                 </div>
-                <div className="flex bg-slate-800 p-1 rounded-lg">
+
+                {onNavigate && (
                     <button 
-                        onClick={() => setShowArchived(false)} 
-                        className={cn("px-3 py-1.5 text-xs font-bold rounded transition-all", !showArchived ? "bg-purple-600 text-white" : "text-slate-400 hover:text-white")}
+                        onClick={() => onNavigate('housing-calculator')}
+                        className="w-full bg-slate-800 border border-slate-700 p-4 rounded-xl flex items-center justify-between group hover:bg-slate-700 transition-all shadow-lg"
                     >
-                        Aktiva
+                        <div className="flex items-center gap-3">
+                            <div className="bg-orange-500/20 p-2 rounded-lg text-orange-400">
+                                <Calculator size={20}/>
+                            </div>
+                            <div className="text-left">
+                                <div className="font-bold text-white">Boendekalkylator</div>
+                                <div className="text-xs text-slate-400">Jämför månadskostnad vid flytt</div>
+                            </div>
+                        </div>
+                        <ArrowRight size={18} className="text-slate-500 group-hover:text-white" />
                     </button>
-                    <button 
-                        onClick={() => setShowArchived(true)} 
-                        className={cn("px-3 py-1.5 text-xs font-bold rounded transition-all", showArchived ? "bg-slate-600 text-white" : "text-slate-400 hover:text-white")}
-                    >
-                        Arkiverade
-                    </button>
-                </div>
+                )}
             </header>
 
             <div className="space-y-6">

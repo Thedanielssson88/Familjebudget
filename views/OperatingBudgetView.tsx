@@ -1,1107 +1,953 @@
-
 import React, { useMemo, useState } from 'react';
 import { useApp } from '../store';
 import { useBudgetMonth } from '../hooks/useBudgetMonth';
-import { formatMoney, getEffectiveBudgetGroupData, calculateFixedBucketCost, calculateDailyBucketCost, calculateGoalBucketCost, calculateReimbursementMap, getEffectiveAmount } from '../utils';
-import { ChevronRight, ChevronDown, Check, AlertTriangle, PieChart, Edit2, Plus, Trash2, Settings, ArrowRightLeft, Rocket, Calendar, Plane, RefreshCw, Lock, ChevronUp, BarChart3 } from 'lucide-react';
+import { formatMoney, getEffectiveBudgetGroupData, calculateFixedBucketCost, calculateDailyBucketCost, calculateGoalBucketCost, calculateReimbursementMap, getEffectiveAmount, getSubCategoryAverage, generateId, getEffectiveBucketData, isBucketActiveInMonth } from '../utils';
+import { ChevronRight, ChevronDown, Check, AlertTriangle, PieChart, Edit2, Plus, Trash2, Settings, ArrowRightLeft, Rocket, Calendar, Plane, RefreshCw, Lock, ChevronUp, BarChart3, Wallet, Link2, X, PiggyBank, FolderInput, ArrowRight, Link } from 'lucide-react';
 import { BudgetProgressBar } from '../components/BudgetProgressBar';
 import { cn, Button, Modal, Input } from '../components/components';
-import { BudgetGroup, SubCategory, Bucket } from '../types';
-import { startOfMonth, endOfMonth, parseISO, differenceInDays, min, max, areIntervalsOverlapping, isValid } from 'date-fns';
+import { BudgetGroup, SubCategory, Bucket, BucketData, Transaction } from '../types';
+import { parseISO, addMonths, format } from 'date-fns';
+
+const DREAM_IMAGES = [
+  "https://images.unsplash.com/photo-1507525428034-b723cf961d3e?q=80&w=2073&auto=format&fit=crop", 
+  "https://images.unsplash.com/photo-1469854523086-cc02fe5d8800?q=80&w=2021&auto=format&fit=crop", 
+  "https://images.unsplash.com/photo-1533473359331-0135ef1b58bf?q=80&w=2070&auto=format&fit=crop", 
+  "https://images.unsplash.com/photo-1560518883-ce09059eeffa?q=80&w=1973&auto=format&fit=crop", 
+  "https://images.unsplash.com/photo-1555041469-a586c61ea9bc?q=80&w=2070&auto=format&fit=crop", 
+  "https://images.unsplash.com/photo-1523275335684-37898b6baf30?q=80&w=1999&auto=format&fit=crop", 
+  "https://images.unsplash.com/photo-1518770660439-4636190af475?q=80&w=2070&auto=format&fit=crop",
+];
 
 export const OperatingBudgetView: React.FC = () => {
-  const { selectedMonth, budgetGroups, subCategories, mainCategories, transactions, buckets, accounts, settings, addBudgetGroup, updateBudgetGroup, deleteBudgetGroup, updateSubCategory, addSubCategory } = useApp();
+  const { 
+      selectedMonth, budgetGroups, subCategories, mainCategories, transactions, 
+      buckets, accounts, settings, addBudgetGroup, updateBudgetGroup, 
+      deleteBudgetGroup, updateSubCategory, addSubCategory, addBucket, updateBucket, deleteBucket 
+  } = useApp();
   
-  // Use the centralized hook for date logic
   const { startStr, endStr, intervalLabel } = useBudgetMonth(selectedMonth);
 
   const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set());
-  const [expandedMains, setExpandedMains] = useState<Set<string>>(new Set());
-  const [expandedSubs, setExpandedSubs] = useState<Set<string>>(new Set());
   
-  // Expanded state for Spending Goals (Drilldown)
-  const [expandedGoals, setExpandedGoals] = useState<Set<string>>(new Set());
-
-  // Modal State
-  const [isModalOpen, setIsModalOpen] = useState(false);
+  // --- STATE: GROUP EDIT MODAL ---
+  const [isGroupModalOpen, setIsGroupModalOpen] = useState(false);
   const [editingGroup, setEditingGroup] = useState<BudgetGroup | null>(null);
   const [editingLimit, setEditingLimit] = useState<number>(0);
-  const [useAutoLimit, setUseAutoLimit] = useState(false); // New state for Auto Mode
-  const [calculatedFunding, setCalculatedFunding] = useState(0); // Store funding for modal display
   const [deleteMode, setDeleteMode] = useState(false);
-  
-  // New State for collapsing/expanding details
-  const [showDetails, setShowDetails] = useState(false);
-  
-  // New Category State (inside modal)
-  const [newSubName, setNewSubName] = useState('');
-  const [selectedMainId, setSelectedMainId] = useState('');
+  const [showGroupSettings, setShowGroupSettings] = useState(false);
 
-  // Toggle for Events - Note: This now only affects the 'Overview' calculation/summary, 
-  // but deduping logic ensures dreams don't appear in regular groups regardless of this toggle.
-  const [includeEvents, setIncludeEvents] = useState(false);
+  // --- STATE: CATEGORY PICKER MODAL ---
+  const [isCatPickerOpen, setIsCatPickerOpen] = useState(false);
+  const [activeGroupId, setActiveGroupId] = useState<string | null>(null);
+  
+  // --- STATE: SUB-CATEGORY EDITING (INLINE) ---
+  const [editingSubId, setEditingSubId] = useState<string | null>(null);
+  const [tempSubBudget, setTempSubBudget] = useState<string>('');
 
-  // Calculate Reimbursement Map for Net Amounts
+  // --- STATE: MOVE MODAL (Category OR Bucket) ---
+  const [isMoveModalOpen, setIsMoveModalOpen] = useState(false);
+  const [movingSubCategory, setMovingSubCategory] = useState<SubCategory | null>(null);
+  const [movingBucket, setMovingBucket] = useState<Bucket | null>(null);
+
+  // --- STATE: BUCKET (CUSTOM POST) MODAL ---
+  const [isBucketModalOpen, setIsBucketModalOpen] = useState(false);
+  const [editingBucket, setEditingBucket] = useState<Bucket | null>(null);
+  const [editingBucketData, setEditingBucketData] = useState<BucketData>({ amount: 0, dailyAmount: 0, activeDays: [] });
+  const [showBucketDetails, setShowBucketDetails] = useState(false);
+
+  // --- STATE: DRILL DOWN (TRANSACTIONS) ---
+  const [drillDownData, setDrillDownData] = useState<{ title: string, transactions: Transaction[] } | null>(null);
+
+  // --- REIMBURSEMENTS ---
   const reimbursementMap = useMemo(() => calculateReimbursementMap(transactions), [transactions]);
 
-  // --- HELPER: Event Distribution Logic ---
-  const calculateEventDistribution = (goalBucket: Bucket, month: string): { amount: number, label?: string } | null => {
-      if (!goalBucket.eventStartDate || !goalBucket.eventEndDate) return null;
-
-      const currentMonthStart = startOfMonth(parseISO(`${month}-01`));
-      const currentMonthEnd = endOfMonth(currentMonthStart);
-      const eventStart = parseISO(goalBucket.eventStartDate);
-      const eventEnd = parseISO(goalBucket.eventEndDate);
-
-      if (!isValid(eventStart) || !isValid(eventEnd)) return null;
-
-      const overlaps = areIntervalsOverlapping(
-          { start: currentMonthStart, end: currentMonthEnd },
-          { start: eventStart, end: eventEnd },
-          { inclusive: true }
+  // --- HELPERS ---
+  const getSubCategoryTxs = (subId: string) => {
+      return transactions.filter(t => 
+          !t.isHidden && 
+          t.categorySubId === subId && 
+          t.date >= startStr && 
+          t.date <= endStr &&
+          // Ensure we only count expenses
+          (t.type === 'EXPENSE' || (!t.type && t.amount < 0))
       );
+  };
 
-      if (!overlaps) return { amount: 0 };
+  const getBucketTxs = (bucketId: string) => {
+      return transactions.filter(t => 
+          !t.isHidden &&
+          t.bucketId === bucketId &&
+          t.date >= startStr &&
+          t.date <= endStr &&
+          // Ensure we only count expenses (not funding transfers in)
+          (t.type === 'EXPENSE' || (!t.type && t.amount < 0))
+      );
+  };
 
-      const totalEventDays = differenceInDays(eventEnd, eventStart) + 1;
-      if (totalEventDays <= 0) return { amount: 0 };
-
-      const overlapStart = max([currentMonthStart, eventStart]);
-      const overlapEnd = min([currentMonthEnd, eventEnd]);
-      const overlapDays = Math.max(0, differenceInDays(overlapEnd, overlapStart) + 1);
-
-      if (overlapDays === 0) return { amount: 0 };
-
-      const dailyBudget = goalBucket.targetAmount / totalEventDays;
-      const amount = Math.round(dailyBudget * overlapDays);
-      const label = `Reskassa (${overlapDays} av ${totalEventDays} dagar)`;
-
-      return { amount, label };
+  const calculateBucketCost = (bucket: Bucket) => {
+      if (bucket.type === 'FIXED') return calculateFixedBucketCost(bucket, selectedMonth);
+      if (bucket.type === 'DAILY') return calculateDailyBucketCost(bucket, selectedMonth, settings.payday);
+      if (bucket.type === 'GOAL') return calculateGoalBucketCost(bucket, selectedMonth);
+      return 0;
   };
 
   // --- DATA PROCESSING ---
   const data = useMemo(() => {
-    // 1. Filter Transactions (Expenses Only for this Month Interval)
-    const txForMonth = transactions.filter(t => {
-        if (t.isHidden) return false;
-        const isExpense = t.type === 'EXPENSE' || (!t.type && t.amount < 0);
-        const inRange = t.date >= startStr && t.date <= endStr;
-        return isExpense && inRange;
-    });
+      const groups = budgetGroups.map(group => {
+          // 1. Get Linked Subcategories
+          const linkedSubs = subCategories.filter(s => s.budgetGroupId === group.id).map(sub => {
+              const txs = getSubCategoryTxs(sub.id);
+              const spent = txs.reduce((sum, t) => sum + Math.abs(getEffectiveAmount(t, reimbursementMap)), 0);
+              return {
+                  ...sub,
+                  spent,
+                  transactions: txs,
+                  avgSpend: getSubCategoryAverage(sub.id, selectedMonth, transactions, reimbursementMap),
+                  budget: sub.monthlyBudget || 0
+              };
+          });
 
-    // 2. Identify "Spending Goals" (Goals active for payout this month OR overlapping Event OR has transactions)
-    const spendingGoals = buckets.map(b => {
-        if (b.type !== 'GOAL') return null;
+          const subTotalBudget = linkedSubs.reduce((sum, s) => sum + s.budget, 0);
+          const subTotalSpent = linkedSubs.reduce((sum, s) => sum + s.spent, 0);
+          const allSubTxs = linkedSubs.flatMap(s => s.transactions);
 
-        // A. Calculate Spent This Month
-        const goalTxs = txForMonth.filter(t => t.bucketId === b.id);
-        const spentThisMonth = goalTxs.reduce((sum, t) => sum + Math.abs(getEffectiveAmount(t, reimbursementMap)), 0);
+          // 2. Get Linked Custom Buckets (Fixed, Daily, Goals)
+          const linkedBuckets = buckets.filter(b => {
+              const isExplicitlyLinked = b.budgetGroupId 
+                  ? b.budgetGroupId === group.id 
+                  : (group.linkedBucketIds && group.linkedBucketIds.includes(b.id));
+              
+              const isOrphan = !b.budgetGroupId && (!group.linkedBucketIds || !group.linkedBucketIds.includes(b.id));
+              const isClaimedByCatchAll = group.isCatchAll && isOrphan;
 
-        // B. Calculate Spent PREVIOUSLY (Lifetime before current month start)
-        // We use the global 'transactions' list for this, filtering by date < startStr
-        const previousTxs = transactions.filter(t => 
-            !t.isHidden &&
-            t.bucketId === b.id && 
-            (t.type === 'EXPENSE' || t.amount < 0) &&
-            t.date < startStr
-        );
-        const spentPreviously = previousTxs.reduce((sum, t) => sum + Math.abs(getEffectiveAmount(t, reimbursementMap)), 0);
+              if (!isExplicitlyLinked && !isClaimedByCatchAll) return false;
 
-        // C. Check Event/Target Validity
-        const eventDist = calculateEventDistribution(b, selectedMonth);
-        const isEventActive = eventDist && eventDist.amount > 0;
-        const isTargetMonth = b.targetDate === selectedMonth;
-        const hasActivity = spentThisMonth > 0;
+              // Visibility Check:
+              const txs = getBucketTxs(b.id);
+              const spent = txs.reduce((sum, t) => sum + Math.abs(getEffectiveAmount(t, reimbursementMap)), 0);
+              
+              if (spent > 0.01) return true;
+              if (isBucketActiveInMonth(b, selectedMonth)) return true;
+              if (isExplicitlyLinked) return true;
 
-        // D. Visibility Check: Show if Event Overlap OR Target Month OR Has Transactions
-        if (!isEventActive && !isTargetMonth && !hasActivity) return null;
+              return false;
+          }).map(b => {
+              const txs = getBucketTxs(b.id);
+              const spent = txs.reduce((sum, t) => sum + Math.abs(getEffectiveAmount(t, reimbursementMap)), 0);
+              return {
+                  ...b,
+                  cost: calculateBucketCost(b),
+                  spent,
+                  transactions: txs
+              };
+          });
 
-        // E. Budget Logic: Remaining Lifetime Budget
-        // Instead of showing just the daily pro-rated amount, we show what is LEFT of the total pot.
-        // Formula: TargetAmount - SpentPreviously
-        let monthlyBudget = Math.max(0, b.targetAmount - spentPreviously);
-        
-        let label = 'Kvar av totalbudget';
-        if (isEventActive && eventDist?.label) {
-            label = `${eventDist.label} (Kvar totalt)`;
-        } else if (isTargetMonth) {
-            label = 'Måldatum (Kvar totalt)';
-        } else if (hasActivity) {
-            label = 'Transaktioner finns (Kvar totalt)';
-        }
+          const bucketTotalCost = linkedBuckets.reduce((sum, b) => sum + b.cost, 0);
+          const bucketTotalSpent = linkedBuckets.reduce((sum, b) => sum + b.spent, 0);
+          const allBucketTxs = linkedBuckets.flatMap(b => b.transactions);
 
-        // Build Hierarchy for this Goal (Duplicate logic from groupStats, but specific to this Goal's bucketId)
-        // Group by Main -> Sub
-        const relevantMainIds = new Set<string>();
-        goalTxs.forEach(t => { if(t.categoryMainId) relevantMainIds.add(t.categoryMainId) });
+          // 3. Determine Group Total Budget
+          let totalBudget = 0;
+          let isAuto = false;
+          const hasChildren = linkedSubs.length > 0 || linkedBuckets.length > 0;
 
-        const mains = Array.from(relevantMainIds).map(mainId => {
-            const mainCat = mainCategories.find(m => m.id === mainId);
-            const mainTxs = goalTxs.filter(t => t.categoryMainId === mainId);
-            const mainSpent = mainTxs.reduce((sum, t) => sum + Math.abs(getEffectiveAmount(t, reimbursementMap)), 0);
+          const { data: explicitData } = getEffectiveBudgetGroupData(group, selectedMonth);
+          const manualLimit = explicitData ? explicitData.limit : 0;
 
-            // Group by Sub
-            const relevantSubIds = new Set<string>();
-            mainTxs.forEach(t => { if(t.categorySubId) relevantSubIds.add(t.categorySubId) });
+          if (hasChildren) {
+              const calculatedTotal = subTotalBudget + bucketTotalCost;
+              totalBudget = Math.max(calculatedTotal, manualLimit);
+              isAuto = true;
+          } else {
+              totalBudget = manualLimit;
+          }
 
-            const subs = Array.from(relevantSubIds).map(subId => {
-                const subCat = subCategories.find(s => s.id === subId);
-                const subTxs = mainTxs.filter(t => t.categorySubId === subId);
-                const subSpent = subTxs.reduce((sum, t) => sum + Math.abs(getEffectiveAmount(t, reimbursementMap)), 0);
-                return { id: subId, name: subCat?.name || 'Okänd', spent: subSpent, transactions: subTxs };
-            });
+          // 4. Determine Actual Total Spent & Catch-All Transactions
+          let extraSpent = 0;
+          let catchAllTxs: Transaction[] = [];
 
-            // Handle unassigned subs within main
-            const unassignedTxs = mainTxs.filter(t => !t.categorySubId);
-            if (unassignedTxs.length > 0) {
-                const unTotal = unassignedTxs.reduce((sum, t) => sum + Math.abs(getEffectiveAmount(t, reimbursementMap)), 0);
-                subs.push({ id: 'unassigned', name: 'Övrigt', spent: unTotal, transactions: unassignedTxs });
-            }
+          if (group.isCatchAll) {
+              catchAllTxs = transactions.filter(t => 
+                  !t.isHidden &&
+                  t.date >= startStr && t.date <= endStr &&
+                  // STRICTER CHECK:
+                  // 1. Must be EXPENSE type OR (Untyped AND Negative)
+                  // 2. Must NOT be TRANSFER or INCOME explicitly
+                  (t.type === 'EXPENSE' || (!t.type && t.amount < 0)) &&
+                  t.type !== 'TRANSFER' &&
+                  t.type !== 'INCOME' &&
+                  // 3. Catch-all criteria (No bucket, no mapped category)
+                  !t.bucketId &&
+                  (!t.categorySubId || !subCategories.find(s => s.id === t.categorySubId)?.budgetGroupId)
+              );
+              extraSpent = catchAllTxs.reduce((sum, t) => sum + Math.abs(getEffectiveAmount(t, reimbursementMap)), 0);
+          }
 
-            return { id: mainId, name: mainCat?.name || 'Okänd', spent: mainSpent, subs };
-        });
+          const totalSpent = subTotalSpent + bucketTotalSpent + extraSpent;
+          const allGroupTxs = [...allSubTxs, ...allBucketTxs, ...catchAllTxs];
 
-        // Handle completely uncategorized within goal
-        const uncategorizedGoalTxs = goalTxs.filter(t => !t.categoryMainId);
-        if (uncategorizedGoalTxs.length > 0) {
-            const unSpent = uncategorizedGoalTxs.reduce((sum, t) => sum + Math.abs(getEffectiveAmount(t, reimbursementMap)), 0);
-            mains.push({ 
-                id: 'orphan', 
-                name: 'Okategoriserat', 
-                spent: unSpent, 
-                subs: [{ id: 'orphan-sub', name: 'Övrigt', spent: unSpent, transactions: uncategorizedGoalTxs }] 
-            });
-        }
+          return {
+              ...group,
+              totalBudget,
+              totalSpent,
+              isAuto,
+              subs: linkedSubs,
+              customPosts: linkedBuckets,
+              allTransactions: allGroupTxs,
+              catchAllTransactions: catchAllTxs,
+              extraSpent
+          };
+      });
 
-        return { ...b, monthlyBudget, label, spent: spentThisMonth, mains };
-    }).filter((g): g is NonNullable<typeof g> => g !== null);
+      const totalBudget = groups.reduce((sum, g) => sum + g.totalBudget, 0);
+      const totalSpent = groups.reduce((sum, g) => sum + g.totalSpent, 0);
+      
+      const totalIncome = transactions
+        .filter(t => t.type === 'INCOME' && t.date >= startStr && t.date <= endStr)
+        .reduce((sum, t) => sum + t.amount, 0);
 
-    // 3. Build Hierarchy per Budget Group
-    const groupStats = budgetGroups.map(group => {
-        
-        // A. Calculate Total Funding from Cash Flow (Transfers)
-        const fundingBuckets = buckets.filter(b => group.linkedBucketIds?.includes(b.id));
-        const totalFunding = fundingBuckets.reduce((sum, b) => {
-            if (b.linkedGoalId) {
-                const parentGoal = buckets.find(g => g.id === b.linkedGoalId);
-                if (parentGoal) {
-                    const eventDist = calculateEventDistribution(parentGoal, selectedMonth);
-                    if (eventDist) return sum + eventDist.amount;
-                }
-            }
-            if (b.type === 'FIXED') return sum + calculateFixedBucketCost(b, selectedMonth);
-            if (b.type === 'DAILY') return sum + calculateDailyBucketCost(b, selectedMonth, settings.payday);
-            if (b.type === 'GOAL') return sum + calculateGoalBucketCost(b, selectedMonth);
-            return sum;
-        }, 0);
-
-        // B. Determine Budget Limit
-        const explicitData = group.monthlyData?.[selectedMonth];
-        let monthlyLimit = 0;
-        let isAutoCalculated = false;
-        let isExplicitlyDeleted = false;
-
-        if (explicitData) {
-            isExplicitlyDeleted = !!explicitData.isExplicitlyDeleted;
-            if (!isExplicitlyDeleted) {
-                monthlyLimit = explicitData.limit;
-            }
-        } else if (group.linkedBucketIds && group.linkedBucketIds.length > 0) {
-            monthlyLimit = totalFunding;
-            isAutoCalculated = true;
-        } else {
-            const { data: inheritedData } = getEffectiveBudgetGroupData(group, selectedMonth);
-            if (inheritedData) {
-                isExplicitlyDeleted = !!inheritedData.isExplicitlyDeleted;
-                monthlyLimit = inheritedData.limit;
-            }
-        }
-
-        if (isExplicitlyDeleted && !group.isCatchAll) return null;
-        
-        const fundingGap = totalFunding - monthlyLimit;
-        const assignedSubs = subCategories.filter(s => s.budgetGroupId === group.id);
-        const assignedSubIds = new Set(assignedSubs.map(s => s.id));
-        
-        // Filter transactions belonging to this group
-        const groupTxs = txForMonth.filter(t => {
-            // STRICT EXCLUSION: If a transaction is linked to a Dream/Goal bucket, 
-            // it MUST NOT appear in regular budget groups. It belongs to "Spending Goals".
-            if (t.bucketId) {
-                const bucket = buckets.find(b => b.id === t.bucketId);
-                if (bucket && bucket.type === 'GOAL') {
-                    return false; // Skip dream transactions here
-                }
-            }
-
-            if (t.categorySubId && assignedSubIds.has(t.categorySubId)) return true;
-            if (group.isCatchAll) {
-                if (!t.categorySubId) return true;
-                const sub = subCategories.find(s => s.id === t.categorySubId);
-                if (!sub || !sub.budgetGroupId) return true;
-            }
-            return false;
-        });
-
-        const groupSpent = groupTxs.reduce((sum, t) => sum + Math.abs(getEffectiveAmount(t, reimbursementMap)), 0);
-
-        // Group by Main Category within this Budget Group
-        const relevantMainIds = new Set<string>();
-        assignedSubs.forEach(s => relevantMainIds.add(s.mainCategoryId));
-        groupTxs.forEach(t => {
-            if (t.categoryMainId) relevantMainIds.add(t.categoryMainId);
-        });
-
-        const mainStats = Array.from(relevantMainIds).map(mainId => {
-            const mainCat = mainCategories.find(m => m.id === mainId);
-            const mainName = mainCat?.name || (group.isCatchAll ? 'Ospecificerat' : 'Okänd Huvudkategori');
-
-            const mainTxs = groupTxs.filter(t => {
-                if (t.categoryMainId) return t.categoryMainId === mainId;
-                return false;
-            });
-            
-            const assignedInMain = assignedSubs.filter(s => s.mainCategoryId === mainId);
-            const txSubIds = new Set(mainTxs.map(t => t.categorySubId).filter(id => !!id));
-            const activeSubs = subCategories.filter(s => s.mainCategoryId === mainId && txSubIds.has(s.id));
-
-            const combinedSubsMap = new Map<string, SubCategory>();
-            assignedInMain.forEach(s => combinedSubsMap.set(s.id, s));
-            activeSubs.forEach(s => combinedSubsMap.set(s.id, s));
-
-            const relevantSubs = Array.from(combinedSubsMap.values());
-            const coveredTxIds = new Set<string>();
-            
-            const subStats = relevantSubs.map(sub => {
-                const subTxs = mainTxs.filter(t => t.categorySubId === sub.id);
-                subTxs.forEach(t => coveredTxIds.add(t.id));
-                const subSpent = subTxs.reduce((sum, t) => sum + Math.abs(getEffectiveAmount(t, reimbursementMap)), 0);
-                return { id: sub.id, name: sub.name, spent: subSpent, transactions: subTxs };
-            }).filter(s => s.spent > 0 || assignedInMain.some(as => as.id === s.id))
-              .sort((a,b) => b.spent - a.spent);
-
-            const remainingTxs = mainTxs.filter(t => !coveredTxIds.has(t.id));
-            const remainingSpent = remainingTxs.reduce((sum, t) => sum + Math.abs(getEffectiveAmount(t, reimbursementMap)), 0);
-            
-            if (remainingSpent > 0.01) {
-                subStats.push({ id: `unassigned-${mainId}`, name: 'Ospecificerat / Övrigt', spent: remainingSpent, transactions: remainingTxs });
-            }
-
-            const mainSpent = mainTxs.reduce((sum, t) => sum + Math.abs(getEffectiveAmount(t, reimbursementMap)), 0);
-
-            return { id: mainId, name: mainName, spent: mainSpent, subs: subStats };
-        }).filter(m => m.subs.length > 0 || m.spent > 0).sort((a,b) => b.spent - a.spent);
-          
-        const totalAllocatedToMains = mainStats.reduce((sum, m) => sum + m.spent, 0);
-        const orphanSpent = groupSpent - totalAllocatedToMains;
-        
-        if (orphanSpent > 0.01) {
-             const orphanTxs = groupTxs.filter(t => !t.categoryMainId);
-             mainStats.push({
-                 id: 'orphan',
-                 name: 'Helt okategoriserat',
-                 spent: orphanSpent,
-                 subs: [{ id: 'orphan-sub', name: 'Transaktioner utan kategori', spent: orphanSpent, transactions: orphanTxs }]
-             });
-        }
-
-        return {
-            ...group,
-            monthlyLimit,
-            isAutoCalculated,
-            spent: groupSpent,
-            mains: mainStats,
-            totalFunding,
-            fundingGap
-        };
-
-    }).filter((g): g is NonNullable<typeof g> => g !== null)
-      .sort((a, b) => {
-        if (a.isCatchAll) return 1;
-        if (b.isCatchAll) return -1;
-        return a.name.localeCompare(b.name);
-    });
-
-    const totalLimit = groupStats.reduce((sum, g) => sum + g.monthlyLimit, 0);
-    const totalSpent = groupStats.reduce((sum, g) => sum + g.spent, 0);
-
-    return { groupStats, totalLimit, totalSpent, spendingGoals, txForMonth };
-
-  }, [transactions, selectedMonth, budgetGroups, subCategories, mainCategories, buckets, settings.payday, includeEvents, startStr, endStr, reimbursementMap]);
+      return { groups, totalBudget, totalSpent, totalIncome };
+  }, [budgetGroups, subCategories, buckets, transactions, selectedMonth, settings.payday, startStr, endStr, reimbursementMap]);
 
   // --- HANDLERS ---
+
   const toggleGroup = (id: string) => {
       const next = new Set(expandedGroups);
       if (next.has(id)) next.delete(id); else next.add(id);
       setExpandedGroups(next);
   };
 
-  const toggleMain = (id: string) => {
-      const next = new Set(expandedMains);
-      if (next.has(id)) next.delete(id); else next.add(id);
-      setExpandedMains(next);
+  const startEditingSub = (sub: SubCategory) => {
+      setEditingSubId(sub.id);
+      setTempSubBudget(sub.monthlyBudget?.toString() || '');
   };
 
-  const toggleSub = (id: string) => {
-      const next = new Set(expandedSubs);
-      if (next.has(id)) next.delete(id); else next.add(id);
-      setExpandedSubs(next);
+  const saveSubBudget = async (sub: SubCategory) => {
+      const val = parseFloat(tempSubBudget);
+      await updateSubCategory({ ...sub, monthlyBudget: isNaN(val) ? 0 : val });
+      setEditingSubId(null);
   };
 
-  const toggleGoal = (id: string) => {
-      const next = new Set(expandedGoals);
-      if (next.has(id)) next.delete(id); else next.add(id);
-      setExpandedGoals(next);
+  // --- MOVE HANDLERS ---
+  const handleMoveSubCategory = async (sub: SubCategory, newGroupId: string) => {
+      await updateSubCategory({ ...sub, budgetGroupId: newGroupId });
   };
 
-  const openModal = (group?: BudgetGroup) => {
+  const handleUnlinkSubCategory = async (sub: SubCategory) => {
+      await updateSubCategory({ ...sub, budgetGroupId: undefined });
+  };
+
+  const handleMoveBucket = async (bucket: Bucket, newGroupId: string) => {
+      await updateBucket({ ...bucket, budgetGroupId: newGroupId });
+  };
+
+  const handleUnlinkBucket = async (bucket: Bucket) => {
+      await updateBucket({ ...bucket, budgetGroupId: undefined });
+  };
+
+  // Group Modal
+  const openGroupModal = (group?: BudgetGroup) => {
       setDeleteMode(false);
+      setShowGroupSettings(false);
       if (group) {
           setEditingGroup(group);
-          setShowDetails(false);
-          
-          // Determine logic for Limit Field
-          const explicitData = group.monthlyData?.[selectedMonth];
-          const hasLinks = group.linkedBucketIds && group.linkedBucketIds.length > 0;
-          
-          // Re-calculate funding for display/logic
-          const fundingBuckets = buckets.filter(b => group.linkedBucketIds?.includes(b.id));
-          const funding = fundingBuckets.reduce((sum, b) => {
-                if (b.linkedGoalId) {
-                    const parentGoal = buckets.find(g => g.id === b.linkedGoalId);
-                    if (parentGoal) {
-                        const eventDist = calculateEventDistribution(parentGoal, selectedMonth);
-                        if (eventDist) return sum + eventDist.amount;
-                    }
-                }
-                if (b.type === 'FIXED') return sum + calculateFixedBucketCost(b, selectedMonth);
-                if (b.type === 'DAILY') return sum + calculateDailyBucketCost(b, selectedMonth, settings.payday);
-                if (b.type === 'GOAL') return sum + calculateGoalBucketCost(b, selectedMonth);
-                return sum;
-          }, 0);
-          setCalculatedFunding(funding);
-
-          // If no explicit override for this month AND we have links -> Auto Mode
-          if (!explicitData && hasLinks) {
-              setUseAutoLimit(true);
-              setEditingLimit(funding);
-          } else {
-              setUseAutoLimit(false);
-              // Fallback to inheritance or explicit value
-              if (explicitData) {
-                  setEditingLimit(explicitData.limit);
-              } else {
-                  const { data } = getEffectiveBudgetGroupData(group, selectedMonth);
-                  setEditingLimit(data?.limit || 0);
-              }
-          }
+          const { data } = getEffectiveBudgetGroupData(group, selectedMonth);
+          setEditingLimit(data ? data.limit : 0);
       } else {
-          setEditingGroup({
-              id: '',
-              name: '',
-              icon: '📁',
-              monthlyData: {},
-              linkedBucketIds: [],
-              forecastType: 'VARIABLE'
-          });
+          setEditingGroup({ id: '', name: '', icon: '📁', monthlyData: {} });
           setEditingLimit(0);
-          setUseAutoLimit(false);
-          setCalculatedFunding(0);
-          setShowDetails(true); // Auto expand for new groups
+          setShowGroupSettings(true);
       }
-      setIsModalOpen(true);
+      setIsGroupModalOpen(true);
   };
 
-  const handleSaveGroup = async () => {
+  const saveGroup = async () => {
       if (!editingGroup) return;
-
       if (!editingGroup.id) {
-          // New Group
-          await addBudgetGroup(editingGroup.name || 'Ny Grupp', editingLimit, editingGroup.icon || '📁');
+          await addBudgetGroup(editingGroup.name, editingLimit, editingGroup.icon || '📁');
       } else {
-          // Update Existing
-          const newMonthlyData = { ...editingGroup.monthlyData };
-          
-          if (useAutoLimit) {
-              // If Auto: REMOVE explicit entry for this month so it falls back to auto calculation in the view
-              delete newMonthlyData[selectedMonth];
-          } else {
-              // If Manual: SET explicit entry
-              newMonthlyData[selectedMonth] = { limit: editingLimit, isExplicitlyDeleted: false };
-          }
-
-          const updatedGroup = {
-              ...editingGroup,
-              monthlyData: newMonthlyData
-          };
-          await updateBudgetGroup(updatedGroup);
+          const newData = { ...editingGroup.monthlyData, [selectedMonth]: { limit: editingLimit, isExplicitlyDeleted: false } };
+          await updateBudgetGroup({ ...editingGroup, monthlyData: newData });
       }
-      setIsModalOpen(false);
+      setIsGroupModalOpen(false);
   };
 
-  const handleDelete = (scope: 'THIS_MONTH' | 'THIS_AND_FUTURE' | 'ALL') => {
-      if (editingGroup?.id) {
-          deleteBudgetGroup(editingGroup.id, selectedMonth, scope);
-          setIsModalOpen(false);
+  // Move Modal Openers
+  const openMoveModalSub = (sub: SubCategory) => {
+      setMovingSubCategory(sub);
+      setMovingBucket(null);
+      setIsMoveModalOpen(true);
+  };
+
+  const openMoveModalBucket = (bucket: Bucket) => {
+      setMovingBucket(bucket);
+      setMovingSubCategory(null);
+      setIsMoveModalOpen(true);
+  };
+
+  // Bucket Modal
+  const openBucketModal = (group: BudgetGroup, bucket?: Bucket) => {
+      setActiveGroupId(group.id);
+      setShowBucketDetails(false);
+      
+      if (bucket) {
+          setEditingBucket(bucket);
+          const { data } = getEffectiveBucketData(bucket, selectedMonth);
+          setEditingBucketData(data || { amount: 0, dailyAmount: 0, activeDays: [1,2,3,4,5] });
+      } else {
+          // New Bucket
+          setEditingBucket({
+              id: generateId(),
+              accountId: group.defaultAccountId || accounts[0]?.id || '', // Default to group account or first account
+              name: '',
+              type: 'FIXED', // Default, but can be changed to GOAL
+              isSavings: false,
+              paymentSource: 'INCOME',
+              monthlyData: {},
+              targetAmount: 0,
+              targetDate: format(addMonths(new Date(), 12), 'yyyy-MM'),
+              startSavingDate: selectedMonth,
+              budgetGroupId: group.id, // Link to group
+              backgroundImage: DREAM_IMAGES[0]
+          });
+          setEditingBucketData({ amount: 0, dailyAmount: 0, activeDays: [1,2,3,4,5] });
+          setShowBucketDetails(true);
+      }
+      setIsBucketModalOpen(true);
+  };
+
+  const saveBucket = async () => {
+      if (!editingBucket) return;
+      
+      // Ensure we have an account ID (fallback)
+      if (!editingBucket.accountId && accounts.length > 0) {
+          editingBucket.accountId = accounts[0].id;
+      }
+
+      // Ensure isSavings is set true for GOAL if not manually set
+      const bucketToSave = { ...editingBucket };
+      if (bucketToSave.type === 'GOAL') {
+          bucketToSave.isSavings = true;
+      }
+
+      const newData = { ...editingBucket.monthlyData, [selectedMonth]: editingBucketData };
+      bucketToSave.monthlyData = newData;
+
+      if (buckets.find(b => b.id === bucketToSave.id)) {
+          await updateBucket(bucketToSave);
+      } else {
+          await addBucket(bucketToSave);
+      }
+      setIsBucketModalOpen(false);
+  };
+
+  const deleteBucketHandler = async () => {
+      if (editingBucket) {
+          await deleteBucket(editingBucket.id, selectedMonth, 'ALL');
+          setIsBucketModalOpen(false);
       }
   };
 
-  const handleAddSubCategory = async () => {
-      if (!newSubName.trim() || !selectedMainId || !editingGroup?.id) return;
-      const newId = await addSubCategory(selectedMainId, newSubName);
-      const sub: SubCategory = { id: newId, mainCategoryId: selectedMainId, name: newSubName };
-      await updateSubCategory({ ...sub, budgetGroupId: editingGroup.id });
-      setNewSubName('');
-  };
-
-  const handleRemoveCategory = (sub: SubCategory) => {
-      updateSubCategory({ ...sub, budgetGroupId: undefined });
-  };
-
-  const toggleLinkedBucket = (bucketId: string) => {
-      if (!editingGroup) return;
-      const currentIds = editingGroup.linkedBucketIds || [];
-      const newIds = currentIds.includes(bucketId) 
-        ? currentIds.filter(id => id !== bucketId)
-        : [...currentIds, bucketId];
-      
-      const newGroup = { ...editingGroup, linkedBucketIds: newIds };
-      setEditingGroup(newGroup);
-
-      // Re-calc funding dynamically when toggling
-      const funding = buckets.filter(b => newIds.includes(b.id)).reduce((sum, b) => {
-            if (b.type === 'FIXED') return sum + calculateFixedBucketCost(b, selectedMonth);
-            if (b.type === 'DAILY') return sum + calculateDailyBucketCost(b, selectedMonth, settings.payday);
-            if (b.type === 'GOAL') return sum + calculateGoalBucketCost(b, selectedMonth);
-            return sum;
-      }, 0);
-      setCalculatedFunding(funding);
-      
-      // If in Auto Mode, update limit immediately
-      if (useAutoLimit) {
-          setEditingLimit(funding);
+  const openDrillDown = (title: string, txs: Transaction[]) => {
+      if (txs.length > 0) {
+          setDrillDownData({ title, transactions: txs });
       }
   };
 
   return (
     <div className="space-y-6 pb-24 animate-in slide-in-from-right duration-300">
-      <header>
-          <div className="flex justify-between items-start">
-              <div className="flex items-center gap-3 mb-2">
-                <div className="bg-gradient-to-br from-emerald-500 to-teal-600 p-2 rounded-xl text-white">
-                    <PieChart className="w-6 h-6" />
-                </div>
-                <div>
-                    <h1 className="text-3xl font-bold text-transparent bg-clip-text bg-gradient-to-r from-emerald-400 to-teal-400">Driftbudget</h1>
-                    <div className="text-[10px] text-slate-400 font-mono bg-slate-800/50 px-2 py-0.5 rounded-full inline-flex items-center gap-1 mt-1">
-                        <Calendar size={10} /> {intervalLabel}
-                    </div>
-                </div>
-              </div>
-          </div>
-          <p className="text-slate-400 text-sm">Uppföljning av kostnader per Budgetgrupp och Kategori.</p>
-      </header>
-
-      {/* DASHBOARD SUMMARY */}
-      <div className="bg-slate-800/50 p-4 rounded-2xl border border-slate-700 flex justify-between items-center shadow-lg">
-          <div>
-              <div className="text-xs font-bold text-slate-500 uppercase tracking-wider mb-1">Total Driftbudget</div>
-              <div className="text-2xl font-mono font-bold text-white">{formatMoney(data.totalLimit)}</div>
-          </div>
-          <div className="text-right">
-              <div className="text-xs font-bold text-slate-500 uppercase tracking-wider mb-1">Totalt Utfall</div>
-              <div className={cn("text-2xl font-mono font-bold", data.totalSpent > data.totalLimit ? "text-rose-400" : "text-emerald-400")}>
-                  {formatMoney(data.totalSpent)}
-              </div>
-          </div>
-      </div>
       
-      <div className="h-2 w-full bg-slate-800 rounded-full overflow-hidden">
-         <div 
-            className={cn("h-full transition-all duration-500", data.totalSpent > data.totalLimit ? "bg-rose-500" : "bg-emerald-500")}
-            style={{ width: `${Math.min((data.totalSpent / (data.totalLimit || 1))*100, 100)}%` }}
-         />
+      {/* HEADER STATS */}
+      <div className="grid grid-cols-2 gap-4">
+          <div className="bg-slate-800 p-4 rounded-2xl border border-slate-700">
+              <div className="text-xs font-bold text-slate-500 uppercase tracking-wider mb-1">Total Inkomst (Period)</div>
+              <div className="text-2xl font-mono font-bold text-emerald-400">{formatMoney(data.totalIncome)}</div>
+          </div>
+          <div className="bg-slate-800 p-4 rounded-2xl border border-slate-700">
+              <div className="text-xs font-bold text-slate-500 uppercase tracking-wider mb-1">Total Driftbudget</div>
+              <div className="text-2xl font-mono font-bold text-blue-400">{formatMoney(data.totalBudget)}</div>
+          </div>
       </div>
 
-      {/* BUDGET GROUPS */}
+      {/* BUDGET GROUPS LIST */}
       <div className="space-y-4">
-          {data.groupStats.map(group => {
+          {data.groups.map(group => {
               const isExpanded = expandedGroups.has(group.id);
-              const remaining = group.monthlyLimit - group.spent;
-              const isOver = remaining < 0;
-              const hasFundingSource = group.linkedBucketIds && group.linkedBucketIds.length > 0;
-              const isUnderFunded = group.fundingGap < 0;
+              const isOver = group.totalSpent > group.totalBudget && group.totalBudget > 0;
 
               return (
                   <div key={group.id} className={cn("bg-surface rounded-xl overflow-hidden border transition-all shadow-md", group.isCatchAll ? "border-dashed border-slate-600" : "border-slate-700")}>
-                      {/* GROUP HEADER */}
+                      {/* HEADER */}
                       <div 
                         className="p-4 cursor-pointer hover:bg-slate-800/80 transition-colors"
                         onClick={() => toggleGroup(group.id)}
                       >
                           <div className="flex justify-between items-start mb-2">
                               <div className="flex items-center gap-3">
-                                  {isExpanded ? <ChevronDown className="w-5 h-5 text-emerald-400"/> : <ChevronRight className="w-5 h-5 text-slate-500"/>}
+                                  {isExpanded ? <ChevronDown className="w-5 h-5 text-blue-400"/> : <ChevronRight className="w-5 h-5 text-slate-500"/>}
                                   <div>
                                       <h3 className="text-lg font-bold text-white flex items-center gap-2">
                                           {group.icon} {group.name}
                                           {isOver && <AlertTriangle className="w-4 h-4 text-rose-500" />}
                                       </h3>
-                                      
-                                      {/* FUNDING STATUS INDICATOR */}
-                                      <div className="text-xs mt-1">
-                                          {hasFundingSource ? (
-                                              group.isAutoCalculated ? (
-                                                  <span className="text-blue-400 flex items-center gap-1 font-medium bg-blue-500/10 px-1.5 py-0.5 rounded">
-                                                      <RefreshCw size={10} /> Auto ({formatMoney(group.monthlyLimit)})
-                                                  </span>
-                                              ) : (
-                                                  isUnderFunded ? (
-                                                      <span className="text-amber-500 flex items-center gap-1 font-medium animate-pulse" title={`Du behöver föra över ${formatMoney(Math.abs(group.fundingGap))} mer till kopplade konton.`}>
-                                                          <AlertTriangle size={12} /> Underfinansierad ({formatMoney(group.fundingGap)})
-                                                      </span>
-                                                  ) : (
-                                                      <span className="text-emerald-500 flex items-center gap-1 font-medium">
-                                                          <Check size={12} /> Finansiering säkrad ({formatMoney(group.totalFunding)})
-                                                      </span>
-                                                  )
-                                              )
-                                          ) : (
-                                              !group.isCatchAll && <span className="text-slate-500 italic flex items-center gap-1"><ArrowRightLeft size={10}/> Ingen finansieringskälla kopplad</span>
-                                          )}
-                                          {group.isCatchAll && <span className="text-[10px] text-orange-400 uppercase font-bold bg-orange-500/10 px-1 rounded inline-block mt-0.5">Övrigt</span>}
+                                      <div className="text-xs text-slate-400 mt-0.5">
+                                          {group.isAuto ? 
+                                            `Auto-beräknad (${group.subs.length} kat, ${group.customPosts.length} fasta)` : 
+                                            "Manuell budget"}
                                       </div>
                                   </div>
                               </div>
-                              
-                              <div className="flex items-center justify-end gap-2 group/edit">
-                                  <span className="font-mono font-bold text-white">{formatMoney(group.spent)}</span>
-                                  <span className="text-slate-500 text-xs">/ {formatMoney(group.monthlyLimit)}</span>
-                                  <button 
-                                    onClick={(e) => { e.stopPropagation(); openModal(group); }} 
-                                    className="p-1 text-slate-500 hover:text-white transition-colors"
+                              <div className="text-right">
+                                  <div className="font-mono font-bold text-white text-lg">
+                                      {formatMoney(group.totalBudget)}
+                                  </div>
+                                  <div 
+                                    className="text-slate-500 text-xs hover:text-blue-400 hover:underline cursor-pointer mt-0.5"
+                                    onClick={(e) => {
+                                        e.stopPropagation();
+                                        openDrillDown(`${group.name} - Totalt Utfall`, group.allTransactions);
+                                    }}
                                   >
-                                      <Settings size={14} />
-                                  </button>
+                                      Utfall: {formatMoney(group.totalSpent)}
+                                  </div>
                               </div>
                           </div>
-                          <BudgetProgressBar spent={group.spent} total={group.monthlyLimit} />
+                          <BudgetProgressBar spent={group.totalSpent} total={group.totalBudget} />
                       </div>
 
-                      {/* MAIN CATEGORIES (Level 2) */}
+                      {/* EXPANDED CONTENT */}
                       {isExpanded && (
-                          <div className="bg-slate-900/30 border-t border-slate-700/50">
-                              {group.mains.length === 0 && (
-                                  <div className="p-4 text-center text-sm text-slate-500 italic">Inga utgifter registrerade.</div>
-                              )}
+                          <div className="bg-slate-900/30 border-t border-slate-700/50 p-3 space-y-6 animate-in slide-in-from-top-2">
                               
-                              {group.mains.map(main => {
-                                  const mainKey = `${group.id}-${main.id}`;
-                                  const isMainExpanded = expandedMains.has(mainKey);
+                              {/* ACTIONS ROW */}
+                              <div className="flex justify-between items-center">
+                                  <button 
+                                    onClick={() => openGroupModal(group)}
+                                    className="text-xs flex items-center gap-1 text-slate-400 hover:text-white bg-slate-800 px-3 py-1.5 rounded-full border border-slate-700 transition-colors"
+                                  >
+                                      <Settings size={12} /> Inställningar & Konto
+                                  </button>
+                              </div>
+
+                              {/* SUBCATEGORIES SECTION */}
+                              <div className="space-y-3">
+                                  <h4 className="text-xs font-bold text-slate-500 uppercase tracking-wider pl-1">Kategorier</h4>
+                                  {group.subs.length === 0 && <div className="text-xs text-slate-600 italic pl-2">Inga kategorier kopplade.</div>}
                                   
-                                  return (
-                                      <div key={mainKey} className="border-b border-slate-700/30 last:border-0">
-                                          <div 
-                                            className="px-4 py-3 flex justify-between items-center cursor-pointer hover:bg-slate-800/40"
-                                            onClick={() => toggleMain(mainKey)}
-                                          >
-                                              <div className="flex items-center gap-2 pl-4">
-                                                   {isMainExpanded ? <ChevronDown className="w-4 h-4 text-slate-400"/> : <ChevronRight className="w-4 h-4 text-slate-600"/>}
-                                                   <span className="text-sm font-medium text-slate-200">{main.name}</span>
-                                              </div>
-                                              <div className="text-sm font-mono text-slate-300">
-                                                  {formatMoney(main.spent)}
+                                  {group.subs.map(sub => {
+                                      const parent = mainCategories.find(m => m.id === sub.mainCategoryId);
+                                      const isEditing = editingSubId === sub.id;
+
+                                      return (
+                                          <div key={sub.id} className="bg-slate-800/50 p-3 rounded-xl border border-slate-700/50 flex flex-col gap-3">
+                                              <div className="flex justify-between items-start">
+                                                  <div>
+                                                      <div className="font-medium text-base text-slate-200 flex items-center gap-2">
+                                                          {sub.name}
+                                                          <button onClick={() => openMoveModalSub(sub)} className="text-slate-500 hover:text-blue-400" title="Flytta till annan grupp">
+                                                              <ArrowRight size={12} />
+                                                          </button>
+                                                          <button onClick={() => handleUnlinkSubCategory(sub)} className="text-slate-600 hover:text-rose-400" title="Koppla ifrån"><X size={12}/></button>
+                                                      </div>
+                                                      <div className="text-[10px] text-slate-500 mt-0.5 flex items-center gap-2">
+                                                          <span>{parent?.name}</span>
+                                                          <span>•</span>
+                                                          <span>Snitt: {formatMoney(sub.avgSpend)}</span>
+                                                          <span>•</span>
+                                                          <span 
+                                                            className={cn("cursor-pointer hover:underline", sub.spent > 0 ? "text-slate-300 hover:text-blue-400" : "text-slate-500")}
+                                                            onClick={() => openDrillDown(sub.name, sub.transactions)}
+                                                          >
+                                                              Utfall: {formatMoney(sub.spent)}
+                                                          </span>
+                                                      </div>
+                                                  </div>
+                                                  
+                                                  <div className="text-right">
+                                                      <div className="text-[10px] uppercase font-bold text-slate-500 mb-0.5">Budget</div>
+                                                      {isEditing ? (
+                                                          <div className="flex items-center gap-1">
+                                                              <input 
+                                                                type="number"
+                                                                className="bg-slate-900 border border-slate-600 rounded px-2 py-1 w-20 text-right text-white font-mono text-sm focus:border-blue-500 outline-none"
+                                                                value={tempSubBudget}
+                                                                onChange={(e) => setTempSubBudget(e.target.value)}
+                                                                onKeyDown={(e) => e.key === 'Enter' && saveSubBudget(sub)}
+                                                                autoFocus
+                                                                placeholder="0"
+                                                              />
+                                                              <button onClick={() => saveSubBudget(sub)} className="bg-blue-600 text-white p-1 rounded hover:bg-blue-500"><Check size={14}/></button>
+                                                          </div>
+                                                      ) : (
+                                                          <div 
+                                                            className="text-2xl font-mono font-bold text-white cursor-pointer hover:text-blue-400 transition-colors"
+                                                            onClick={() => startEditingSub(sub)}
+                                                            title="Klicka för att ändra budget"
+                                                          >
+                                                              {formatMoney(sub.budget)}
+                                                          </div>
+                                                      )}
+                                                  </div>
                                               </div>
                                           </div>
+                                      );
+                                  })}
 
-                                          {/* SUB CATEGORIES (Level 3) */}
-                                          {isMainExpanded && (
-                                              <div className="bg-slate-950/30 pb-2">
-                                                  {main.subs.map(sub => {
-                                                      const subKey = `${group.id}-${main.id}-${sub.id}`;
-                                                      const isSubExpanded = expandedSubs.has(subKey);
-
-                                                      return (
-                                                        <div key={subKey} className="flex flex-col">
-                                                            <div 
-                                                                className="pl-12 pr-4 py-2 flex justify-between items-start text-xs hover:bg-white/5 cursor-pointer"
-                                                                onClick={() => toggleSub(subKey)}
-                                                            >
-                                                                <div className="flex items-center gap-2">
-                                                                    {isSubExpanded ? <ChevronDown className="w-3 h-3 text-slate-500"/> : <ChevronRight className="w-3 h-3 text-slate-500"/>}
-                                                                    <div className="flex flex-col">
-                                                                        <span className="text-slate-400 font-medium">{sub.name}</span>
-                                                                        <span className="text-slate-600 text-[10px]">{sub.transactions.length} transaktioner</span>
-                                                                    </div>
-                                                                </div>
-                                                                <div className="text-right">
-                                                                    <span className="text-slate-300 font-mono">{formatMoney(sub.spent)}</span>
-                                                                </div>
-                                                            </div>
-
-                                                            {/* TRANSACTION LIST (Level 4) */}
-                                                            {isSubExpanded && sub.transactions.length > 0 && (
-                                                                <div className="pl-16 pr-4 pb-3 space-y-1">
-                                                                    {sub.transactions.map(t => {
-                                                                        const eff = getEffectiveAmount(t, reimbursementMap);
-                                                                        // If fully reimbursed (net 0), should we show it? Yes, maybe as 0 kr.
-                                                                        
-                                                                        return (
-                                                                            <div key={t.id} className="flex justify-between items-center text-[10px] py-1 border-b border-white/5 last:border-0">
-                                                                                <div className="flex flex-col max-w-[70%]">
-                                                                                    <span className="text-slate-400 truncate">{t.description}</span>
-                                                                                    {t.bucketId && <span className="text-[9px] text-purple-400 flex items-center gap-0.5"><Plane size={8}/> Kopplad till event</span>}
-                                                                                </div>
-                                                                                <div className="flex gap-2 text-right">
-                                                                                    <span className="text-slate-600">{t.date}</span>
-                                                                                    <span className="text-slate-300 font-mono">{formatMoney(eff)}</span>
-                                                                                </div>
-                                                                            </div>
-                                                                        );
-                                                                    })}
-                                                                </div>
-                                                            )}
-                                                        </div>
-                                                      );
-                                                  })}
+                                  {/* CATCH ALL / UNBUDGETED ROWS FOR GROUP */}
+                                  {group.isCatchAll && group.extraSpent > 0 && (
+                                      <div className="bg-rose-950/20 border border-rose-500/20 p-2 rounded-lg mt-2">
+                                          <div className="flex justify-between items-center">
+                                              <div className="text-xs text-rose-300 font-bold flex items-center gap-1">
+                                                  <AlertTriangle size={12} /> Övrigt / Ospecificerat
                                               </div>
-                                          )}
+                                              <div 
+                                                className="font-mono text-rose-400 font-bold text-sm cursor-pointer hover:underline"
+                                                onClick={() => openDrillDown(`${group.name} - Övrigt`, group.catchAllTransactions)}
+                                              >
+                                                  {formatMoney(group.extraSpent)}
+                                              </div>
+                                          </div>
                                       </div>
-                                  );
-                              })}
+                                  )}
+
+                                  <Button 
+                                    variant="ghost" 
+                                    onClick={() => { setActiveGroupId(group.id); setIsCatPickerOpen(true); }}
+                                    className="w-full border border-dashed border-slate-700 text-slate-500 text-xs py-2 h-auto"
+                                  >
+                                      <Plus size={12} className="mr-1"/> Koppla Kategori
+                                  </Button>
+                              </div>
+
+                              {/* CUSTOM POSTS SECTION (Buckets) */}
+                              <div className="space-y-3">
+                                  <h4 className="text-xs font-bold text-slate-500 uppercase tracking-wider pl-1 mt-4">Fasta Poster / Mål</h4>
+                                  {group.customPosts.length === 0 && <div className="text-xs text-slate-600 italic pl-2">Inga fasta poster.</div>}
+
+                                  {group.customPosts.map(bucket => (
+                                      <div key={bucket.id} onClick={() => openBucketModal(group, bucket)} className="bg-slate-800/50 p-3 rounded-xl border border-slate-700/50 hover:bg-slate-800 transition-colors cursor-pointer group/bucket">
+                                          <div className="flex justify-between items-center">
+                                              <div className="flex items-center gap-3">
+                                                  <div className="p-2 bg-slate-900 rounded-lg text-slate-400">
+                                                      {bucket.type === 'FIXED' && <Calendar size={16} className="text-blue-400" />}
+                                                      {bucket.type === 'DAILY' && <RefreshCw size={16} className="text-orange-400" />}
+                                                      {bucket.type === 'GOAL' && <Rocket size={16} className="text-purple-400" />}
+                                                  </div>
+                                                  <div>
+                                                      <div className="text-base font-medium text-slate-200 flex items-center gap-2">
+                                                          {bucket.name}
+                                                          <button onClick={(e) => { e.stopPropagation(); openMoveModalBucket(bucket); }} className="text-slate-500 hover:text-blue-400" title="Flytta">
+                                                              <ArrowRight size={12} />
+                                                          </button>
+                                                      </div>
+                                                      <div className="text-[10px] text-slate-500 mt-0.5 uppercase tracking-wider">
+                                                          {bucket.type === 'FIXED' ? 'Fast' : (bucket.type === 'DAILY' ? 'Daglig' : 'Mål')}
+                                                      </div>
+                                                  </div>
+                                              </div>
+                                              
+                                              <div className="text-right">
+                                                  <div className="font-mono text-white text-lg font-bold">{formatMoney(bucket.cost)}</div>
+                                                  {bucket.spent > 0 && (
+                                                      <div 
+                                                        className="text-[10px] text-rose-400 hover:text-rose-300 hover:underline cursor-pointer mt-0.5"
+                                                        onClick={(e) => {
+                                                            e.stopPropagation();
+                                                            openDrillDown(bucket.name, bucket.transactions);
+                                                        }}
+                                                      >
+                                                          -{formatMoney(bucket.spent)}
+                                                      </div>
+                                                  )}
+                                              </div>
+                                          </div>
+                                      </div>
+                                  ))}
+
+                                  <Button 
+                                    variant="ghost" 
+                                    onClick={() => openBucketModal(group)}
+                                    className="w-full border border-dashed border-slate-700 text-slate-500 text-xs py-2 h-auto"
+                                  >
+                                      <Plus size={12} className="mr-1"/> Skapa Fast Post / Mål
+                                  </Button>
+                              </div>
+
                           </div>
                       )}
                   </div>
               );
           })}
-
-          <Button variant="secondary" onClick={() => openModal()} className="w-full border-dashed border-slate-700 py-4 text-slate-400 hover:text-white mt-8">
+          
+          <Button variant="secondary" onClick={() => openGroupModal()} className="w-full border-dashed border-slate-700 py-4 text-slate-400 hover:text-white mt-8">
               <Plus className="w-5 h-5 mr-2" /> Skapa ny budgetgrupp
           </Button>
-
-          {/* --- SPENDING GOALS SECTION (Planerade Inköp) --- */}
-          {data.spendingGoals.length > 0 && (
-            <div className="mt-12 space-y-4 animate-in fade-in slide-in-from-bottom-4 border-t border-slate-700/50 pt-8">
-                <h3 className="text-lg font-bold text-white flex items-center gap-2">
-                    <Rocket className="text-purple-400 w-5 h-5" /> Planerade Inköp (Från sparande)
-                </h3>
-                <p className="text-xs text-slate-400">Här visas aktiva sparmål/resor som är redo att användas denna månad.</p>
-                
-                {data.spendingGoals.map(goal => {
-                    const isExpanded = expandedGoals.has(goal.id);
-                    // Use the calculated proportional budget instead of total target
-                    const budget = goal.monthlyBudget;
-                    const spent = goal.spent;
-
-                    return (
-                        <div key={goal.id} className="bg-slate-800 rounded-xl overflow-hidden border border-purple-500/30 shadow-lg">
-                            <div 
-                                className="p-4 relative cursor-pointer hover:bg-slate-700/50 transition-colors"
-                                onClick={() => toggleGoal(goal.id)}
-                            >
-                                <div className="absolute top-0 right-0 p-4 opacity-10 pointer-events-none">
-                                    <Rocket className="w-24 h-24 text-purple-500" />
-                                </div>
-                                <div className="flex justify-between items-center mb-2 relative z-10">
-                                    <div className="flex items-center gap-3">
-                                        {isExpanded ? <ChevronDown className="w-5 h-5 text-purple-400"/> : <ChevronRight className="w-5 h-5 text-slate-500"/>}
-                                        <div className="bg-purple-500/20 p-2 rounded-lg">
-                                            <span className="text-xl">🎯</span>
-                                        </div>
-                                        <div>
-                                            <div className="font-bold text-white">{goal.name}</div>
-                                            <div className="text-xs text-purple-300">{goal.label || "Sparat kapital används"}</div>
-                                        </div>
-                                    </div>
-                                    <div className="text-right relative z-10">
-                                        <div className="text-xl font-mono font-bold text-white">{formatMoney(spent)}</div>
-                                        <div className="text-xs text-slate-400">av {formatMoney(budget)}</div>
-                                    </div>
-                                </div>
-                                
-                                <BudgetProgressBar 
-                                    spent={spent} 
-                                    total={budget} 
-                                    label="Förbrukat av budget"
-                                    className="relative z-10"
-                                />
-                            </div>
-
-                            {/* GOAL BREAKDOWN (Categories for the trip) */}
-                            {isExpanded && (
-                                <div className="bg-slate-900/50 border-t border-purple-500/20">
-                                    {goal.mains.length === 0 && (
-                                        <div className="p-4 text-center text-sm text-slate-500 italic">Inga utgifter registrerade för denna dröm.</div>
-                                    )}
-                                    {goal.mains.map(main => {
-                                        const mainKey = `${goal.id}-${main.id}`;
-                                        const isMainExpanded = expandedMains.has(mainKey);
-                                        return (
-                                            <div key={mainKey} className="border-b border-purple-900/30 last:border-0">
-                                                <div 
-                                                    className="px-4 py-3 flex justify-between items-center cursor-pointer hover:bg-purple-900/10"
-                                                    onClick={() => toggleMain(mainKey)}
-                                                >
-                                                    <div className="flex items-center gap-2 pl-4">
-                                                        {isMainExpanded ? <ChevronDown className="w-4 h-4 text-slate-400"/> : <ChevronRight className="w-4 h-4 text-slate-600"/>}
-                                                        <span className="text-sm font-medium text-purple-100">{main.name}</span>
-                                                    </div>
-                                                    <div className="text-sm font-mono text-purple-200">
-                                                        {formatMoney(main.spent)}
-                                                    </div>
-                                                </div>
-
-                                                {/* Sub Categories inside Goal */}
-                                                {isMainExpanded && (
-                                                    <div className="bg-slate-950/30 pb-2">
-                                                        {main.subs.map(sub => (
-                                                            <div key={`${mainKey}-${sub.id}`} className="flex flex-col">
-                                                                <div className="pl-12 pr-4 py-2 flex justify-between items-center text-xs">
-                                                                    <span className="text-slate-400 font-medium">{sub.name}</span>
-                                                                    <span className="text-slate-300 font-mono">{formatMoney(sub.spent)}</span>
-                                                                </div>
-                                                                {/* Transactions List */}
-                                                                <div className="pl-16 pr-4 pb-1 space-y-1">
-                                                                    {sub.transactions.map(t => (
-                                                                        <div key={t.id} className="flex justify-between items-center text-[10px] py-1 border-b border-white/5 last:border-0">
-                                                                            <span className="text-slate-500 truncate max-w-[70%]">{t.description}</span>
-                                                                            <div className="flex gap-2">
-                                                                                <span className="text-slate-600">{t.date}</span>
-                                                                                <span className="text-slate-400 font-mono">{formatMoney(getEffectiveAmount(t, reimbursementMap))}</span>
-                                                                            </div>
-                                                                        </div>
-                                                                    ))}
-                                                                </div>
-                                                            </div>
-                                                        ))}
-                                                    </div>
-                                                )}
-                                            </div>
-                                        );
-                                    })}
-                                </div>
-                            )}
-                        </div>
-                    );
-                })}
-            </div>
-        )}
       </div>
 
-      {/* EDIT MODAL */}
-      <Modal isOpen={isModalOpen} onClose={() => setIsModalOpen(false)} title={editingGroup?.id ? `Redigera ${editingGroup.name}` : "Ny Budgetgrupp"}>
+      {/* --- MODALS --- */}
+
+      {/* DRILL DOWN MODAL */}
+      <Modal isOpen={!!drillDownData} onClose={() => setDrillDownData(null)} title={drillDownData?.title || 'Transaktioner'}>
+          {drillDownData && (
+              <div className="space-y-4">
+                  {/* TOTAL SUM HEADER */}
+                  <div className="bg-slate-800 p-4 rounded-xl border border-slate-700 flex justify-between items-center shadow-sm">
+                      <span className="text-slate-400 text-sm font-medium uppercase tracking-wider">Totalt Utfall</span>
+                      <span className="text-2xl font-bold font-mono text-white">
+                          {formatMoney(
+                              drillDownData.transactions.reduce((sum, t) => sum + Math.abs(getEffectiveAmount(t, reimbursementMap)), 0)
+                          )}
+                      </span>
+                  </div>
+
+                  {/* TRANSACTION LIST */}
+                  <div className="space-y-2 max-h-[50vh] overflow-y-auto pr-1">
+                      {drillDownData.transactions.length > 0 ? (
+                          drillDownData.transactions.map(t => {
+                              const effAmount = getEffectiveAmount(t, reimbursementMap);
+                              const isReimbursed = effAmount !== t.amount;
+                              
+                              return (
+                                  <div key={t.id} className="flex justify-between items-center p-3 bg-slate-900/50 border border-slate-800 rounded-lg">
+                                      <div className="flex-1 mr-4 overflow-hidden">
+                                          <div className="text-white font-medium truncate">{t.description}</div>
+                                          <div className="text-xs text-slate-500">{t.date}</div>
+                                      </div>
+                                      <div className="text-right">
+                                          <div className="font-mono font-bold text-white whitespace-nowrap">
+                                              {formatMoney(Math.abs(effAmount))}
+                                          </div>
+                                          {isReimbursed && (
+                                              <div className="text-[10px] text-emerald-400 flex items-center justify-end gap-1">
+                                                  <Link size={8} /> Orig: {formatMoney(Math.abs(t.amount))}
+                                              </div>
+                                          )}
+                                      </div>
+                                  </div>
+                              );
+                          })
+                      ) : (
+                          <div className="text-center text-slate-500 py-8 italic">Inga transaktioner hittades.</div>
+                      )}
+                  </div>
+              </div>
+          )}
+          <div className="mt-4 border-t border-slate-700 pt-4 flex justify-end">
+              <Button variant="secondary" onClick={() => setDrillDownData(null)}>Stäng</Button>
+          </div>
+      </Modal>
+
+      {/* GROUP SETTINGS MODAL */}
+      <Modal isOpen={isGroupModalOpen} onClose={() => setIsGroupModalOpen(false)} title={editingGroup?.id ? "Inställningar" : "Ny Grupp"}>
           {editingGroup && (
-              <div className="space-y-6">
-                  {/* Basic Info */}
-                  <div className="space-y-0">
-                      
-                      <div className={cn(
-                          "bg-slate-800/50 border border-slate-700 transition-all",
-                          showDetails ? "p-3 rounded-xl flex items-center justify-between gap-4" : "p-4 rounded-2xl"
-                      )}>
-                          <div className={showDetails ? "text-left" : "text-center w-full"}>
-                              <label className={cn("text-xs font-bold text-slate-400 uppercase tracking-wider block transition-all", showDetails ? "mb-0" : "mb-2")}>
-                                  Budget (Limit)
+              <div className="space-y-4">
+                  <Input label="Namn" value={editingGroup.name} onChange={e => setEditingGroup({...editingGroup, name: e.target.value})} />
+                  
+                  <div>
+                      <label className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-1 block">Finansierande Konto</label>
+                      <select 
+                          className="w-full bg-slate-900 border border-slate-700 rounded-xl px-4 py-3 text-white"
+                          value={editingGroup.defaultAccountId || ''}
+                          onChange={(e) => setEditingGroup({...editingGroup, defaultAccountId: e.target.value})}
+                      >
+                          <option value="">-- Välj Konto --</option>
+                          {accounts.map(acc => <option key={acc.id} value={acc.id}>{acc.icon} {acc.name}</option>)}
+                      </select>
+                      <p className="text-[10px] text-slate-500 mt-1">Detta konto används för att beräkna överföringsbehov för kategorierna i denna grupp.</p>
+                  </div>
+
+                  <div className="pt-2 border-t border-slate-700">
+                      <label className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-2 block">Manuell Budget (Reserv)</label>
+                      <div className="flex items-center gap-2">
+                          <input 
+                            type="number" 
+                            className="bg-slate-900 border border-slate-700 rounded-xl px-4 py-3 text-white flex-1 font-mono"
+                            value={editingLimit || ''}
+                            onChange={(e) => setEditingLimit(Number(e.target.value))}
+                            placeholder="0"
+                          />
+                          <span className="text-slate-500">kr</span>
+                      </div>
+                      <p className="text-[10px] text-slate-500 mt-1">Används som lägsta budgetgräns (även om kategorierna är 0), bra för buffert eller ospecificerat.</p>
+                  </div>
+
+                  <Button onClick={saveGroup} className="w-full">Spara</Button>
+              </div>
+          )}
+      </Modal>
+
+      {/* MOVE MODAL (Unified) */}
+      <Modal isOpen={isMoveModalOpen} onClose={() => setIsMoveModalOpen(false)} title="Flytta">
+          {(movingSubCategory || movingBucket) && (
+              <div className="space-y-4">
+                  <p className="text-sm text-slate-300">
+                      Välj vilken budgetgrupp du vill flytta <span className="font-bold text-white">{movingSubCategory ? movingSubCategory.name : movingBucket?.name}</span> till.
+                  </p>
+                  <div className="space-y-2">
+                      {budgetGroups.map(g => (
+                          <button 
+                            key={g.id}
+                            onClick={async () => {
+                                if (movingSubCategory) await handleMoveSubCategory(movingSubCategory, g.id);
+                                if (movingBucket) await handleMoveBucket(movingBucket, g.id);
+                                setIsMoveModalOpen(false);
+                            }}
+                            className={cn(
+                                "w-full text-left p-3 rounded-lg border transition-all flex items-center gap-3",
+                                g.id === (movingSubCategory ? movingSubCategory.budgetGroupId : movingBucket?.budgetGroupId) ? "bg-blue-600/20 border-blue-500 text-blue-200" : "bg-slate-800 border-slate-700 hover:bg-slate-700 text-slate-300"
+                            )}
+                          >
+                              <span className="text-xl">{g.icon}</span>
+                              <span className="font-bold text-sm">{g.name}</span>
+                              {g.id === (movingSubCategory ? movingSubCategory.budgetGroupId : movingBucket?.budgetGroupId) && <Check size={16} className="ml-auto" />}
+                          </button>
+                      ))}
+                      <button 
+                        onClick={async () => {
+                            if (movingSubCategory) await handleUnlinkSubCategory(movingSubCategory);
+                            if (movingBucket) await handleUnlinkBucket(movingBucket);
+                            setIsMoveModalOpen(false);
+                        }}
+                        className="w-full text-left p-3 rounded-lg border border-dashed border-slate-600 text-slate-400 hover:text-white hover:bg-slate-800"
+                      >
+                          <span className="text-sm">Ta bort från grupp (Okopplad)</span>
+                      </button>
+                  </div>
+              </div>
+          )}
+      </Modal>
+
+      {/* CATEGORY PICKER MODAL (Enhanced with Grouping) */}
+      <Modal isOpen={isCatPickerOpen} onClose={() => setIsCatPickerOpen(false)} title="Välj Kategori">
+          <div className="space-y-4 max-h-[60vh] overflow-y-auto pr-1">
+              
+              {/* Only show unlinked categories grouped by Main Category */}
+              {mainCategories.map(main => {
+                  const unlinkedSubs = subCategories.filter(s => 
+                      s.mainCategoryId === main.id && !s.budgetGroupId
+                  );
+
+                  if (unlinkedSubs.length === 0) return null;
+
+                  return (
+                      <div key={main.id} className="space-y-1">
+                          <h4 className="text-xs font-bold text-slate-500 uppercase tracking-wider py-1 pl-1">
+                              {main.name}
+                          </h4>
+                          <div className="space-y-1">
+                              {unlinkedSubs.map(sub => (
+                                  <button 
+                                    key={sub.id} 
+                                    onClick={() => { if (activeGroupId) { handleMoveSubCategory(sub, activeGroupId); setIsCatPickerOpen(false); }}}
+                                    className="w-full text-left bg-slate-800 p-3 rounded-lg border border-slate-700 hover:bg-slate-700 transition-colors flex justify-between items-center group"
+                                  >
+                                      <div>
+                                          <div className="font-bold text-white text-sm">{sub.name}</div>
+                                      </div>
+                                      <Plus size={16} className="text-emerald-500 opacity-0 group-hover:opacity-100 transition-opacity" />
+                                  </button>
+                              ))}
+                          </div>
+                      </div>
+                  );
+              })}
+
+              {subCategories.filter(s => !s.budgetGroupId).length === 0 && (
+                  <div className="text-center text-slate-500 italic py-8">
+                      Alla kategorier är redan kopplade till en budgetgrupp.
+                  </div>
+              )}
+          </div>
+      </Modal>
+
+      {/* CUSTOM POST (BUCKET) MODAL */}
+      <Modal isOpen={isBucketModalOpen} onClose={() => setIsBucketModalOpen(false)} title={editingBucket?.id && buckets.find(b => b.id === editingBucket.id) ? "Redigera Post" : "Ny Post"}>
+          {editingBucket && (
+              <div className="space-y-4">
+                  <Input label="Namn" value={editingBucket.name} onChange={e => setEditingBucket({...editingBucket, name: e.target.value})} autoFocus />
+                  
+                  {/* Type Selector */}
+                  <div className="flex bg-slate-900 rounded-lg p-1">
+                      <button onClick={() => setEditingBucket({...editingBucket, type: 'FIXED'})} className={cn("flex-1 py-2 text-xs rounded transition-all", editingBucket.type === 'FIXED' ? "bg-blue-600 text-white" : "text-slate-400")}>Fast</button>
+                      <button onClick={() => setEditingBucket({...editingBucket, type: 'DAILY'})} className={cn("flex-1 py-2 text-xs rounded transition-all", editingBucket.type === 'DAILY' ? "bg-orange-600 text-white" : "text-slate-400")}>Daglig</button>
+                      <button onClick={() => setEditingBucket({...editingBucket, type: 'GOAL'})} className={cn("flex-1 py-2 text-xs rounded transition-all", editingBucket.type === 'GOAL' ? "bg-purple-600 text-white" : "text-slate-400")}>Mål/Dröm</button>
+                  </div>
+
+                  {editingBucket.type === 'GOAL' ? (
+                      /* --- GOAL FORM (Same as DreamsView) --- */
+                      <div className="space-y-4 animate-in fade-in slide-in-from-right-4">
+                          <div>
+                              <label className="text-xs font-medium text-slate-400 uppercase tracking-wider block mb-1">Kopplat Konto</label>
+                              <select 
+                                  value={editingBucket.accountId}
+                                  onChange={(e) => setEditingBucket({...editingBucket, accountId: e.target.value})}
+                                  className="w-full bg-slate-900/50 border border-slate-700 rounded-xl px-4 py-3 text-white focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                              >
+                                  {accounts.map(acc => (
+                                      <option key={acc.id} value={acc.id}>
+                                          {acc.icon} {acc.name}
+                                      </option>
+                                  ))}
+                              </select>
+                          </div>
+
+                          <Input label="Målbelopp" type="number" value={editingBucket.targetAmount} onChange={e => setEditingBucket({...editingBucket, targetAmount: Number(e.target.value)})} />
+                          
+                          <div className="grid grid-cols-2 gap-4">
+                              <Input label="Startdatum" type="month" value={editingBucket.startSavingDate} onChange={e => setEditingBucket({...editingBucket, startSavingDate: e.target.value})} />
+                              <Input label="Slutdatum (Mål)" type="month" value={editingBucket.targetDate} onChange={e => setEditingBucket({...editingBucket, targetDate: e.target.value})} />
+                          </div>
+
+                          {/* Event Dates */}
+                          <div className="bg-slate-800/50 p-3 rounded-xl border border-slate-700/50 space-y-3">
+                              <div className="flex items-center gap-2 text-purple-300">
+                                  <Calendar size={16} />
+                                  <span className="text-xs font-bold uppercase">Resa / Event (Datum)</span>
+                              </div>
+                              <p className="text-[10px] text-slate-400">
+                                  Ange exakta datum för att automatiskt koppla korttransaktioner under resan (vid import).
+                              </p>
+                              <div className="grid grid-cols-2 gap-4">
+                                  <Input label="Start (Dag)" type="date" value={editingBucket.eventStartDate || ''} onChange={e => setEditingBucket({...editingBucket, eventStartDate: e.target.value})} />
+                                  <Input label="Slut (Dag)" type="date" value={editingBucket.eventEndDate || ''} onChange={e => setEditingBucket({...editingBucket, eventEndDate: e.target.value})} />
+                              </div>
+                              
+                              <label className="flex items-center gap-2 text-xs text-slate-300 cursor-pointer">
+                                  <input 
+                                      type="checkbox" 
+                                      checked={!!editingBucket.autoTagEvent} 
+                                      onChange={(e) => setEditingBucket({...editingBucket, autoTagEvent: e.target.checked})}
+                                      className="rounded border-slate-600 bg-slate-900 text-purple-500 focus:ring-purple-500"
+                                  />
+                                  Auto-koppla vid import
                               </label>
-                              {showDetails && useAutoLimit && (
-                                  <div className="text-[10px] text-blue-400 flex items-center gap-1 mt-0.5">
-                                      <Lock size={10} /> Auto
+                          </div>
+
+                          {/* Payment Source */}
+                          <div className="space-y-3 pt-2">
+                              <div className="text-xs font-medium text-slate-400 uppercase">Finansiering</div>
+                              <div className="flex flex-col gap-2">
+                                  <button 
+                                  onClick={() => setEditingBucket({...editingBucket, paymentSource: 'INCOME'})}
+                                  className={cn("p-3 rounded-xl border text-left flex items-center gap-3", (!editingBucket.paymentSource || editingBucket.paymentSource === 'INCOME') ? "bg-purple-500/20 border-purple-500 text-white" : "border-slate-700 text-slate-400")}
+                                  >
+                                      <Wallet className="w-5 h-5" />
+                                      <div>
+                                          <div className="font-bold text-sm">Från Månadslön (Budget)</div>
+                                          <div className="text-[10px] opacity-70">Skapar ett månadssparande som minskar fickpengar</div>
+                                      </div>
+                                  </button>
+                                  <button 
+                                  onClick={() => setEditingBucket({...editingBucket, paymentSource: 'BALANCE'})}
+                                  className={cn("p-3 rounded-xl border text-left flex items-center gap-3", editingBucket.paymentSource === 'BALANCE' ? "bg-amber-500/20 border-amber-500 text-white" : "border-slate-700 text-slate-400")}
+                                  >
+                                      <PiggyBank className="w-5 h-5" />
+                                      <div>
+                                          <div className="font-bold text-sm">Från Kontosaldo / Sparade Medel</div>
+                                          <div className="text-[10px] opacity-70">Påverkar ej månadens utrymme. Enbart för uppföljning av spenderande.</div>
+                                      </div>
+                                  </button>
+                              </div>
+                          </div>
+
+                          <div className="space-y-2">
+                              <label className="text-xs font-medium text-slate-400 uppercase tracking-wider">Välj Bild</label>
+                              <div className="flex gap-2 overflow-x-auto pb-2 no-scrollbar">
+                                  {DREAM_IMAGES.map((img, i) => (
+                                      <button 
+                                      key={i}
+                                      onClick={() => setEditingBucket({...editingBucket, backgroundImage: img})}
+                                      className={cn("w-16 h-16 shrink-0 rounded-lg overflow-hidden border-2 transition-all", editingBucket.backgroundImage === img ? "border-purple-500 scale-105" : "border-transparent opacity-60 hover:opacity-100")}
+                                      >
+                                          <img src={img} className="w-full h-full object-cover" alt="theme" />
+                                      </button>
+                                  ))}
+                              </div>
+                          </div>
+                      </div>
+                  ) : (
+                      /* --- FIXED/DAILY FORM (Original) --- */
+                      <div className="space-y-4 animate-in fade-in slide-in-from-left-4">
+                          {/* Amount Input */}
+                          <div className="bg-slate-800 p-3 rounded-xl border border-slate-700">
+                              <label className="text-xs font-bold text-slate-400 uppercase tracking-wider block mb-2">
+                                  {editingBucket.type === 'DAILY' ? 'Daglig Kostnad' : 'Månadskostnad'}
+                              </label>
+                              <div className="flex items-center gap-2">
+                                  <input 
+                                    type="number" 
+                                    className="bg-transparent text-3xl font-mono font-bold text-white w-full outline-none placeholder-slate-600"
+                                    placeholder="0"
+                                    value={editingBucket.type === 'DAILY' ? (editingBucketData.dailyAmount || '') : (editingBucketData.amount || '')}
+                                    onChange={(e) => {
+                                        const val = Number(e.target.value);
+                                        if (editingBucket.type === 'DAILY') setEditingBucketData({ ...editingBucketData, dailyAmount: val });
+                                        else setEditingBucketData({ ...editingBucketData, amount: val });
+                                    }}
+                                  />
+                                  <span className="text-slate-500 text-xl">kr</span>
+                              </div>
+                          </div>
+
+                          {/* Advanced Settings Toggle */}
+                          <div className="pt-2 border-t border-slate-700">
+                              <button onClick={() => setShowBucketDetails(!showBucketDetails)} className="flex items-center gap-2 text-xs text-slate-400 hover:text-white">
+                                  <Settings size={12} /> Fler inställningar (Konto, Sparande, etc) {showBucketDetails ? <ChevronUp size={10}/> : <ChevronDown size={10}/>}
+                              </button>
+                              
+                              {showBucketDetails && (
+                                  <div className="mt-3 space-y-3 animate-in slide-in-from-top-1">
+                                      <div>
+                                          <label className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-1 block">Konto (Finansiering)</label>
+                                          <select 
+                                              className="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2 text-white text-sm"
+                                              value={editingBucket.accountId}
+                                              onChange={(e) => setEditingBucket({...editingBucket, accountId: e.target.value})}
+                                          >
+                                              {accounts.map(acc => <option key={acc.id} value={acc.id}>{acc.icon} {acc.name}</option>)}
+                                          </select>
+                                      </div>
+                                      <div className="flex items-center gap-3">
+                                          <label className="flex items-center gap-2 text-sm text-slate-300">
+                                              <input type="checkbox" checked={editingBucket.isSavings} onChange={(e) => setEditingBucket({...editingBucket, isSavings: e.target.checked})} className="rounded bg-slate-900 border-slate-600" />
+                                              Är detta ett sparande?
+                                          </label>
+                                      </div>
+                                      {editingBucket.type === 'DAILY' && (
+                                          <div>
+                                              <label className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-1 block">Aktiva dagar</label>
+                                              <div className="flex justify-between">
+                                                  {['S','M','T','O','T','F','L'].map((d, i) => (
+                                                      <button 
+                                                        key={i}
+                                                        onClick={() => {
+                                                            const days = editingBucketData.activeDays.includes(i) ? editingBucketData.activeDays.filter(d => d !== i) : [...editingBucketData.activeDays, i];
+                                                            setEditingBucketData({ ...editingBucketData, activeDays: days });
+                                                        }}
+                                                        className={cn("w-8 h-8 rounded-full text-xs font-bold transition-all", editingBucketData.activeDays.includes(i) ? "bg-blue-600 text-white" : "bg-slate-900 text-slate-600")}
+                                                      >
+                                                          {d}
+                                                      </button>
+                                                  ))}
+                                              </div>
+                                          </div>
+                                      )}
                                   </div>
                               )}
                           </div>
-
-                          <div className={cn("flex items-center gap-2", showDetails ? "justify-end w-auto" : "justify-center w-full")}>
-                              <input 
-                                type="number" 
-                                value={editingLimit || ''} 
-                                onChange={e => {
-                                    setEditingLimit(Number(e.target.value));
-                                    if (useAutoLimit) setUseAutoLimit(false);
-                                }} 
-                                disabled={useAutoLimit}
-                                className={cn("bg-transparent font-mono font-bold focus:outline-none placeholder-slate-700 transition-all", 
-                                    useAutoLimit ? "text-blue-400" : "text-white",
-                                    showDetails ? "text-2xl text-right w-32" : "text-5xl text-center w-full"
-                                )}
-                                placeholder="0"
-                                autoFocus={!editingGroup.name}
-                              />
-                              {!showDetails && <span className="text-slate-500 text-xl">kr</span>}
-                          </div>
-                          
-                          {/* AUTO Toggle in Collapsed Mode */}
-                          {!showDetails && calculatedFunding > 0 && (
-                              <div className="mt-4 pt-3 border-t border-slate-700/50 flex flex-col items-center gap-2 animate-in slide-in-from-top-1">
-                                  <div className="text-xs text-slate-400">
-                                      Finansiering (Kassaflöde): <span className="font-mono text-white font-bold">{formatMoney(calculatedFunding)}</span>
-                                  </div>
-                                  
-                                  {useAutoLimit ? (
-                                      <button 
-                                        onClick={() => setUseAutoLimit(false)}
-                                        className="text-xs bg-slate-700 hover:bg-slate-600 text-white px-3 py-1.5 rounded-full flex items-center gap-1 transition-colors"
-                                      >
-                                          <Edit2 size={12} /> Ändra manuellt
-                                      </button>
-                                  ) : (
-                                      <button 
-                                        onClick={() => {
-                                            setUseAutoLimit(true);
-                                            setEditingLimit(calculatedFunding);
-                                        }}
-                                        className="text-xs bg-blue-600/20 hover:bg-blue-600/30 text-blue-300 border border-blue-500/30 px-3 py-1.5 rounded-full flex items-center gap-1 transition-colors"
-                                      >
-                                          <RefreshCw size={12} /> Återställ till Auto
-                                      </button>
-                                  )}
-                              </div>
-                          )}
                       </div>
+                  )}
 
-                      <div className="border-t border-slate-700 pt-2 mt-4">
-                        <button 
-                            onClick={() => setShowDetails(!showDetails)}
-                            className="flex items-center justify-between w-full p-2 text-sm text-slate-400 hover:text-white transition-colors"
-                        >
-                            <span className="flex items-center gap-2"><Settings className="w-4 h-4" /> Inställningar (Namn, Typ, Källa)</span>
-                            {showDetails ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
-                        </button>
-                        
-                        {showDetails && (
-                            <div className="space-y-4 pt-4 animate-in slide-in-from-top-2">
-                                <Input label="Namn" value={editingGroup.name} onChange={e => setEditingGroup({...editingGroup, name: e.target.value})} />
-                                
-                                {/* FORECAST TYPE SELECTOR */}
-                                <div>
-                                    <label className="text-xs font-bold text-slate-400 uppercase tracking-wider block mb-2">Prognostyp</label>
-                                    <div className="flex bg-slate-900 p-1 rounded-lg">
-                                        <button 
-                                            onClick={() => setEditingGroup({...editingGroup, forecastType: 'VARIABLE'})}
-                                            className={cn(
-                                                "flex-1 px-4 py-2 rounded-md text-xs font-bold transition-all flex items-center justify-center gap-2",
-                                                (!editingGroup.forecastType || editingGroup.forecastType === 'VARIABLE') ? "bg-indigo-600 text-white shadow" : "text-slate-400 hover:text-white"
-                                            )}
-                                        >
-                                            <BarChart3 size={14} />
-                                            Rörlig (Mat/Nöje)
-                                        </button>
-                                        <button 
-                                            onClick={() => setEditingGroup({...editingGroup, forecastType: 'FIXED'})}
-                                            className={cn(
-                                                "flex-1 px-4 py-2 rounded-md text-xs font-bold transition-all flex items-center justify-center gap-2",
-                                                editingGroup.forecastType === 'FIXED' ? "bg-blue-600 text-white shadow" : "text-slate-400 hover:text-white"
-                                            )}
-                                        >
-                                            <Calendar size={14} />
-                                            Fast (Räkningar)
-                                        </button>
-                                    </div>
-                                    <div className="mt-2 text-[10px] text-slate-500 italic px-1">
-                                        {(!editingGroup.forecastType || editingGroup.forecastType === 'VARIABLE') 
-                                            ? "Prognos baseras på snittförbrukning hittills + kvarvarande dagar." 
-                                            : "Prognos antar att hela budgetbeloppet kommer spenderas (om det inte redan överskridits)."}
-                                    </div>
-                                </div>
-
-                                {/* Auto Logic in Expanded Mode */}
-                                {calculatedFunding > 0 && (
-                                   <div className="bg-slate-800/50 p-3 rounded-xl border border-slate-700 flex justify-between items-center mt-4">
-                                       <div className="text-xs text-slate-400">
-                                          <div>Finansiering (Kassaflöde)</div>
-                                          <div className="font-mono text-white font-bold">{formatMoney(calculatedFunding)}</div>
-                                       </div>
-                                       {useAutoLimit ? (
-                                          <button 
-                                            onClick={() => setUseAutoLimit(false)}
-                                            className="text-xs bg-slate-700 hover:bg-slate-600 text-white px-3 py-1.5 rounded-full flex items-center gap-1 transition-colors"
-                                          >
-                                              <Edit2 size={12} /> Ändra
-                                          </button>
-                                      ) : (
-                                          <button 
-                                            onClick={() => {
-                                                setUseAutoLimit(true);
-                                                setEditingLimit(calculatedFunding);
-                                            }}
-                                            className="text-xs bg-blue-600/20 hover:bg-blue-600/30 text-blue-300 border border-blue-500/30 px-3 py-1.5 rounded-full flex items-center gap-1 transition-colors"
-                                          >
-                                              <RefreshCw size={12} /> Auto
-                                          </button>
-                                      )}
-                                   </div>
-                                )}
-
-                                {/* Icon */}
-                                <div>
-                                    <label className="text-xs font-bold text-slate-400 uppercase tracking-wider block mb-2">Ikon</label>
-                                    <div className="flex gap-2 overflow-x-auto pb-2 no-scrollbar">
-                                        {['🏠','🚗','🍔','💊','🎉','👶','🔧','🧥','🛒','✈️','🐶'].map(icon => (
-                                            <button 
-                                                key={icon}
-                                                onClick={() => setEditingGroup({...editingGroup, icon})}
-                                                className={cn("w-10 h-10 rounded-lg flex items-center justify-center text-xl transition-all", editingGroup.icon === icon ? "bg-indigo-600 text-white" : "bg-slate-800 text-slate-400 hover:bg-slate-700")}
-                                            >
-                                                {icon}
-                                            </button>
-                                        ))}
-                                    </div>
-                                </div>
-                                
-                                {/* FUNDING SOURCE (Link to Buckets) */}
-                                {!editingGroup.isCatchAll && (
-                                    <div className="border-t border-slate-700 pt-4 space-y-3">
-                                        <h3 className="text-sm font-bold text-white flex items-center gap-2">
-                                            <ArrowRightLeft size={16} /> Finansiering / Källa
-                                        </h3>
-                                        <p className="text-xs text-slate-400">Välj vilka överföringar (Kassaflöde) som finansierar denna grupp.</p>
-                                        
-                                        <div className="bg-slate-800/50 border border-slate-700 rounded-xl p-3 max-h-48 overflow-y-auto no-scrollbar space-y-4">
-                                            {accounts.map(acc => {
-                                                const accBuckets = buckets.filter(b => b.accountId === acc.id);
-                                                if (accBuckets.length === 0) return null;
-                                                return (
-                                                    <div key={acc.id}>
-                                                        <div className="text-[10px] text-slate-500 font-bold uppercase mb-1 flex items-center gap-1">
-                                                            <span>{acc.icon}</span> {acc.name}
-                                                        </div>
-                                                        <div className="space-y-1">
-                                                            {accBuckets.map(bucket => {
-                                                                const isChecked = editingGroup.linkedBucketIds?.includes(bucket.id);
-                                                                
-                                                                // CHECK IF BUCKET IS USED BY ANOTHER GROUP
-                                                                const ownerGroup = budgetGroups.find(g => g.id !== editingGroup.id && g.linkedBucketIds?.includes(bucket.id));
-                                                                const isDisabled = !!ownerGroup;
-
-                                                                return (
-                                                                    <label key={bucket.id} className={cn(
-                                                                        "flex items-center gap-2 p-2 rounded transition-colors border border-transparent",
-                                                                        isDisabled ? "opacity-50 cursor-not-allowed bg-slate-900/50" : "hover:bg-slate-700/50 cursor-pointer"
-                                                                    )}>
-                                                                        <div className={cn("w-4 h-4 rounded border flex items-center justify-center transition-colors", 
-                                                                            isChecked ? "bg-emerald-500 border-emerald-500" : "border-slate-600",
-                                                                            isDisabled && "border-slate-700 bg-slate-800"
-                                                                        )}>
-                                                                            {isChecked && <Check size={10} className="text-white" />}
-                                                                        </div>
-                                                                        <div className="flex-1 min-w-0">
-                                                                            <div className="flex justify-between items-center">
-                                                                                <span className="text-sm text-slate-300 truncate">{bucket.name}</span>
-                                                                                <span className="text-xs font-mono text-slate-500 ml-2">
-                                                                                    {bucket.type === 'FIXED' ? formatMoney(calculateFixedBucketCost(bucket, selectedMonth)) : 
-                                                                                    (bucket.type === 'DAILY' ? 'Rörlig' : 'Mål')}
-                                                                                </span>
-                                                                            </div>
-                                                                            {isDisabled && (
-                                                                                <div className="text-[10px] text-orange-400 mt-0.5">
-                                                                                    Redan kopplad till: {ownerGroup.name}
-                                                                                </div>
-                                                                            )}
-                                                                        </div>
-                                                                        <input 
-                                                                            type="checkbox" 
-                                                                            className="hidden" 
-                                                                            checked={!!isChecked} 
-                                                                            disabled={isDisabled}
-                                                                            onChange={() => !isDisabled && toggleLinkedBucket(bucket.id)}
-                                                                        />
-                                                                    </label>
-                                                                );
-                                                            })}
-                                                        </div>
-                                                    </div>
-                                                )
-                                            })}
-                                        </div>
-                                    </div>
-                                )}
-
-                                {/* Subcategory Management (Only for existing groups) */}
-                                {editingGroup.id && !editingGroup.isCatchAll && (
-                                    <div className="border-t border-slate-700 pt-4 space-y-4">
-                                        <h3 className="text-sm font-bold text-white">Kopplade Kategorier</h3>
-                                        
-                                        <div className="flex flex-wrap gap-2">
-                                            {subCategories.filter(s => s.budgetGroupId === editingGroup.id).map(sub => (
-                                                <div key={sub.id} className="bg-slate-800 border border-slate-600 rounded px-2 py-1 text-xs text-slate-300 flex items-center gap-2 group">
-                                                    {sub.name}
-                                                    <button 
-                                                        onClick={() => handleRemoveCategory(sub)}
-                                                        className="text-slate-500 hover:text-red-300"
-                                                        title="Ta bort från grupp"
-                                                    >
-                                                        ×
-                                                    </button>
-                                                </div>
-                                            ))}
-                                            {subCategories.filter(s => s.budgetGroupId === editingGroup.id).length === 0 && (
-                                                <span className="text-xs text-slate-500 italic">Inga kategorier kopplade än.</span>
-                                            )}
-                                        </div>
-
-                                        <div className="bg-slate-900/50 p-3 rounded-lg border border-slate-800">
-                                            <label className="text-xs font-bold text-slate-400 uppercase tracking-wider block mb-2">Koppla befintlig kategori</label>
-                                            <select 
-                                                className="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white"
-                                                onChange={(e) => {
-                                                    const sub = subCategories.find(s => s.id === e.target.value);
-                                                    if (sub) updateSubCategory({ ...sub, budgetGroupId: editingGroup.id });
-                                                }}
-                                                value=""
-                                            >
-                                                <option value="">-- Välj kategori --</option>
-                                                {subCategories.filter(s => !s.budgetGroupId).map(s => (
-                                                    <option key={s.id} value={s.id}>{s.name} (Okopplad)</option>
-                                                ))}
-                                                <optgroup label="Redan kopplade (Flytta hit)">
-                                                    {subCategories.filter(s => s.budgetGroupId && s.budgetGroupId !== editingGroup.id).map(s => (
-                                                        <option key={s.id} value={s.id}>{s.name}</option>
-                                                    ))}
-                                                </optgroup>
-                                            </select>
-                                        </div>
-
-                                        {/* CREATE NEW SUB CATEGORY */}
-                                        <div className="bg-slate-900/50 p-3 rounded-lg border border-slate-800 flex gap-2 items-center">
-                                            <select 
-                                                className="w-1/3 bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-xs text-white"
-                                                value={selectedMainId}
-                                                onChange={(e) => setSelectedMainId(e.target.value)}
-                                            >
-                                                <option value="">Huvudkategori</option>
-                                                {mainCategories.map(m => (
-                                                    <option key={m.id} value={m.id}>{m.name}</option>
-                                                ))}
-                                            </select>
-                                            <input 
-                                                placeholder="Ny underkategori..." 
-                                                className="flex-1 bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-xs text-white"
-                                                value={newSubName}
-                                                onChange={(e) => setNewSubName(e.target.value)}
-                                            />
-                                            <Button onClick={handleAddSubCategory} disabled={!newSubName || !selectedMainId} className="px-3 py-2">
-                                                <Plus className="w-4 h-4" />
-                                            </Button>
-                                        </div>
-                                    </div>
-                                )}
-                            </div>
-                        )}
-                      </div>
+                  <div className="flex gap-2">
+                      {buckets.find(b => b.id === editingBucket.id) && (
+                          <Button variant="danger" onClick={deleteBucketHandler}><Trash2 size={16}/></Button>
+                      )}
+                      <Button onClick={saveBucket} className="flex-1">Spara</Button>
                   </div>
+              </div>
+          )}
+      </Modal>
 
-                  {!deleteMode ? (
-                      <div className="flex gap-3 pt-2">
-                          {editingGroup.id && !editingGroup.isCatchAll && (
-                              <Button variant="danger" onClick={() => setDeleteMode(true)}>
-                                  <Trash2 className="w-4 h-4" />
-                              </Button>
-                          )}
-                          <Button className="flex-1" onClick={handleSaveGroup}>Spara</Button>
-                      </div>
-                  ) : (
-                      <div className="space-y-2 bg-red-950/20 p-4 rounded-xl border border-red-500/20">
-                          <h4 className="text-sm font-bold text-red-300">Ta bort grupp?</h4>
-                          <Button variant="danger" className="w-full justify-start text-sm" onClick={() => handleDelete('THIS_MONTH')}>Enbart denna månad</Button>
-                          <Button variant="danger" className="w-full justify-start text-sm" onClick={() => handleDelete('THIS_AND_FUTURE')}>Denna och framtida</Button>
-                          <Button variant="danger" className="w-full justify-start text-sm" onClick={() => handleDelete('ALL')}>Radera helt</Button>
-                          <Button variant="secondary" className="w-full" onClick={() => setDeleteMode(false)}>Avbry
+    </div>
+  );
+};

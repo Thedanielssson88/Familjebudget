@@ -34,6 +34,9 @@ export interface Bucket {
   backgroundImage?: string; // URL for the dream card background
   linkedGoalId?: string; // If this bucket is a generated spending post, this ID links to the parent Goal
   archivedDate?: string; // YYYY-MM. If set, the bucket is considered finished/inactive after this month.
+  
+  // NEW: Link to Operating Budget
+  budgetGroupId?: string; 
 
   // Configuration per month. Values here are isolated per month.
   monthlyData: Record<MonthKey, BucketData>;
@@ -72,8 +75,12 @@ export interface BudgetGroup {
   id: string;
   name: string;
   monthlyData: Record<MonthKey, BudgetGroupData>; 
-  // LINK TO CASH FLOW: Which buckets fund this group?
+  // LINK TO CASH FLOW: Which buckets fund this group? (Deprecated mechanism, prefer budgetGroupId on Bucket)
   linkedBucketIds?: string[];
+  
+  // NEW: Which account funds the standard subcategories in this group?
+  defaultAccountId?: string;
+
   isCatchAll?: boolean; // If true, this is the "Other/Unbudgeted" group
   icon?: string;
   forecastType?: 'FIXED' | 'VARIABLE'; // Determines how forecast calculates projection
@@ -84,7 +91,7 @@ export interface SubCategory {
   name: string;
   mainCategoryId: string;
   description?: string;
-  monthlyBudget?: number; // Kept for reference, but BudgetGroup limit is primary
+  monthlyBudget?: number; // Target budget for this subcategory
   budgetGroupId?: string; // Links this specific category to a high-level budget group
 }
 

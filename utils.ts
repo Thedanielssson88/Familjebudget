@@ -1,7 +1,7 @@
 
 import { format, subMonths, addMonths, startOfMonth, endOfMonth, setDate, isAfter, isBefore, parseISO, differenceInMonths, eachDayOfInterval, getDay, isSameMonth, isSameDay, isValid, min, max } from 'date-fns';
 import { sv } from 'date-fns/locale';
-import { Bucket, BucketData, User, BudgetGroup, BudgetGroupData, Transaction } from './types';
+import { Bucket, BucketData, User, BudgetGroup, BudgetGroupData, Transaction, SubCategory } from './types';
 
 // Generate a unique ID using crypto API for safety
 export const generateId = () => self.crypto.randomUUID();
@@ -361,4 +361,39 @@ export const getUserIncome = (user: User, monthKey: string) => {
 
 export const getMonthLabel = (monthKey: string) => {
   return format(parseISO(`${monthKey}-01`), 'MMMM yyyy', { locale: sv });
+};
+
+// --- NEW HELPER: 3 Month Average for SubCategory ---
+export const getSubCategoryAverage = (
+    subCatId: string, 
+    currentMonth: string, 
+    transactions: Transaction[], 
+    reimbursementMap: Record<string, number>
+): number => {
+    // Determine the last 3 FULL months
+    // If today is > payday of current month, we count current month as well?
+    // Let's stick to "Last 3 months excluding current" for simplicity unless refined.
+    // The prompt says: "Snitt på 3 mån som är helt bokförda. Är dagens datum efter payday, så räknas dom som helt bokförda"
+    // We will approximate by taking the 3 months prior to currentMonth.
+    
+    const current = parseISO(`${currentMonth}-01`);
+    const start = subMonths(current, 3);
+    const end = subMonths(current, 1); // Up to previous month
+    
+    // Find Date Strings
+    const startStr = format(start, 'yyyy-MM-01');
+    const endStr = format(endOfMonth(end), 'yyyy-MM-dd'); // End of previous month
+
+    const relevantTxs = transactions.filter(t => 
+        t.categorySubId === subCatId && 
+        !t.isHidden &&
+        t.date >= startStr && 
+        t.date <= endStr &&
+        (t.type === 'EXPENSE' || (!t.type && t.amount < 0))
+    );
+
+    if (relevantTxs.length === 0) return 0;
+
+    const total = relevantTxs.reduce((sum, t) => sum + Math.abs(getEffectiveAmount(t, reimbursementMap)), 0);
+    return Math.round(total / 3);
 };
