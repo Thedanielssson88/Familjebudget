@@ -1,6 +1,7 @@
+
 import React, { useState } from 'react';
 import { useApp } from '../store';
-import { ChevronRight, ChevronDown, Plus, Trash2, RefreshCw } from 'lucide-react';
+import { ChevronRight, ChevronDown, Plus, Trash2, RefreshCw, PiggyBank } from 'lucide-react';
 import { Button, Input, Modal, cn } from '../components/components';
 
 export const SettingsCategories: React.FC = () => {
@@ -14,6 +15,7 @@ export const SettingsCategories: React.FC = () => {
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [newMainName, setNewMainName] = useState('');
   const [newSubNames, setNewSubNames] = useState<Record<string, string>>({});
+  const [newSubIsSavings, setNewSubIsSavings] = useState<Record<string, boolean>>({});
   const [showResetModal, setShowResetModal] = useState(false);
 
   const toggleExpand = (id: string) => {
@@ -31,9 +33,11 @@ export const SettingsCategories: React.FC = () => {
 
   const handleAddSub = async (mainId: string) => {
     const name = newSubNames[mainId];
+    const isSavings = newSubIsSavings[mainId] || false;
     if (!name?.trim()) return;
-    await addSubCategory(mainId, name.trim());
+    await addSubCategory(mainId, name.trim(), isSavings);
     setNewSubNames(prev => ({ ...prev, [mainId]: '' }));
+    setNewSubIsSavings(prev => ({ ...prev, [mainId]: false }));
   };
 
   return (
@@ -76,7 +80,10 @@ export const SettingsCategories: React.FC = () => {
                 <div className="bg-slate-900/50 border-t border-slate-700 p-3 space-y-2 animate-in slide-in-from-top-1">
                   {subs.map(sub => (
                     <div key={sub.id} className="flex items-center justify-between pl-6 pr-2 py-1.5 rounded hover:bg-white/5 group">
-                       <span className="text-sm text-slate-300">{sub.name}</span>
+                       <div className="flex items-center gap-2">
+                           <span className="text-sm text-slate-300">{sub.name}</span>
+                           {sub.isSavings && <PiggyBank size={12} className="text-emerald-400" />}
+                       </div>
                        <button 
                          onClick={() => deleteSubCategory(sub.id)}
                          className="opacity-0 group-hover:opacity-100 p-1 text-slate-600 hover:text-rose-400 transition-all"
@@ -96,6 +103,13 @@ export const SettingsCategories: React.FC = () => {
                       onChange={(e) => setNewSubNames(prev => ({ ...prev, [main.id]: e.target.value }))}
                       onKeyDown={(e) => e.key === 'Enter' && handleAddSub(main.id)}
                     />
+                    <button 
+                      onClick={() => setNewSubIsSavings(prev => ({ ...prev, [main.id]: !prev[main.id] }))}
+                      className={cn("p-1.5 rounded transition-colors", newSubIsSavings[main.id] ? "bg-emerald-600 text-white" : "bg-slate-800 text-slate-500 border border-slate-600")}
+                      title="Markera som sparande"
+                    >
+                      <PiggyBank size={16} />
+                    </button>
                     <button 
                       onClick={() => handleAddSub(main.id)}
                       disabled={!newSubNames[main.id]?.trim()}

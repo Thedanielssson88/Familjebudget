@@ -1,7 +1,7 @@
 
 import React, { useState, useMemo } from 'react';
 import { useApp } from '../store';
-import { calculateDailyBucketCost, calculateDailyBucketCostSoFar, calculateFixedBucketCost, calculateGoalBucketCost, formatMoney, getLatestDailyDeduction, getTotalFamilyIncome, getUserIncome } from '../utils';
+import { calculateDailyBucketCost, calculateDailyBucketCostSoFar, calculateFixedBucketCost, calculateGoalBucketCost, formatMoney, getEffectiveBudgetGroupData, getEffectiveSubCategoryBudget, getLatestDailyDeduction, getTotalFamilyIncome, getUserIncome } from '../utils';
 import { Card, cn } from '../components/components';
 import { ArrowDown, Sliders, Landmark, Calculator, PiggyBank, LayoutGrid, BarChart3 } from 'lucide-react';
 import { StatsView } from './StatsView';
@@ -45,7 +45,7 @@ const SavingsGauge = ({ percentage }: { percentage: number }) => {
 };
 
 const WaterfallOverview: React.FC = () => {
-  const { users, buckets, selectedMonth, settings } = useApp();
+  const { users, buckets, selectedMonth, settings, budgetGroups, subCategories, budgetTemplates, monthConfigs } = useApp();
   const [scenarioAdjustment, setScenarioAdjustment] = useState(0);
 
   // 1. Calculate Actual Inflow
@@ -53,13 +53,14 @@ const WaterfallOverview: React.FC = () => {
     getTotalFamilyIncome(users, selectedMonth), 
   [users, selectedMonth]);
 
-  // 2. Calculate Outflow (Split by Consumption vs Savings)
+  // 2. Calculate BUDGETED Outflow (Split by Consumption vs Savings)
   const { consumptionExpenses, savingsExpenses, totalDailySoFar, totalFixedForBalance } = useMemo(() => {
     let consumption = 0;
     let savings = 0;
     let dailySoFar = 0;
-    let fixedForBalance = 0;
+    let fixedForBalance = 0; // Tracks actual expected cash outflow for balance calc
 
+    // A. BUCKETS (Fixed, Daily, Goals)
     buckets.forEach(b => {
         if (b.paymentSource === 'BALANCE') return;
 
@@ -89,13 +90,44 @@ const WaterfallOverview: React.FC = () => {
         }
     });
 
+    // B. BUDGET GROUPS (Variable Categories)
+    // Iterate budget groups to find their effective budget.
+    // Split subcategories based on 'isSavings' flag.
+    budgetGroups.forEach(group => {
+        // Get effective total limit for the group
+        const { data } = getEffectiveBudgetGroupData(group, selectedMonth, budgetTemplates, monthConfigs);
+        const groupLimit = data ? data.limit : 0;
+
+        // Get subcategories for this group
+        const groupSubs = subCategories.filter(s => s.budgetGroupId === group.id);
+        
+        let sumSubBudgets = 0;
+        
+        // Sum up specific subcategory budgets
+        groupSubs.forEach(sub => {
+            const subBudget = getEffectiveSubCategoryBudget(sub, selectedMonth, budgetTemplates, monthConfigs);
+            sumSubBudgets += subBudget;
+            
+            if (sub.isSavings) {
+                savings += subBudget;
+            } else {
+                consumption += subBudget;
+            }
+        });
+
+        // Handle "Unallocated" / Buffer within the group limit
+        // Typically, unallocated budget in a group is considered consumption (buffer for overspending)
+        const unallocated = Math.max(0, groupLimit - sumSubBudgets);
+        consumption += unallocated;
+    });
+
     return { 
         consumptionExpenses: consumption, 
         savingsExpenses: savings, 
         totalDailySoFar: dailySoFar,
         totalFixedForBalance: fixedForBalance
     };
-  }, [buckets, selectedMonth, settings.payday]);
+  }, [buckets, budgetGroups, subCategories, selectedMonth, settings.payday, budgetTemplates, monthConfigs]);
 
   // 3. Totals and Surplus
   // Scenario adjustment is assumed to be extra CONSUMPTION (bills/food increasing)
@@ -136,6 +168,9 @@ const WaterfallOverview: React.FC = () => {
   }, [users, selectedMonth, surplus]);
 
   // Balance Calculations
+  // Note: This calculation mixes actual income with BUDGETED fixed costs.
+  // Ideally, for "Current Account Balance", we should use actuals, but the request focuses on the Waterfall (Budget) flow.
+  // We keep this calculation consistent with the waterfall figures derived above.
   const currentAccountBalance = totalActualIncome - totalFixedForBalance - totalDailySoFar;
   const balanceAfterTransfers = currentAccountBalance - totalDistributed;
 
@@ -213,7 +248,7 @@ const WaterfallOverview: React.FC = () => {
              </div>
              <div className="flex justify-between items-end">
                  <div className="text-xs text-blue-200 max-w-[70%]">
-                     Drömmar, buffert och långsiktigt sparande. Bygger er framtid.
+                     Drömmar, buffert och långsiktigt sparande (Budgeterat).
                  </div>
                  <span className="font-bold font-mono text-xl">-{formatMoney(savingsExpenses)}</span>
              </div>
@@ -265,7 +300,7 @@ const WaterfallOverview: React.FC = () => {
              </div>
              <div className="flex justify-between items-end">
                  <div className="text-[10px] text-slate-400 max-w-[60%]">
-                     Inkomst minus alla fasta utgifter (inkl sparande) och rörliga utgifter fram till idag.
+                     Inkomst minus alla budgeterade fasta utgifter och upplupna dagliga utgifter fram till idag.
                  </div>
                  <span className="font-bold font-mono text-lg text-blue-100">{formatMoney(currentAccountBalance)}</span>
              </div>

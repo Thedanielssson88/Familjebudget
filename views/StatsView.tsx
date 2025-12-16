@@ -1,16 +1,15 @@
 
-
 import React, { useMemo, useState } from 'react';
 import { useApp } from '../store';
 import { useBudgetMonth } from '../hooks/useBudgetMonth';
-import { formatMoney, getEffectiveBudgetGroupData, getBudgetInterval, calculateFixedBucketCost, calculateDailyBucketCost, calculateGoalBucketCost, getEffectiveBucketData, getTotalFamilyIncome, calculateSavedAmount, getUserIncome, calculateReimbursementMap, getEffectiveAmount } from '../utils';
+import { formatMoney, getEffectiveBudgetGroupData, getBudgetInterval, calculateFixedBucketCost, calculateDailyBucketCost, calculateGoalBucketCost, getEffectiveBucketData, getTotalFamilyIncome, calculateSavedAmount, getUserIncome, calculateReimbursementMap, getEffectiveAmount, getEffectiveSubCategoryBudget, isBucketActiveInMonth } from '../utils';
 import { 
     PieChart, Pie, Cell, Tooltip, ResponsiveContainer, 
     ComposedChart, Bar, XAxis, YAxis, CartesianGrid, Area, Legend,
     Radar, RadarChart, PolarGrid, PolarAngleAxis, PolarRadiusAxis,
     BarChart, Line
 } from 'recharts';
-import { ChevronRight, ChevronDown, Edit2, Check, AlertTriangle, TrendingUp, TrendingDown, Calendar, BarChart3, PieChart as PieIcon, Filter, Info, Plane, X, Sparkles, Zap, Trophy, ShoppingBag, Layers, Clock, DollarSign, Activity, Target, Coffee, Repeat, ArrowRight, ArrowUpRight, ArrowDownRight, AlertOctagon, Utensils, Search, Percent, ThermometerSnowflake, Rocket, Wallet, PiggyBank, LayoutGrid, Eye, EyeOff, Bot } from 'lucide-react';
+import { ChevronRight, ChevronDown, Edit2, Check, AlertTriangle, TrendingUp, TrendingDown, Calendar, BarChart3, PieChart as PieIcon, Filter, Info, Plane, X, Sparkles, Zap, Trophy, ShoppingBag, Layers, Clock, DollarSign, Activity, Target, Coffee, Repeat, ArrowRight, ArrowUpRight, ArrowDownRight, AlertOctagon, Utensils, Search, Percent, ThermometerSnowflake, Rocket, Wallet, PiggyBank, LayoutGrid, Eye, EyeOff, Bot, Calculator } from 'lucide-react';
 import { BudgetProgressBar } from '../components/BudgetProgressBar';
 import { cn, Button, Modal } from '../components/components';
 import { BudgetGroup, Bucket, Transaction, MainCategory, SubCategory } from '../types';
@@ -50,6 +49,8 @@ const GroupedDrillDown: React.FC<{
         }>();
 
         transactions.forEach(t => {
+            if (t.isHidden) return; // Skip hidden transactions
+            
             const effAmount = getEffectiveAmount(t, reimbursementMap);
             if (effAmount === 0 && Math.abs(t.amount) > 0) return; // Skip if fully reimbursed or is a reimbursement itself
 
@@ -203,7 +204,6 @@ const SimpleMarkdownRenderer = ({ text }: { text: string }) => {
                 // Table Rows (Simple piping detection)
                 if (trimmed.startsWith('|')) {
                     const cells = trimmed.split('|').filter(c => c.trim() !== '');
-                    const isHeader = i > 0 && lines[i-1].includes('|') === false; // Crude check, likely won't work perfect without block parsing but okay for simple MD
                     // Actually, a simple table renderer is hard without block context. 
                     // Let's just render as a grid row
                     if (trimmed.includes('---')) return null; // Skip divider row
@@ -230,14 +230,19 @@ const parseBold = (text: string) => {
 
 // --- SUB-COMPONENT: BUDGET GROUPS SNAPSHOT ---
 const BudgetGroupStats = ({ selectedMonth }: { selectedMonth: string }) => {
-    const { budgetGroups, subCategories, transactions, buckets, updateBudgetGroup, settings, mainCategories, users } = useApp();
+    const { budgetGroups, subCategories, transactions, buckets, settings, mainCategories, users, budgetTemplates, monthConfigs } = useApp();
     const [expandedGroup, setExpandedGroup] = useState<string | null>(null);
-    const [editingGroupId, setEditingGroupId] = useState<string | null>(null);
-    const [tempLimit, setTempLimit] = useState<string>('');
     const [drillDownData, setDrillDownData] = useState<{ title: string, transactions: Transaction[], grouped?: boolean } | null>(null);
     const [timeframe, setTimeframe] = useState<1 | 3 | 6 | 12>(1);
     const [excludeDreams, setExcludeDreams] = useState(false);
     
+    // Budget Breakdown Modal State
+    const [budgetBreakdownData, setBudgetBreakdownData] = useState<{ 
+        groupName: string; 
+        items: { name: string; amount: number; type: 'SUB'|'BUCKET'|'BUFFER' }[];
+        total: number;
+    } | null>(null);
+
     // AI Analysis State
     const [isAiModalOpen, setIsAiModalOpen] = useState(false);
     const [aiReport, setAiReport] = useState<string>('');
@@ -245,24 +250,6 @@ const BudgetGroupStats = ({ selectedMonth }: { selectedMonth: string }) => {
 
     // Calculate map ONCE for all transactions to ensure we have all connections
     const reimbursementMap = useMemo(() => calculateReimbursementMap(transactions), [transactions]);
-
-    const calculateGroupLimitForMonth = (group: BudgetGroup, monthKey: string) => {
-        const explicitData = group.monthlyData?.[monthKey];
-        if (explicitData && !explicitData.isExplicitlyDeleted) return explicitData.limit;
-        if (group.linkedBucketIds && group.linkedBucketIds.length > 0) {
-            const fundingBuckets = buckets.filter(b => group.linkedBucketIds?.includes(b.id));
-            const totalFunding = fundingBuckets.reduce((sum, b) => {
-                if (b.type === 'FIXED') return sum + calculateFixedBucketCost(b, monthKey);
-                if (b.type === 'DAILY') return sum + calculateDailyBucketCost(b, monthKey, settings.payday);
-                if (b.type === 'GOAL') return sum + calculateGoalBucketCost(b, monthKey);
-                return sum;
-            }, 0);
-            return totalFunding;
-        }
-        const { data: inheritedData } = getEffectiveBudgetGroupData(group, monthKey);
-        if (inheritedData && !inheritedData.isExplicitlyDeleted) return inheritedData.limit;
-        return 0;
-    };
 
     const calculateDreamOverlapDays = (startDate: Date, endDate: Date) => {
         const tripDays = new Set<string>();
@@ -309,8 +296,9 @@ const BudgetGroupStats = ({ selectedMonth }: { selectedMonth: string }) => {
             if (homeDaysCount > 5) scalingFactor = totalDays / homeDaysCount;
         }
 
-        // Filter transactions for display period
+        // Filter transactions for display period (AND exclude hidden)
         const relevantTx = transactions.filter(t => {
+            if (t.isHidden) return false; // Exclude hidden
             if (t.date < startStr || t.date > endStr) return false;
             // Check basic type or negative amount
             const isExpense = t.type === 'EXPENSE' || (!t.type && t.amount < 0);
@@ -325,10 +313,105 @@ const BudgetGroupStats = ({ selectedMonth }: { selectedMonth: string }) => {
         });
 
         const groupStats = budgetGroups.map(group => {
-            const assignedSubs = subCategories.filter(s => s.budgetGroupId === group.id);
-            const assignedSubIds = new Set(assignedSubs.map(s => s.id));
+            // STRICT MAPPING LOGIC (Same as OperatingBudgetView)
             
-            // Filter transactions for this group
+            // 1. Linked Subcategories
+            const assignedSubs = subCategories.filter(s => s.budgetGroupId === group.id);
+            
+            // 2. Linked Buckets
+            const linkedBuckets = buckets.filter(b => {
+                const isExplicitlyLinked = b.budgetGroupId 
+                    ? b.budgetGroupId === group.id 
+                    : (group.linkedBucketIds && group.linkedBucketIds.includes(b.id));
+                const isOrphan = !b.budgetGroupId && (!group.linkedBucketIds || !group.linkedBucketIds.includes(b.id));
+                const isClaimedByCatchAll = group.isCatchAll && isOrphan;
+                return isExplicitlyLinked || isClaimedByCatchAll;
+            });
+
+            // 3. Planned Budget Calculation (For current month view or average)
+            let plannedBudget = 0;
+            
+            // Collect items for Breakdown view
+            const budgetItems: { name: string; amount: number; type: 'SUB'|'BUCKET'|'BUFFER' }[] = [];
+
+            if (timeframe === 1) {
+                // Exact calculation for this month
+                const { data: explicitData } = getEffectiveBudgetGroupData(group, selectedMonth, budgetTemplates, monthConfigs);
+                const manualLimit = explicitData ? explicitData.limit : 0;
+                
+                let childrenSum = 0;
+
+                assignedSubs.forEach(sub => {
+                    const subBudget = getEffectiveSubCategoryBudget(sub, selectedMonth, budgetTemplates, monthConfigs);
+                    childrenSum += subBudget;
+                    if (subBudget > 0) budgetItems.push({ name: sub.name, amount: subBudget, type: 'SUB' });
+                });
+
+                linkedBuckets.forEach(b => {
+                    // Logic from OperatingBudgetView
+                    let cost = 0;
+                    if (b.type === 'GOAL') cost = calculateGoalBucketCost(b, selectedMonth);
+                    else if (b.type === 'FIXED') {
+                        const { data } = getEffectiveBucketData(b, selectedMonth, budgetTemplates, monthConfigs);
+                        cost = data ? data.amount : 0;
+                    } else if (b.type === 'DAILY') {
+                        const { data } = getEffectiveBucketData(b, selectedMonth, budgetTemplates, monthConfigs);
+                        if (data) {
+                            const { start, end } = getBudgetInterval(selectedMonth, settings.payday);
+                            const days = eachDayOfInterval({ start, end });
+                            let count = 0;
+                            days.forEach(day => {
+                                if (data.activeDays.includes(getDay(day))) {
+                                    count++;
+                                }
+                            });
+                            cost = count * data.dailyAmount;
+                        }
+                    }
+                    // Filter: Only include if active/relevant
+                    if (cost > 0 || isBucketActiveInMonth(b, selectedMonth)) {
+                        childrenSum += cost;
+                        budgetItems.push({ name: b.name, amount: cost, type: 'BUCKET' });
+                    }
+                });
+
+                plannedBudget = Math.max(childrenSum, manualLimit);
+                
+                // Add Buffer item if applicable
+                if (manualLimit > childrenSum) {
+                    budgetItems.push({ name: 'Buffert / Ospecificerat', amount: manualLimit - childrenSum, type: 'BUFFER' });
+                }
+
+            } else {
+                // Average budget over timeframe
+                let totalOverPeriod = 0;
+                for (let i = 0; i < timeframe; i++) {
+                    const mDate = addMonths(parseISO(`${startMonthKey}-01`), i);
+                    const mKey = format(mDate, 'yyyy-MM');
+                    
+                    // Helper to get budget for a month
+                    const { data: gData } = getEffectiveBudgetGroupData(group, mKey, budgetTemplates, monthConfigs);
+                    const mLimit = gData ? gData.limit : 0;
+                    let mChildren = 0;
+                    
+                    // Simple sum approximation for historical
+                    assignedSubs.forEach(s => mChildren += getEffectiveSubCategoryBudget(s, mKey, budgetTemplates, monthConfigs));
+                    linkedBuckets.forEach(b => {
+                         // Simplified cost checks for speed in loop
+                         if (b.type === 'FIXED') mChildren += calculateFixedBucketCost(b, mKey);
+                         else if (b.type === 'DAILY') mChildren += calculateDailyBucketCost(b, mKey, settings.payday);
+                         else if (b.type === 'GOAL') mChildren += calculateGoalBucketCost(b, mKey);
+                    });
+                    totalOverPeriod += Math.max(mChildren, mLimit);
+                }
+                plannedBudget = totalOverPeriod / timeframe;
+            }
+
+            // 4. Calculate Spent
+            const assignedSubIds = new Set(assignedSubs.map(s => s.id));
+            const linkedBucketIds = new Set(linkedBuckets.map(b => b.id));
+
+            // Filter transactions for this group based on STRICT mapping
             const groupTxs = relevantTx.filter(t => {
                 if (excludeDreams) {
                      if (t.bucketId) {
@@ -336,18 +419,38 @@ const BudgetGroupStats = ({ selectedMonth }: { selectedMonth: string }) => {
                         if (b?.type === 'GOAL') return false; 
                     }
                 }
+                
+                // Check if transaction belongs to linked SubCategory
                 if (t.categorySubId && assignedSubIds.has(t.categorySubId)) return true;
-                if (group.isCatchAll && (!t.categorySubId || !subCategories.find(s => s.id === t.categorySubId)?.budgetGroupId)) return true;
+                
+                // Check if transaction belongs to linked Bucket
+                if (t.bucketId && linkedBucketIds.has(t.bucketId)) return true;
+
+                // Catch-all Logic
+                if (group.isCatchAll) {
+                    // It is catch-all if:
+                    // 1. Not linked to any specific bucket in another group (Orphan)
+                    // 2. Not linked to any specific subcategory in another group (Orphan)
+                    const sub = t.categorySubId ? subCategories.find(s => s.id === t.categorySubId) : null;
+                    const bucket = t.bucketId ? buckets.find(b => b.id === t.bucketId) : null;
+                    
+                    const isSubOrphan = !sub || !sub.budgetGroupId;
+                    const isBucketOrphan = !bucket || (!bucket.budgetGroupId && (!bucket.type || bucket.type !== 'GOAL')); // Goals usually distinct
+
+                    // Note: If t has NO sub and NO bucket, it's definitely catch-all
+                    if (!t.categorySubId && !t.bucketId) return true;
+                    
+                    if (t.categorySubId && isSubOrphan) return true;
+                    if (t.bucketId && isBucketOrphan) return true;
+                }
                 return false;
             });
 
             let spent = 0;
-            
-            // Calculate SPENT using Effective Amount
             groupTxs.forEach(t => {
                 const effAmount = getEffectiveAmount(t, reimbursementMap);
                 const amount = Math.abs(effAmount);
-                if (amount === 0) return; // Skip zero-net transactions
+                if (amount === 0) return;
 
                 let shouldScale = true;
                 if (excludeDreams) {
@@ -365,6 +468,9 @@ const BudgetGroupStats = ({ selectedMonth }: { selectedMonth: string }) => {
 
             const avgSpent = spent / timeframe;
             
+            // Detailed Breakdown for UI
+            
+            // 4a. Subcategory Breakdown
             const breakdown = assignedSubs.map(sub => {
                 let subSpent = 0;
                 const subTxs = groupTxs.filter(t => t.categorySubId === sub.id);
@@ -372,90 +478,101 @@ const BudgetGroupStats = ({ selectedMonth }: { selectedMonth: string }) => {
                     const effAmount = getEffectiveAmount(t, reimbursementMap);
                     const amount = Math.abs(effAmount);
                     if (amount === 0) return;
-
-                    const isFixedCat = sub.name.toLowerCase().includes('hyra') || sub.name.toLowerCase().includes('avgift') || sub.name.toLowerCase().includes('försäkring');
-                    const factor = (excludeDreams && !isFixedCat) ? scalingFactor : 1;
+                    const factor = (excludeDreams && !sub.name.toLowerCase().includes('hyra')) ? scalingFactor : 1;
                     subSpent += amount * factor;
                 });
                 return { ...sub, spent: subSpent / timeframe, transactions: subTxs.sort((a,b) => b.date.localeCompare(a.date)) };
             }).sort((a,b) => b.spent - a.spent);
 
             const totalSubSpent = breakdown.reduce((sum, s) => sum + s.spent, 0);
-            const unclassifiedSpent = avgSpent - totalSubSpent;
-            const unclassifiedTxs = groupTxs.filter(t => !assignedSubIds.has(t.categorySubId || ''));
             
-            let totalLimitOverPeriod = 0;
-            for (let i = 0; i < timeframe; i++) {
-                const mDate = addMonths(parseISO(`${startMonthKey}-01`), i);
-                const mKey = format(mDate, 'yyyy-MM');
-                totalLimitOverPeriod += calculateGroupLimitForMonth(group, mKey);
-            }
-            const avgLimit = totalLimitOverPeriod / timeframe;
+            // 4b. Bucket Breakdown (New logic to separate Buckets from Unclassified)
+            const bucketBreakdown = linkedBuckets.map(b => {
+                let bSpent = 0;
+                const bTxs = groupTxs.filter(t => t.bucketId === b.id);
+                bTxs.forEach(t => {
+                    const effAmount = getEffectiveAmount(t, reimbursementMap);
+                    const amount = Math.abs(effAmount);
+                    if (amount === 0) return;
+                    const factor = excludeDreams && b.type !== 'FIXED' ? scalingFactor : 1;
+                    bSpent += amount * factor;
+                });
+                return { 
+                    id: b.id, 
+                    name: b.name, 
+                    spent: bSpent / timeframe, 
+                    transactions: bTxs.sort((a,b) => b.date.localeCompare(a.date)),
+                    type: 'BUCKET',
+                    bucketType: b.type
+                };
+            }).filter(b => b.spent > 0);
+
+            const totalBucketSpent = bucketBreakdown.reduce((sum, b) => sum + b.spent, 0);
+
+            // 4c. True Unclassified (Neither subcategory nor linked bucket)
+            const nonSubOrBucketTxs = groupTxs.filter(t => 
+                !assignedSubIds.has(t.categorySubId || '') && 
+                !linkedBucketIds.has(t.bucketId || '')
+            );
+            
+            // Calculate unclassified spent total
+            const unclassifiedSpent = avgSpent - totalSubSpent - totalBucketSpent;
             
             return {
-                ...group, spent: avgSpent, limit: avgLimit, remaining: avgLimit - avgSpent,
-                breakdown, unclassifiedSpent, unclassifiedTransactions: unclassifiedTxs.sort((a,b) => b.date.localeCompare(a.date))
+                ...group, 
+                spent: avgSpent, 
+                limit: plannedBudget, 
+                remaining: plannedBudget - avgSpent,
+                breakdown,
+                bucketBreakdown,
+                unclassifiedSpent, 
+                unclassifiedTransactions: nonSubOrBucketTxs.sort((a,b) => b.date.localeCompare(a.date)),
+                budgetItems
             };
         }).sort((a, b) => b.spent - a.spent);
 
         const totalLimit = groupStats.reduce((sum, g) => sum + g.limit, 0);
         const totalSpent = groupStats.reduce((sum, g) => sum + g.spent, 0);
         const totalRemaining = totalLimit - totalSpent;
+        
         return { groupStats, totalLimit, totalSpent, totalRemaining, isScaled: excludeDreams && scalingFactor > 1.05, homeDays: homeDaysCount, totalDays, scalingFactor, rangeLabel };
-    }, [budgetGroups, subCategories, transactions, selectedMonth, timeframe, excludeDreams, buckets, settings.payday, reimbursementMap]);
+    }, [budgetGroups, subCategories, transactions, selectedMonth, timeframe, excludeDreams, buckets, settings.payday, reimbursementMap, budgetTemplates, monthConfigs]);
 
-    const handleStartEdit = (group: BudgetGroup) => {
-        setEditingGroupId(group.id);
-        const { data } = getEffectiveBudgetGroupData(group, selectedMonth);
-        setTempLimit((data ? data.limit : 0).toString());
-    };
-    const handleSaveLimit = async (group: BudgetGroup) => {
-        const amount = parseInt(tempLimit) || 0;
-        const updatedGroup: BudgetGroup = {
-            ...group, monthlyData: { ...group.monthlyData, [selectedMonth]: { limit: amount, isExplicitlyDeleted: false } }
-        };
-        await updateBudgetGroup(updatedGroup);
-        setEditingGroupId(null);
+    const handleShowBudgetBreakdown = (groupName: string, items: { name: string; amount: number; type: 'SUB'|'BUCKET'|'BUFFER' }[], total: number) => {
+        // Sort items by amount desc
+        const sorted = [...items].sort((a, b) => b.amount - a.amount);
+        setBudgetBreakdownData({ groupName, items: sorted, total });
     };
 
     const handleAiAnalysis = async () => {
         setIsAiModalOpen(true);
-        if (aiReport) return; // Don't re-generate if we have one for this session
+        if (aiReport) return; 
         
         setIsAiLoading(true);
         
         try {
-            // Prepare Data for AI
             const totalIncome = getTotalFamilyIncome(users, selectedMonth);
             
-            // Get Current Month Data (Using data memo directly)
             const currentGroups = data.groupStats.map(g => ({
                 name: g.name,
                 limit: g.limit,
                 spent: g.spent
             }));
 
-            // Fetch Current Month Transactions ONLY
             const { start, end } = getBudgetInterval(selectedMonth, settings.payday);
             const startStr = format(start, 'yyyy-MM-dd');
             const endStr = format(end, 'yyyy-MM-dd');
-            const currentTxs = transactions.filter(t => t.date >= startStr && t.date <= endStr && (t.type === 'EXPENSE' || t.amount < 0));
+            const currentTxs = transactions.filter(t => !t.isHidden && t.date >= startStr && t.date <= endStr && (t.type === 'EXPENSE' || t.amount < 0));
             
-            // Generate Transaction Log for AI Detective Work
-            // Format: "YYYY-MM-DD : AMOUNT : DESCRIPTION : CATEGORY"
-            // This enables the AI to see "Ica Nara" 22 times or a single large purchase at IKEA.
             const transactionLog = currentTxs.map(t => {
                 const amount = Math.abs(getEffectiveAmount(t, reimbursementMap));
                 if (amount === 0) return null;
-                
                 const mainName = mainCategories.find(m => m.id === t.categoryMainId)?.name || 'Övrigt';
                 const subName = subCategories.find(s => s.id === t.categorySubId)?.name || '';
                 const category = subName ? `${mainName} > ${subName}` : mainName;
-                
                 return `${t.date} : ${formatMoney(amount)} : ${t.description} : ${category}`;
             }).filter(Boolean).join('\n');
 
-            // Category Breakdown Current (For high level summary)
             const catMapCurrent = new Map<string, number>();
             currentTxs.forEach(t => {
                 const amt = Math.abs(getEffectiveAmount(t, reimbursementMap));
@@ -471,7 +588,6 @@ const BudgetGroupStats = ({ selectedMonth }: { selectedMonth: string }) => {
                 return { main, sub, amount: v };
             }).sort((a,b) => b.amount - a.amount);
 
-            // Top Expenses (Summary for quick view, though transaction log covers this)
             const topExpenses = currentTxs
                 .map(t => ({ name: t.description, amount: Math.abs(getEffectiveAmount(t, reimbursementMap)) }))
                 .sort((a,b) => b.amount - a.amount)
@@ -482,7 +598,7 @@ const BudgetGroupStats = ({ selectedMonth }: { selectedMonth: string }) => {
                 budgetGroups: currentGroups,
                 topExpenses,
                 categoryBreakdownCurrent: breakdownCurrent,
-                transactionLog, // Sending detailed log instead of previous month data
+                transactionLog,
                 monthLabel: data.rangeLabel
             };
 
@@ -569,36 +685,55 @@ const BudgetGroupStats = ({ selectedMonth }: { selectedMonth: string }) => {
                                         </div>
                                     </div>
                                     <div className="text-right">
-                                        {editingGroupId === group.id && timeframe === 1 ? (
-                                            <div onClick={e => e.stopPropagation()} className="flex items-center justify-end gap-1 mb-1">
-                                                <input autoFocus type="number" className="w-20 bg-slate-950 border border-blue-500 rounded px-2 py-1 text-right text-sm text-white outline-none font-mono" value={tempLimit} onChange={(e) => setTempLimit(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && handleSaveLimit(group)} />
-                                                <button onClick={() => handleSaveLimit(group)} className="p-1 bg-blue-600 text-white rounded hover:bg-blue-500"><Check size={14}/></button>
+                                        <div className="flex items-center justify-end gap-2 group/edit">
+                                            <div className="text-sm font-mono font-bold text-white">
+                                                {formatMoney(group.spent)}
+                                                <span className="text-slate-500 font-normal text-xs mx-1">/</span>
+                                                <span 
+                                                    onClick={(e) => { 
+                                                        e.stopPropagation(); 
+                                                        if (timeframe === 1) handleShowBudgetBreakdown(group.name, group.budgetItems, group.limit);
+                                                    }}
+                                                    className={cn("text-slate-400 text-xs", timeframe === 1 && "cursor-pointer hover:text-blue-400 hover:underline")}
+                                                    title={timeframe === 1 ? "Visa budgetdetaljer" : ""}
+                                                >
+                                                    {formatMoney(group.limit)}
+                                                </span>
                                             </div>
-                                        ) : (
-                                            <div className="flex items-center justify-end gap-2 group/edit">
-                                                <div className="text-sm font-mono font-bold text-white">{formatMoney(group.spent)}<span className="text-slate-500 font-normal text-xs mx-1">/</span><span className="text-slate-400 text-xs">{formatMoney(group.limit)}</span></div>
-                                                {timeframe === 1 && <button onClick={(e) => { e.stopPropagation(); handleStartEdit(group); }} className="p-1 text-slate-600 hover:text-blue-400 opacity-0 group-hover/edit:opacity-100 transition-opacity"><Edit2 size={12} /></button>}
-                                            </div>
-                                        )}
+                                        </div>
                                     </div>
                                 </div>
                                 <BudgetProgressBar spent={group.spent} total={group.limit} compact />
                             </div>
                             {isExpanded && (
                                 <div className="bg-slate-900/30 border-t border-slate-700/50 animate-in slide-in-from-top-2">
+                                    {/* Subcategories Breakdown */}
                                     {group.breakdown.map(sub => (
                                         <div key={sub.id} onClick={() => setDrillDownData({ title: sub.name, transactions: sub.transactions, grouped: false })} className="p-3 border-b border-slate-700/30 last:border-0 hover:bg-slate-800 transition-colors flex justify-between items-center cursor-pointer group">
                                             <span className="text-sm text-slate-300 group-hover:text-blue-300 transition-colors">{sub.name}</span>
                                             <span className="text-sm font-mono text-white">{formatMoney(sub.spent)}</span>
                                         </div>
                                     ))}
+
+                                    {/* Buckets Breakdown (Goals/Fixed) */}
+                                    {group.bucketBreakdown.map(bucket => (
+                                        <div key={bucket.id} onClick={() => setDrillDownData({ title: bucket.name, transactions: bucket.transactions, grouped: true })} className="p-3 border-b border-slate-700/30 last:border-0 hover:bg-slate-800 transition-colors flex justify-between items-center cursor-pointer group bg-indigo-900/10">
+                                            <div className="flex items-center gap-2">
+                                                {bucket.bucketType === 'GOAL' ? <Target size={14} className="text-purple-400"/> : <Calendar size={14} className="text-blue-400"/>}
+                                                <span className="text-sm text-slate-300 group-hover:text-blue-300 transition-colors">{bucket.name}</span>
+                                            </div>
+                                            <span className="text-sm font-mono text-white">{formatMoney(bucket.spent)}</span>
+                                        </div>
+                                    ))}
+
+                                    {/* True Unclassified */}
                                     {group.unclassifiedSpent > 0.01 && (
                                         <div onClick={() => setDrillDownData({ title: "Ospecificerat", transactions: group.unclassifiedTransactions, grouped: true })} className="p-3 border-b border-slate-700/30 flex justify-between items-center bg-slate-800/20 hover:bg-slate-800/40 cursor-pointer group">
                                             <span className="text-sm text-slate-400 italic group-hover:text-slate-200">Ospecificerat / Saknar underkategori</span>
                                             <span className="text-sm font-mono text-slate-400">{formatMoney(group.unclassifiedSpent)}</span>
                                         </div>
                                     )}
-                                    {group.breakdown.length === 0 && group.unclassifiedSpent < 0.01 && <div className="p-4 text-center text-xs text-slate-500 italic">Inga utgifter här än.</div>}
+                                    {group.breakdown.length === 0 && group.bucketBreakdown.length === 0 && group.unclassifiedSpent < 0.01 && <div className="p-4 text-center text-xs text-slate-500 italic">Inga utgifter här än.</div>}
                                 </div>
                             )}
                         </div>
@@ -632,6 +767,39 @@ const BudgetGroupStats = ({ selectedMonth }: { selectedMonth: string }) => {
                     </div>
                 )}
                 <div className="mt-4 border-t border-slate-700 pt-4 flex justify-end"><Button variant="secondary" onClick={() => setDrillDownData(null)}>Stäng</Button></div>
+            </Modal>
+
+            {/* Budget Breakdown Modal */}
+            <Modal isOpen={!!budgetBreakdownData} onClose={() => setBudgetBreakdownData(null)} title={`Budget: ${budgetBreakdownData?.groupName}`}>
+                <div className="space-y-4">
+                    <div className="flex justify-between items-center bg-slate-800 p-4 rounded-xl border border-slate-700">
+                        <span className="text-slate-400 text-sm font-medium uppercase tracking-wider">Total Budget</span>
+                        <span className="text-2xl font-bold text-white font-mono">{formatMoney(budgetBreakdownData?.total || 0)}</span>
+                    </div>
+                    
+                    <div className="space-y-2 max-h-[50vh] overflow-y-auto pr-1">
+                        <p className="text-xs text-slate-500 uppercase font-bold tracking-wider px-1">Sammansättning</p>
+                        {budgetBreakdownData?.items.map((item, idx) => (
+                            <div key={idx} className="flex justify-between items-center p-3 bg-slate-900/50 border border-slate-800 rounded-lg">
+                                <div className="flex items-center gap-2">
+                                    <span className="text-white font-medium text-sm">{item.name}</span>
+                                    {item.type === 'BUCKET' && <span className="text-[9px] bg-blue-900/50 text-blue-300 px-1.5 py-0.5 rounded border border-blue-900">Fast Post</span>}
+                                    {item.type === 'BUFFER' && <span className="text-[9px] bg-slate-700 text-slate-300 px-1.5 py-0.5 rounded border border-slate-600">Buffert</span>}
+                                </div>
+                                <span className="font-mono font-bold text-white">{formatMoney(item.amount)}</span>
+                            </div>
+                        ))}
+                        {budgetBreakdownData?.items.length === 0 && <div className="text-center text-slate-500 py-4 italic">Inga poster budgeterade i denna grupp.</div>}
+                    </div>
+                    
+                    <div className="mt-4 pt-2 border-t border-slate-700 text-xs text-slate-400">
+                        Detta visar de planerade kostnaderna (Underkategorier + Fasta poster) som är kopplade till denna budgetgrupp för månaden.
+                    </div>
+                    
+                    <div className="mt-2 flex justify-end">
+                        <Button variant="secondary" onClick={() => setBudgetBreakdownData(null)}>Stäng</Button>
+                    </div>
+                </div>
             </Modal>
 
             {/* AI Analysis Modal */}
@@ -681,7 +849,12 @@ const AccountStats = () => {
             targetLabel = `${format(startDateObj, 'MMM', { locale: sv })} - ${format(endDateObj, 'MMM yyyy', { locale: sv })}`;
         } else { targetLabel = intervalLabel; }
         
-        const relevantTxs = transactions.filter(t => t.date >= targetStartStr && t.date <= targetEndStr);
+        // Filter out hidden transactions here, so they don't affect ANY calculations
+        const relevantTxs = transactions.filter(t => 
+            !t.isHidden && // EXCLUDE HIDDEN
+            t.date >= targetStartStr && 
+            t.date <= targetEndStr
+        );
         
         const processedAccounts = accounts.map(acc => {
             const accBuckets = buckets.filter(b => b.accountId === acc.id);
@@ -905,7 +1078,7 @@ const InsightsAnalysis = () => {
         const endStr = format(currentEndDate, 'yyyy-MM-dd');
 
         // Filtrera transaktioner (Utgifter)
-        const allTxs = transactions.filter(t => t.date >= startStr && t.date <= endStr);
+        const allTxs = transactions.filter(t => !t.isHidden && t.date >= startStr && t.date <= endStr);
         const expenseTxs = allTxs.filter(t => t.type === 'EXPENSE' || (!t.type && t.amount < 0));
         
         const income = getTotalFamilyIncome(users, selectedMonth); 
@@ -948,7 +1121,7 @@ const InsightsAnalysis = () => {
             .sort((a, b) => b[1] - a[1])
             .slice(0, 10)
             .map(([name, count], index) => ({
-                rank: index + 1,
+                rank: index + 1, 
                 name,
                 count: Math.round(count / insightTimeframe * 10) / 10,
                 totalAmount: Math.round((merchantMap.get(name) || 0) / insightTimeframe)
@@ -991,6 +1164,7 @@ const InsightsAnalysis = () => {
         const prevEndStr = format(prevEndDateObj, 'yyyy-MM-dd');
 
         const prevTxs = transactions.filter(t => 
+            !t.isHidden && // exclude hidden
             t.date >= prevStartStr && 
             t.date <= prevEndStr && 
             (t.type === 'EXPENSE' || (!t.type && t.amount < 0))
@@ -1563,6 +1737,7 @@ const TrendsAnalysis = () => {
 
             // 1. Fetch relevant transactions
             const monthTxs = transactions.filter(t => 
+                !t.isHidden && // EXCLUDE HIDDEN
                 t.date >= startStr && 
                 t.date <= endStr
             );

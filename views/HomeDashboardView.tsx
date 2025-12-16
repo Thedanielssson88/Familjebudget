@@ -55,10 +55,12 @@ export const HomeDashboardView: React.FC<{ onNavigate: (view: any) => void }> = 
         users, 
         subCategories, 
         ignoredSubscriptions,
-        settings
+        settings,
+        budgetTemplates,
+        monthConfigs
     } = useApp();
     
-    const { start, end, startStr, endStr } = useBudgetMonth(selectedMonth);
+    const { start, end, startStr, endStr, intervalLabel } = useBudgetMonth(selectedMonth);
     const reimbursementMap = useMemo(() => calculateReimbursementMap(transactions), [transactions]);
     const detectedSubs = useSubscriptionDetection(transactions);
     
@@ -79,10 +81,15 @@ export const HomeDashboardView: React.FC<{ onNavigate: (view: any) => void }> = 
         daysPassed = 0;
     } else {
         daysRemaining = differenceInDays(end, today) + 1;
-        daysPassed = differenceInDays(today, start) + 1;
+        daysPassed = differenceInDays(today, start) + 1; // Count current day as passed for consumption purposes? Usually spending happens during day.
+        // Let's say: If it is day 5, we have 5 days passed (including today).
+        // If we want "Safe to spend TODAY", we treat today as part of the remaining budget.
+        // So daysPassed = days from start to yesterday.
+        // Actually, for "Safe to spend / day", we want Remaining / RemainingDays (including today).
+        daysPassed = Math.max(0, differenceInDays(today, start)); // Completed days
     }
     
-    const futureDays = Math.max(0, totalDays - daysPassed);
+    const futureDays = Math.max(1, daysRemaining); // Avoid division by zero
     const timeProgress = Math.min(100, (daysPassed / totalDays) * 100);
 
     // --- 2. SAFE TO SPEND & FORECAST ---
@@ -91,6 +98,9 @@ export const HomeDashboardView: React.FC<{ onNavigate: (view: any) => void }> = 
         let totalSpent = 0;
         let totalProjected = 0;
         
+        // Track specifically for Safe To Spend logic
+        let unpaidFixedCosts = 0;
+
         // Fallback Keywords if forecastType is missing (Legacy support)
         const variableKeywords = ['mat', 'dryck', 'nöje', 'shopping', 'kläder', 'övrigt', 'rörlig', 'livsmedel'];
         const fixedKeywords = ['boende', 'hyra', 'avgift', 'lån', 'räkning', 'försäkring', 'abonnemang', 'bostad', 'el', 'bredband', 'fast', 'transport', 'bil', 'csn'];
@@ -98,11 +108,12 @@ export const HomeDashboardView: React.FC<{ onNavigate: (view: any) => void }> = 
         budgetGroups.forEach(group => {
             // A. CALCULATE LIMIT
             let limit = 0;
-            const explicitData = group.monthlyData?.[selectedMonth];
+            const { data: explicitData } = getEffectiveBudgetGroupData(group, selectedMonth, budgetTemplates, monthConfigs);
             
             if (explicitData && !explicitData.isExplicitlyDeleted) {
                 limit = explicitData.limit;
             } else if (group.linkedBucketIds && group.linkedBucketIds.length > 0) {
+                // Legacy support for groups defined solely by buckets
                 const fundingBuckets = buckets.filter(b => group.linkedBucketIds?.includes(b.id));
                 limit = fundingBuckets.reduce((sum, b) => {
                     if (b.type === 'FIXED') return sum + calculateFixedBucketCost(b, selectedMonth);
@@ -110,29 +121,35 @@ export const HomeDashboardView: React.FC<{ onNavigate: (view: any) => void }> = 
                     if (b.type === 'GOAL') return sum + calculateGoalBucketCost(b, selectedMonth);
                     return sum;
                 }, 0);
-            } else {
-                const { data } = getEffectiveBudgetGroupData(group, selectedMonth);
-                if (data && !data.isExplicitlyDeleted) {
-                    limit = data.limit;
-                }
             }
 
             // B. CALCULATE SPENT
             const assignedSubs = subCategories.filter(s => s.budgetGroupId === group.id).map(s => s.id);
             
+            // Check Explicitly linked buckets (New System) + Legacy Linked Buckets
+            const linkedBuckets = buckets.filter(b => {
+                const isExplicit = b.budgetGroupId === group.id;
+                const isLegacy = !b.budgetGroupId && group.linkedBucketIds?.includes(b.id);
+                const isCatchAll = group.isCatchAll && !b.budgetGroupId && !isLegacy;
+                return isExplicit || isLegacy || isCatchAll;
+            });
+            const linkedBucketIds = linkedBuckets.map(b => b.id);
+
             const groupTxs = transactions.filter(t => {
                 if (t.isHidden) return false;
-                if (t.date < format(start, 'yyyy-MM-dd') || t.date > format(end, 'yyyy-MM-dd')) return false;
+                if (t.date < startStr || t.date > endStr) return false;
                 if (t.type === 'TRANSFER' || t.type === 'INCOME') return false; 
                 if (t.amount >= 0) return false; 
-                if (t.bucketId) {
-                    const b = buckets.find(bk => bk.id === t.bucketId);
-                    if (b?.type === 'GOAL') return false; 
-                }
+                
+                // Exclude GOAL spending from operating budget calc if desired? 
+                // Usually Goals are separate, but if they are linked to a group, they are part of that group's spent.
+                
+                if (t.bucketId && linkedBucketIds.includes(t.bucketId)) return true;
                 if (t.categorySubId && assignedSubs.includes(t.categorySubId)) return true;
+                
                 if (group.isCatchAll) {
-                    if (!t.categorySubId) return true;
-                    if (!subCategories.find(s => s.id === t.categorySubId)?.budgetGroupId) return true;
+                    // Catch-all: No bucket, no subcategory OR subcategory has no group
+                    if (!t.bucketId && (!t.categorySubId || !subCategories.find(s => s.id === t.categorySubId)?.budgetGroupId)) return true;
                 }
                 return false;
             });
@@ -142,46 +159,69 @@ export const HomeDashboardView: React.FC<{ onNavigate: (view: any) => void }> = 
             totalLimit += limit;
             totalSpent += spent;
 
-            // C. PROJECTION LOGIC (Explicit Type -> Linked Buckets -> Keyword Fallback)
+            // C. DETERMINE TYPE
             let isFixedGroup = false;
-
             if (group.forecastType) {
                 isFixedGroup = group.forecastType === 'FIXED';
-            } else if (group.linkedBucketIds && group.linkedBucketIds.length > 0) {
-                const linkedBuckets = buckets.filter(b => group.linkedBucketIds?.includes(b.id));
-                const hasDaily = linkedBuckets.some(b => b.type === 'DAILY');
-                const allFixed = linkedBuckets.every(b => b.type === 'FIXED');
-                
-                if (hasDaily) isFixedGroup = false;
-                else if (allFixed) isFixedGroup = true;
-                else isFixedGroup = false;
             } else {
+                // Heuristic Fallback
                 const name = group.name.toLowerCase();
-                if (variableKeywords.some(kw => name.includes(kw))) {
-                    isFixedGroup = false;
-                } else if (fixedKeywords.some(kw => name.includes(kw))) {
-                    isFixedGroup = true;
-                }
+                if (variableKeywords.some(kw => name.includes(kw))) isFixedGroup = false;
+                else if (fixedKeywords.some(kw => name.includes(kw))) isFixedGroup = true;
+                else isFixedGroup = false; // Default to variable
             }
 
+            // D. PROJECTION LOGIC
             if (isFixedGroup) {
-                // FIXED: Assumes the bill will arrive. If current spent is LESS than budget, assume full budget.
-                // If actual spent is MORE than budget, use actual spent (cost overrun).
-                totalProjected += Math.max(spent, limit);
+                // FIXED:
+                // Expect FULL limit to be used. If spent > limit, project spent.
+                // Logic: A bill is binary. Paid or Not. 
+                // If Paid (spent >= limit), cost is spent.
+                // If Not Paid (spent < limit), cost is limit (we expect to pay it).
+                
+                const projectedForGroup = Math.max(spent, limit);
+                totalProjected += projectedForGroup;
+
+                // For "Safe To Spend":
+                // If this is a FIXED group (bills), any remaining amount (limit - spent) is NOT safe to spend daily.
+                // It is reserved for the bill.
+                const remainingInGroup = Math.max(0, limit - spent);
+                unpaidFixedCosts += remainingInGroup;
+
             } else {
-                // VARIABLE: Linear extrapolation based on daily average so far.
+                // VARIABLE:
+                // Linear extrapolation.
                 const dailyAverage = daysPassed > 0 ? spent / daysPassed : 0;
+                
+                // If we are early in the month (daysPassed < 5) and spent is 0, extrapolate might look weird (0).
+                // In that case, maybe assume budget? 
+                // Let's stick to pure linear but clamp to budget if 0 days passed?
+                // Actually, pure linear is standard "Prognos".
+                
                 const projectedFuture = dailyAverage * futureDays;
                 totalProjected += spent + projectedFuture;
             }
         });
 
-        const remaining = totalLimit - totalSpent;
-        const safeToSpend = daysRemaining > 0 ? remaining / daysRemaining : 0;
+        const globalRemaining = totalLimit - totalSpent;
+        
+        // "Safe To Spend" Logic:
+        // We take the Global Remaining, subtract the money reserved for unpaid bills (Fixed groups).
+        // Then divide by remaining days.
+        const disposableRemaining = globalRemaining - unpaidFixedCosts;
+        const safeToSpend = daysRemaining > 0 ? Math.max(0, disposableRemaining / daysRemaining) : 0;
+        
         const projectedDiff = totalProjected - totalLimit;
 
-        return { totalLimit, totalSpent, remaining, safeToSpend, projectedTotal: totalProjected, projectedDiff };
-    }, [budgetGroups, transactions, start, end, buckets, subCategories, reimbursementMap, daysPassed, daysRemaining, selectedMonth, settings.payday, totalDays, futureDays]);
+        return { 
+            totalLimit, 
+            totalSpent, 
+            remaining: globalRemaining, 
+            safeToSpend, 
+            projectedTotal: totalProjected, 
+            projectedDiff 
+        };
+    }, [budgetGroups, transactions, startStr, endStr, buckets, subCategories, reimbursementMap, daysPassed, daysRemaining, futureDays, selectedMonth, settings.payday, budgetTemplates, monthConfigs]);
 
     // --- 3. ALERTS & ACTION ITEMS ---
     const unverifiedCount = transactions.filter(t => !t.isVerified && !t.isHidden).length;
@@ -191,8 +231,8 @@ export const HomeDashboardView: React.FC<{ onNavigate: (view: any) => void }> = 
         t.type === 'TRANSFER' && 
         (!t.bucketId || t.bucketId === 'INTERNAL') && 
         !t.linkedTransactionId &&
-        t.date >= format(start, 'yyyy-MM-dd') &&
-        t.date <= format(end, 'yyyy-MM-dd')
+        t.date >= startStr &&
+        t.date <= endStr
     ).length;
 
     const totalIncome = getTotalFamilyIncome(users, selectedMonth);
@@ -202,7 +242,7 @@ export const HomeDashboardView: React.FC<{ onNavigate: (view: any) => void }> = 
         const alerts: string[] = [];
         const activeSubs = detectedSubs.filter(s => !ignoredSubscriptions.some(i => i.id === s.name));
         activeSubs.forEach(sub => {
-            const currentTx = sub.transactions.find(t => t.date >= format(start, 'yyyy-MM-dd') && t.date <= format(end, 'yyyy-MM-dd') && !t.isHidden);
+            const currentTx = sub.transactions.find(t => t.date >= startStr && t.date <= endStr && !t.isHidden);
             // STRICTLY Filter out Transfers/Payouts for alerts
             if (currentTx && currentTx.type !== 'TRANSFER' && currentTx.type !== 'INCOME') {
                 const amount = Math.abs(currentTx.amount);
@@ -212,14 +252,14 @@ export const HomeDashboardView: React.FC<{ onNavigate: (view: any) => void }> = 
             }
         });
         return alerts;
-    }, [detectedSubs, start, end, ignoredSubscriptions]);
+    }, [detectedSubs, startStr, endStr, ignoredSubscriptions]);
 
     // --- 4. ADVANCED INSIGHTS CALCULATIONS ---
     const analysisData = useMemo(() => {
         const currentTxs = transactions.filter(t => 
             !t.isHidden &&
-            t.date >= format(start, 'yyyy-MM-dd') && 
-            t.date <= format(end, 'yyyy-MM-dd')
+            t.date >= startStr && 
+            t.date <= endStr
         );
         const expenseTxs = currentTxs.filter(t => t.type === 'EXPENSE' || (!t.type && t.amount < 0));
 
@@ -326,7 +366,7 @@ export const HomeDashboardView: React.FC<{ onNavigate: (view: any) => void }> = 
             foodRatio 
         };
 
-    }, [transactions, start, end, reimbursementMap]);
+    }, [transactions, startStr, endStr, reimbursementMap, start, end]);
 
     // --- 5. MOTIVATION (Next Dream) ---
     const nextDream = useMemo(() => {
@@ -366,7 +406,7 @@ export const HomeDashboardView: React.FC<{ onNavigate: (view: any) => void }> = 
                     </div>
                     <div className="flex-1">
                         <div className="flex justify-between text-xs mb-1.5">
-                            <span className="text-slate-400 font-medium">Månadsstatus</span>
+                            <span className="text-slate-400 font-medium">Månadsstatus ({intervalLabel})</span>
                             <span className="text-white font-bold">{daysRemaining} dagar kvar</span>
                         </div>
                         <div className="h-2 w-full bg-slate-700 rounded-full overflow-hidden">

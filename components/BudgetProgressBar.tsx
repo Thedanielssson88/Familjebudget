@@ -1,3 +1,4 @@
+
 import React from 'react';
 import { cn } from './components';
 
@@ -8,16 +9,28 @@ interface Props {
   onClick?: (e: React.MouseEvent) => void;
   className?: string;
   compact?: boolean; // För list-vy
+  color?: string; // Override default color logic
+  variant?: 'expense' | 'funding'; // Logic switch
 }
 
-export const BudgetProgressBar: React.FC<Props> = ({ spent, total, label, onClick, className, compact }) => {
+export const BudgetProgressBar: React.FC<Props> = ({ spent, total, label, onClick, className, compact, color: overrideColor, variant = 'expense' }) => {
   // Hantera 0-budget
   const percent = total > 0 ? Math.min((spent / total) * 100, 100) : (spent > 0 ? 100 : 0);
   const isOverBudget = spent > total && total > 0;
   
-  let color = "bg-emerald-500";
-  if (percent > 85) color = "bg-amber-500";
-  if (percent >= 100 || isOverBudget) color = "bg-rose-500";
+  let color = "bg-emerald-500"; // Default green (Good for low expense, or funding)
+
+  if (variant === 'expense') {
+      // For expenses: Low is green, High is red
+      if (percent > 85) color = "bg-amber-500";
+      if (percent >= 100 || isOverBudget) color = "bg-rose-500";
+  } else {
+      // For funding: We want to fill it up. Green is good. Over 100% is also green (or maybe blue/super-green?).
+      // User requested: "ska vara grön oavsett %".
+      color = "bg-emerald-500";
+  }
+
+  if (overrideColor) color = overrideColor;
 
   // För "compact" läge, visa bara baren
   if (compact) {

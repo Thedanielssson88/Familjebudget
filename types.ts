@@ -26,7 +26,7 @@ export interface BucketData {
 
 export interface Bucket {
   id: string;
-  accountId: string;
+  accountId: string; // Can be empty string to inherit from Group
   name: string;
   type: BucketType;
   isSavings: boolean; // If true, builds capital. If false, is an expense.
@@ -93,6 +93,31 @@ export interface SubCategory {
   description?: string;
   monthlyBudget?: number; // Target budget for this subcategory
   budgetGroupId?: string; // Links this specific category to a high-level budget group
+  accountId?: string; // Specific account override. If undefined, uses budgetGroup.defaultAccountId
+  isSavings?: boolean; // NEW: Marks this category as savings/investment in the waterfall
+}
+
+// --- NEW: BUDGET TEMPLATES ---
+export interface BudgetTemplate {
+    id: string;
+    name: string; // "Standard", "Sommar", "Jul"
+    isDefault: boolean;
+    // Map GroupID -> Limit
+    groupLimits: Record<string, number>;
+    // Map SubCategoryID -> Budget
+    subCategoryBudgets: Record<string, number>;
+    // Map BucketID -> Data (For Fixed/Daily only)
+    bucketValues: Record<string, BucketData>;
+}
+
+export interface MonthConfig {
+    monthKey: string; // "2025-06"
+    templateId: string;
+    // Overrides specific to this month (Optional)
+    groupOverrides?: Record<string, number>;
+    subCategoryOverrides?: Record<string, number>;
+    bucketOverrides?: Record<string, BucketData>;
+    isLocked?: boolean; 
 }
 
 export type TransactionType = 'EXPENSE' | 'TRANSFER' | 'INCOME';
@@ -171,6 +196,10 @@ export interface GlobalState {
   mainCategories: MainCategory[];
   subCategories: SubCategory[];
   budgetGroups: BudgetGroup[];
+
+  // Templates
+  budgetTemplates: BudgetTemplate[];
+  monthConfigs: MonthConfig[];
 
   settings: AppSettings;
   selectedMonth: string; // YYYY-MM

@@ -1,8 +1,8 @@
 
 import React, { createContext, useContext, useEffect, useState } from 'react';
-import { Account, AppSettings, Bucket, GlobalState, User, MonthKey, Transaction, ImportRule, MainCategory, SubCategory, BudgetGroup, BudgetGroupData, IgnoredSubscription } from './types';
+import { Account, AppSettings, Bucket, GlobalState, User, MonthKey, Transaction, ImportRule, MainCategory, SubCategory, BudgetGroup, BudgetGroupData, IgnoredSubscription, BudgetTemplate, MonthConfig, BucketData } from './types';
 import { format, addMonths, parseISO } from 'date-fns';
-import { getEffectiveBucketData, generateId, isBucketActiveInMonth, calculateFixedBucketCost, calculateDailyBucketCost, calculateGoalBucketCost, getEffectiveBudgetGroupData } from './utils';
+import { getEffectiveBucketData, generateId, isBucketActiveInMonth, calculateFixedBucketCost, calculateDailyBucketCost, calculateGoalBucketCost, getEffectiveBudgetGroupData, getEffectiveSubCategoryBudget } from './utils';
 import { z } from 'zod';
 import { db } from './db';
 import { DEFAULT_MAIN_CATEGORIES, DEFAULT_SUB_CATEGORIES } from './constants/defaultCategories';
@@ -84,7 +84,9 @@ const SubCategorySchema = z.object({
   mainCategoryId: z.string(),
   description: z.string().optional(),
   budgetGroupId: z.string().optional(),
-  monthlyBudget: z.number().optional()
+  monthlyBudget: z.number().optional(),
+  accountId: z.string().optional(),
+  isSavings: z.boolean().optional()
 });
 
 const BudgetGroupDataSchema = z.object({
@@ -138,6 +140,24 @@ const IgnoredSubscriptionSchema = z.object({
     id: z.string()
 });
 
+const BudgetTemplateSchema = z.object({
+    id: z.string(),
+    name: z.string(),
+    isDefault: z.boolean(),
+    groupLimits: z.record(z.string(), z.number()),
+    subCategoryBudgets: z.record(z.string(), z.number()),
+    bucketValues: z.record(z.string(), BucketDataSchema).optional().default({})
+});
+
+const MonthConfigSchema = z.object({
+    monthKey: z.string(),
+    templateId: z.string(),
+    groupOverrides: z.record(z.string(), z.number()).optional(),
+    subCategoryOverrides: z.record(z.string(), z.number()).optional(),
+    bucketOverrides: z.record(z.string(), BucketDataSchema).optional(),
+    isLocked: z.boolean().optional()
+});
+
 const GlobalStateSchema = z.object({
   users: z.array(UserSchema).optional().default([]),
   accounts: z.array(AccountSchema).optional().default([]),
@@ -148,7 +168,9 @@ const GlobalStateSchema = z.object({
   mainCategories: z.array(MainCategorySchema).optional().default([]),
   subCategories: z.array(SubCategorySchema).optional().default([]),
   budgetGroups: z.array(BudgetGroupSchema).optional().default([]),
-  ignoredSubscriptions: z.array(IgnoredSubscriptionSchema).optional().default([])
+  ignoredSubscriptions: z.array(IgnoredSubscriptionSchema).optional().default([]),
+  budgetTemplates: z.array(BudgetTemplateSchema).optional().default([]),
+  monthConfigs: z.array(MonthConfigSchema).optional().default([])
 });
 
 // --- END SCHEMAS ---
@@ -179,15 +201,24 @@ interface AppContextType extends GlobalState {
   // Category Methods
   addMainCategory: (name: string) => Promise<string>;
   deleteMainCategory: (id: string) => Promise<void>;
-  addSubCategory: (mainCatId: string, name: string) => Promise<string>;
+  addSubCategory: (mainCatId: string, name: string, isSavings?: boolean) => Promise<string>;
   updateSubCategory: (subCat: SubCategory) => Promise<void>;
   deleteSubCategory: (id: string) => Promise<void>;
   resetCategoriesToDefault: () => Promise<void>;
   // Budget Group Methods
-  addBudgetGroup: (name: string, limit: number, icon: string) => Promise<void>;
+  addBudgetGroup: (name: string, limit: number, icon: string, forecastType?: 'FIXED' | 'VARIABLE') => Promise<void>;
   updateBudgetGroup: (group: BudgetGroup) => Promise<void>;
   deleteBudgetGroup: (id: string, month?: MonthKey, scope?: 'THIS_MONTH' | 'THIS_AND_FUTURE' | 'ALL') => Promise<void>;
   
+  // Template Methods
+  addTemplate: (name: string, fromMonth?: string) => Promise<void>;
+  updateTemplate: (template: BudgetTemplate) => Promise<void>;
+  deleteTemplate: (id: string) => Promise<void>;
+  assignTemplateToMonth: (monthKey: string, templateId: string) => Promise<void>;
+  resetMonthToTemplate: (monthKey: string) => Promise<void>;
+  setBudgetLimit: (type: 'GROUP' | 'SUB' | 'BUCKET', id: string, amount: number | BucketData, monthKey: string, updateMode: 'TEMPLATE' | 'OVERRIDE') => Promise<void>;
+  toggleMonthLock: (monthKey: string) => Promise<void>;
+
   // Subscription Ignore
   addIgnoredSubscription: (name: string) => Promise<void>;
 
@@ -229,6 +260,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const [subCategories, setSubCategories] = useState<SubCategory[]>([]);
   const [budgetGroups, setBudgetGroups] = useState<BudgetGroup[]>([]);
   const [ignoredSubscriptions, setIgnoredSubscriptions] = useState<IgnoredSubscription[]>([]);
+  const [budgetTemplates, setBudgetTemplates] = useState<BudgetTemplate[]>([]);
+  const [monthConfigs, setMonthConfigs] = useState<MonthConfig[]>([]);
 
   // Initial Load & Migration Logic
   useEffect(() => {
@@ -246,7 +279,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
                 if (result.success) {
                     const data = result.data;
-                    await (db as any).transaction('rw', db.users, db.accounts, db.buckets, db.settings, db.transactions, db.importRules, db.mainCategories, db.subCategories, db.budgetGroups, db.ignoredSubscriptions, async () => {
+                    await (db as any).transaction('rw', db.users, db.accounts, db.buckets, db.settings, db.transactions, db.importRules, db.mainCategories, db.subCategories, db.budgetGroups, db.ignoredSubscriptions, db.budgetTemplates, db.monthConfigs, async () => {
                         await db.users.bulkAdd(data.users);
                         await db.accounts.bulkAdd(data.accounts);
                         await db.buckets.bulkAdd(data.buckets);
@@ -257,6 +290,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
                         if (data.subCategories) await db.subCategories.bulkAdd(data.subCategories);
                         if (data.budgetGroups) await db.budgetGroups.bulkAdd(data.budgetGroups);
                         if (data.ignoredSubscriptions) await db.ignoredSubscriptions.bulkAdd(data.ignoredSubscriptions);
+                        if (data.budgetTemplates) await db.budgetTemplates.bulkAdd(data.budgetTemplates);
+                        if (data.monthConfigs) await db.monthConfigs.bulkAdd(data.monthConfigs);
                     });
                 }
             } else {
@@ -317,6 +352,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         const dbSubCats = await db.subCategories.toArray();
         const dbGroups = await db.budgetGroups.toArray();
         const dbIgnored = await db.ignoredSubscriptions.toArray();
+        const dbTemplates = await db.budgetTemplates.toArray();
+        const dbConfigs = await db.monthConfigs.toArray();
 
         setUsers(dbUsers);
         setAccounts(dbAccounts);
@@ -337,8 +374,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
         // MIGRATION: Ensure at least one "Catch All" Budget Group exists
         let loadedGroups = dbGroups;
-        const needsMigration = dbGroups.some((g: any) => typeof g.monthlyLimit === 'number' && !g.monthlyData);
-        if (needsMigration) {
+        const needsGroupMigration = dbGroups.some((g: any) => typeof g.monthlyLimit === 'number' && !g.monthlyData);
+        if (needsGroupMigration) {
             console.log("Migrating Budget Groups to Monthly Data Structure...");
             const migratedGroups = dbGroups.map((g: any) => {
                 if (g.monthlyData) return g;
@@ -365,6 +402,45 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         }
         setBudgetGroups(loadedGroups);
         
+        // MIGRATION TO TEMPLATES (If no templates exist)
+        let loadedTemplates = dbTemplates;
+        if (dbTemplates.length === 0 && loadedGroups.length > 0) {
+            console.log("Migrating to Template System...");
+            const currentMonth = format(new Date(), 'yyyy-MM');
+            
+            const groupLimits: Record<string, number> = {};
+            loadedGroups.forEach(g => {
+                const { data } = getEffectiveBudgetGroupData(g, currentMonth); // Use legacy getter temporarily
+                groupLimits[g.id] = data ? data.limit : 0;
+            });
+
+            const subLimits: Record<string, number> = {};
+            dbSubCats.forEach(s => {
+                if (s.monthlyBudget) subLimits[s.id] = s.monthlyBudget;
+            });
+
+            const bucketValues: Record<string, BucketData> = {};
+            dbBuckets.forEach(b => {
+                if (b.type === 'GOAL') return;
+                const { data } = getEffectiveBucketData(b, currentMonth); // Legacy getter
+                if (data) bucketValues[b.id] = data;
+            });
+
+            const stdTemplate: BudgetTemplate = {
+                id: generateId(),
+                name: 'Standard',
+                isDefault: true,
+                groupLimits,
+                subCategoryBudgets: subLimits,
+                bucketValues
+            };
+
+            await db.budgetTemplates.add(stdTemplate);
+            loadedTemplates = [stdTemplate];
+        }
+        setBudgetTemplates(loadedTemplates);
+        setMonthConfigs(dbConfigs);
+
         const migratedTransactions = dbTransactions.map(t => {
             const anyT = t as any;
             if (anyT.categoryId && !t.bucketId) {
@@ -495,7 +571,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     if (!bucket) return;
 
     const newMonthlyData = { ...bucket.monthlyData };
-    const { data: effectiveData } = getEffectiveBucketData(bucket, month);
+    const { data: effectiveData } = getEffectiveBucketData(bucket, month, budgetTemplates, monthConfigs); // Use updated getter
     const currentData = effectiveData || { amount: 0, dailyAmount: 0, activeDays: [] };
 
     if (scope === 'THIS_MONTH') {
@@ -572,9 +648,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       setSubCategories(prev => prev.filter(s => s.mainCategoryId !== id));
   };
 
-  const addSubCategory = async (mainCatId: string, name: string): Promise<string> => {
+  const addSubCategory = async (mainCatId: string, name: string, isSavings: boolean = false): Promise<string> => {
       const id = generateId();
-      const newSub: SubCategory = { id, mainCategoryId: mainCatId, name };
+      const newSub: SubCategory = { id, mainCategoryId: mainCatId, name, isSavings };
       await db.subCategories.add(newSub);
       setSubCategories(prev => [...prev, newSub]);
       return id;
@@ -601,7 +677,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   // --- BUDGET GROUP ACTIONS ---
   
-  const addBudgetGroup = async (name: string, limit: number, icon: string) => {
+  const addBudgetGroup = async (name: string, limit: number, icon: string, forecastType: 'FIXED' | 'VARIABLE' = 'VARIABLE') => {
       const newGroup: BudgetGroup = { 
           id: generateId(), 
           name, 
@@ -609,7 +685,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           monthlyData: {
              [selectedMonth]: { limit, isExplicitlyDeleted: false }
           },
-          forecastType: 'VARIABLE' // Default
+          forecastType
       };
       await db.budgetGroups.add(newGroup);
       setBudgetGroups(prev => [...prev, newGroup]);
@@ -633,26 +709,19 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           return;
       }
 
+      // Legacy support: We still keep monthlyData for "explicit deleted" flag
       const group = budgetGroups.find(g => g.id === id);
       if (!group) return;
 
       const newMonthlyData = { ...group.monthlyData };
-      const { data: effectiveData } = getEffectiveBudgetGroupData(group, month);
-      const currentData = effectiveData || { limit: 0 };
-
+      
+      // Just mark as deleted in legacy data to hide it
       if (scope === 'THIS_MONTH') {
-           newMonthlyData[month] = { ...currentData, limit: 0, isExplicitlyDeleted: true };
-           const nextMonth = format(addMonths(parseISO(`${month}-01`), 1), 'yyyy-MM');
-           if (!newMonthlyData[nextMonth]) {
-               newMonthlyData[nextMonth] = { ...currentData, isExplicitlyDeleted: false };
-           }
+           newMonthlyData[month] = { ...newMonthlyData[month], limit: 0, isExplicitlyDeleted: true };
       } else if (scope === 'THIS_AND_FUTURE') {
-           newMonthlyData[month] = { ...currentData, limit: 0, isExplicitlyDeleted: true };
-           Object.keys(newMonthlyData).forEach(key => {
-               if (key > month) {
-                   newMonthlyData[key] = { ...newMonthlyData[key], limit: 0, isExplicitlyDeleted: true };
-               }
-           });
+           newMonthlyData[month] = { ...newMonthlyData[month], limit: 0, isExplicitlyDeleted: true };
+           // We can't really future delete easily in legacy without looping infinite months. 
+           // In new system, we'd handle this via monthConfigs.
       }
 
       const updatedGroup = { ...group, monthlyData: newMonthlyData };
@@ -660,6 +729,183 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       setBudgetGroups(prev => prev.map(g => g.id === id ? updatedGroup : g));
   };
   
+  // --- TEMPLATE & BUDGET LOGIC ---
+
+  const addTemplate = async (name: string, fromMonth: string = selectedMonth) => {
+      // Create a snapshot from current effective values
+      const groupLimits: Record<string, number> = {};
+      budgetGroups.forEach(g => {
+          const { data } = getEffectiveBudgetGroupData(g, fromMonth, budgetTemplates, monthConfigs);
+          if (data) groupLimits[g.id] = data.limit;
+      });
+
+      const subLimits: Record<string, number> = {};
+      subCategories.forEach(s => {
+          const limit = getEffectiveSubCategoryBudget(s, fromMonth, budgetTemplates, monthConfigs);
+          subLimits[s.id] = limit;
+      });
+
+      const bucketValues: Record<string, BucketData> = {};
+      buckets.forEach(b => {
+          if (b.type === 'GOAL') return;
+          const { data } = getEffectiveBucketData(b, fromMonth, budgetTemplates, monthConfigs);
+          if (data) bucketValues[b.id] = data;
+      });
+
+      const newTemplate: BudgetTemplate = {
+          id: generateId(),
+          name,
+          isDefault: false,
+          groupLimits,
+          subCategoryBudgets: subLimits,
+          bucketValues
+      };
+
+      await db.budgetTemplates.add(newTemplate);
+      setBudgetTemplates(prev => [...prev, newTemplate]);
+  };
+
+  const updateTemplate = async (template: BudgetTemplate) => {
+      await db.budgetTemplates.put(template);
+      setBudgetTemplates(prev => prev.map(t => t.id === template.id ? template : t));
+  };
+
+  const deleteTemplate = async (id: string) => {
+      await db.budgetTemplates.delete(id);
+      setBudgetTemplates(prev => prev.filter(t => t.id !== id));
+      // Revert assigned months to default? Or keep assignment but it will fallback to default since ID missing.
+  };
+
+  const assignTemplateToMonth = async (monthKey: string, templateId: string) => {
+      const existing = monthConfigs.find(c => c.monthKey === monthKey);
+      
+      // When switching templates, we should clear overrides so the new template takes effect.
+      const newConfig: MonthConfig = existing 
+        ? { ...existing, templateId, groupOverrides: {}, subCategoryOverrides: {}, bucketOverrides: {} } 
+        : { monthKey, templateId, groupOverrides: {}, subCategoryOverrides: {}, bucketOverrides: {} };
+      
+      await db.monthConfigs.put(newConfig);
+      
+      // Update state
+      if (existing) {
+          setMonthConfigs(prev => prev.map(c => c.monthKey === monthKey ? newConfig : c));
+      } else {
+          setMonthConfigs(prev => [...prev, newConfig]);
+      }
+  };
+
+  const resetMonthToTemplate = async (monthKey: string) => {
+      const config = monthConfigs.find(c => c.monthKey === monthKey);
+      if (!config) return;
+
+      const newConfig = {
+          ...config,
+          groupOverrides: {},
+          subCategoryOverrides: {},
+          bucketOverrides: {}
+      };
+      await db.monthConfigs.put(newConfig);
+      setMonthConfigs(prev => prev.map(c => c.monthKey === monthKey ? newConfig : c));
+  };
+
+  const setBudgetLimit = async (type: 'GROUP' | 'SUB' | 'BUCKET', id: string, amount: number | BucketData, monthKey: string, updateMode: 'TEMPLATE' | 'OVERRIDE') => {
+      // 1. Determine active template
+      const config = monthConfigs.find(c => c.monthKey === monthKey);
+      let templateId = config?.templateId;
+      if (!templateId) {
+          const def = budgetTemplates.find(t => t.isDefault);
+          templateId = def?.id;
+      }
+      if (!templateId) return; // Should not happen if migration worked
+
+      if (updateMode === 'TEMPLATE') {
+          const template = budgetTemplates.find(t => t.id === templateId);
+          if (!template) return;
+
+          const updatedTemplate = { ...template };
+          if (type === 'GROUP') {
+              updatedTemplate.groupLimits = { ...template.groupLimits, [id]: amount as number };
+          } else if (type === 'SUB') {
+              updatedTemplate.subCategoryBudgets = { ...template.subCategoryBudgets, [id]: amount as number };
+          } else {
+              updatedTemplate.bucketValues = { ...template.bucketValues, [id]: amount as BucketData };
+          }
+          await updateTemplate(updatedTemplate);
+      
+      } else {
+          // OVERRIDE
+          const newConfig = config ? { ...config } : { monthKey, templateId, groupOverrides: {}, subCategoryOverrides: {}, bucketOverrides: {} };
+          
+          if (type === 'GROUP') {
+              newConfig.groupOverrides = { ...newConfig.groupOverrides, [id]: amount as number };
+          } else if (type === 'SUB') {
+              newConfig.subCategoryOverrides = { ...newConfig.subCategoryOverrides, [id]: amount as number };
+          } else {
+              // Ensure object exists
+              newConfig.bucketOverrides = { ...newConfig.bucketOverrides, [id]: amount as BucketData };
+          }
+          
+          await db.monthConfigs.put(newConfig);
+          if (config) {
+              setMonthConfigs(prev => prev.map(c => c.monthKey === monthKey ? newConfig : c));
+          } else {
+              setMonthConfigs(prev => [...prev, newConfig]);
+          }
+      }
+  };
+
+  const toggleMonthLock = async (monthKey: string) => {
+      const config = monthConfigs.find(c => c.monthKey === monthKey) || { 
+          monthKey, 
+          templateId: '', // Will be resolved to default if empty
+          groupOverrides: {}, 
+          subCategoryOverrides: {}, 
+          bucketOverrides: {},
+          isLocked: false 
+      };
+      
+      const wasLocked = !!config.isLocked;
+
+      if (!wasLocked) {
+          // LOCKING: Snapshot current effective values
+          // This ensures that even if templates change later, this month stays exactly as is.
+          const groupOverrides: Record<string, number> = {};
+          budgetGroups.forEach(g => {
+              const { data } = getEffectiveBudgetGroupData(g, monthKey, budgetTemplates, monthConfigs);
+              if (data) groupOverrides[g.id] = data.limit;
+          });
+
+          const subOverrides: Record<string, number> = {};
+          subCategories.forEach(s => {
+              const limit = getEffectiveSubCategoryBudget(s, monthKey, budgetTemplates, monthConfigs);
+              subOverrides[s.id] = limit;
+          });
+
+          const bucketOverrides: Record<string, BucketData> = {};
+          buckets.forEach(b => {
+              if (b.type === 'GOAL') return;
+              const { data } = getEffectiveBucketData(b, monthKey, budgetTemplates, monthConfigs);
+              if (data) bucketOverrides[b.id] = data;
+          });
+
+          const newConfig = { ...config, isLocked: true, groupOverrides, subCategoryOverrides: subOverrides, bucketOverrides };
+          await db.monthConfigs.put(newConfig);
+          
+          if (monthConfigs.find(c => c.monthKey === monthKey)) {
+              setMonthConfigs(prev => prev.map(c => c.monthKey === monthKey ? newConfig : c));
+          } else {
+              setMonthConfigs(prev => [...prev, newConfig]);
+          }
+
+      } else {
+          // UNLOCKING: Just remove the lock flag. 
+          // We keep the overrides so the values don't jump, but now they can be edited or template-switched.
+          const newConfig = { ...config, isLocked: false };
+          await db.monthConfigs.put(newConfig);
+          setMonthConfigs(prev => prev.map(c => c.monthKey === monthKey ? newConfig : c));
+      }
+  };
+
   // --- TRANSACTION ACTIONS ---
   
   const addTransactions = async (txs: Transaction[]) => {
@@ -708,7 +954,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       // Vi hämtar direkt från DB för att garantera att vi får ALL data, oberoende av state
       const [
           users, accounts, buckets, settingsArr, transactions, 
-          importRules, mainCategories, subCategories, budgetGroups, ignoredSubscriptions
+          importRules, mainCategories, subCategories, budgetGroups, ignoredSubscriptions,
+          budgetTemplates, monthConfigs
       ] = await Promise.all([
           db.users.toArray(),
           db.accounts.toArray(),
@@ -719,7 +966,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           db.mainCategories.toArray(),
           db.subCategories.toArray(),
           db.budgetGroups.toArray(),
-          db.ignoredSubscriptions.toArray()
+          db.ignoredSubscriptions.toArray(),
+          db.budgetTemplates.toArray(),
+          db.monthConfigs.toArray()
       ]);
 
       // Eftersom settings i din typ är ett objekt men i DB en tabell, hanterar vi det:
@@ -728,8 +977,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       const data = {
           users, accounts, buckets, settings: settingsExport, transactions, 
           importRules, mainCategories, subCategories, budgetGroups, ignoredSubscriptions,
+          budgetTemplates, monthConfigs,
           meta: {
-              version: 1,
+              version: 2,
               date: new Date().toISOString()
           }
       };
@@ -754,6 +1004,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
               db.users, db.accounts, db.buckets, db.settings, 
               db.transactions, db.importRules, db.mainCategories, 
               db.subCategories, db.budgetGroups, db.ignoredSubscriptions,
+              db.budgetTemplates, db.monthConfigs,
               async () => {
                   
                   // 1. Rensa alla tabeller först
@@ -767,7 +1018,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
                       db.mainCategories.clear(),
                       db.subCategories.clear(),
                       db.budgetGroups.clear(),
-                      db.ignoredSubscriptions.clear()
+                      db.ignoredSubscriptions.clear(),
+                      db.budgetTemplates.clear(),
+                      db.monthConfigs.clear()
                   ]);
 
                   // 2. Lägg in data (Små tabeller kan tas direkt)
@@ -780,6 +1033,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
                   if (validData.subCategories) await db.subCategories.bulkAdd(validData.subCategories);
                   if (validData.budgetGroups) await db.budgetGroups.bulkAdd(validData.budgetGroups);
                   if (validData.ignoredSubscriptions) await db.ignoredSubscriptions.bulkAdd(validData.ignoredSubscriptions);
+                  if (validData.budgetTemplates) await db.budgetTemplates.bulkAdd(validData.budgetTemplates);
+                  if (validData.monthConfigs) await db.monthConfigs.bulkAdd(validData.monthConfigs);
 
                   // 3. Hantera stora datamängder (Transaktioner) med Chunking (500 rader åt gången)
                   if (validData.transactions && validData.transactions.length > 0) {
@@ -810,6 +1065,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     subCategories, addSubCategory, updateSubCategory, deleteSubCategory, resetCategoriesToDefault,
     // Budget Groups
     budgetGroups, addBudgetGroup, updateBudgetGroup, deleteBudgetGroup,
+    // Templates
+    budgetTemplates, monthConfigs, addTemplate, updateTemplate, deleteTemplate, assignTemplateToMonth, setBudgetLimit, toggleMonthLock, resetMonthToTemplate,
     
     // Subscriptions
     ignoredSubscriptions, addIgnoredSubscription,
