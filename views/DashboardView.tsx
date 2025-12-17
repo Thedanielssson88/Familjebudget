@@ -1,10 +1,11 @@
 
 import React, { useState, useMemo } from 'react';
 import { useApp } from '../store';
-import { calculateDailyBucketCost, calculateDailyBucketCostSoFar, calculateFixedBucketCost, calculateGoalBucketCost, formatMoney, getEffectiveBudgetGroupData, getEffectiveSubCategoryBudget, getLatestDailyDeduction, getTotalFamilyIncome, getUserIncome } from '../utils';
+import { calculateDailyBucketCost, calculateDailyBucketCostSoFar, calculateFixedBucketCost, calculateGoalBucketCost, formatMoney, getEffectiveBudgetGroupData, getEffectiveSubCategoryBudget, getLatestDailyDeduction, getTotalFamilyIncome, getUserIncome, calculateReimbursementMap, getEffectiveAmount, getBudgetInterval } from '../utils';
 import { Card, cn } from '../components/components';
 import { ArrowDown, Sliders, Landmark, Calculator, PiggyBank, LayoutGrid, BarChart3 } from 'lucide-react';
 import { StatsView } from './StatsView';
+import { format } from 'date-fns';
 
 // Simple SVG Gauge Component
 const SavingsGauge = ({ percentage }: { percentage: number }) => {
@@ -45,8 +46,10 @@ const SavingsGauge = ({ percentage }: { percentage: number }) => {
 };
 
 const WaterfallOverview: React.FC = () => {
-  const { users, buckets, selectedMonth, settings, budgetGroups, subCategories, budgetTemplates, monthConfigs } = useApp();
+  const { users, buckets, selectedMonth, settings, budgetGroups, subCategories, budgetTemplates, monthConfigs, transactions } = useApp();
   const [scenarioAdjustment, setScenarioAdjustment] = useState(0);
+
+  const reimbursementMap = useMemo(() => calculateReimbursementMap(transactions), [transactions]);
 
   // 1. Calculate Actual Inflow
   const totalActualIncome = useMemo(() => 
@@ -60,6 +63,10 @@ const WaterfallOverview: React.FC = () => {
     let dailySoFar = 0;
     let fixedForBalance = 0; // Tracks actual expected cash outflow for balance calc
 
+    // Helper for Start Date of current month (for Goal calculation)
+    const { start } = getBudgetInterval(selectedMonth, settings.payday);
+    const startStr = format(start, 'yyyy-MM-dd');
+
     // A. BUCKETS (Fixed, Daily, Goals)
     buckets.forEach(b => {
         if (b.paymentSource === 'BALANCE') return;
@@ -70,7 +77,18 @@ const WaterfallOverview: React.FC = () => {
         if (b.type === 'FIXED') {
             cost = calculateFixedBucketCost(b, selectedMonth);
         } else if (b.type === 'GOAL') {
-            cost = calculateGoalBucketCost(b, selectedMonth);
+            // Updated Logic: Match OperatingBudgetView (Project Budget / Remaining Target)
+            // Instead of monthly saving rate, we use (Target - Past Spent) to show available budget
+            const pastSpent = transactions
+                .filter(t => 
+                    !t.isHidden &&
+                    t.bucketId === b.id && 
+                    t.date < startStr && 
+                    (t.type === 'EXPENSE' || (!t.type && t.amount < 0))
+                )
+                .reduce((sum, t) => sum + Math.abs(getEffectiveAmount(t, reimbursementMap)), 0);
+            
+            cost = Math.max(0, b.targetAmount - pastSpent);
         } else if (b.type === 'DAILY') {
             isDaily = true;
             cost = calculateDailyBucketCost(b, selectedMonth, settings.payday);
@@ -127,7 +145,7 @@ const WaterfallOverview: React.FC = () => {
         totalDailySoFar: dailySoFar,
         totalFixedForBalance: fixedForBalance
     };
-  }, [buckets, budgetGroups, subCategories, selectedMonth, settings.payday, budgetTemplates, monthConfigs]);
+  }, [buckets, budgetGroups, subCategories, selectedMonth, settings.payday, budgetTemplates, monthConfigs, transactions, reimbursementMap]);
 
   // 3. Totals and Surplus
   // Scenario adjustment is assumed to be extra CONSUMPTION (bills/food increasing)

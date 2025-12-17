@@ -13,7 +13,7 @@ import { ChevronRight, ChevronDown, Edit2, Check, AlertTriangle, TrendingUp, Tre
 import { BudgetProgressBar } from '../components/BudgetProgressBar';
 import { cn, Button, Modal } from '../components/components';
 import { BudgetGroup, Bucket, Transaction, MainCategory, SubCategory } from '../types';
-import { format, subMonths, parseISO, differenceInDays, startOfDay, endOfDay, areIntervalsOverlapping, addDays, isValid, startOfMonth, endOfMonth, addMonths, getDay, startOfWeek, endOfWeek, subWeeks, getISOWeek, getDate, getDaysInMonth, eachDayOfInterval, subDays, subYears } from 'date-fns';
+import { format, subMonths, parseISO, differenceInDays, startOfDay, endOfDay, areIntervalsOverlapping, addDays, isValid, startOfMonth, endOfMonth, addMonths, getDay, startOfWeek, endOfWeek, subWeeks, getISOWeek, getDate, getDaysInMonth, eachDayOfInterval, subDays, subYears, isAfter, isBefore, isSameMonth } from 'date-fns';
 import { sv } from 'date-fns/locale';
 import { generateMonthlyReport, FinancialSnapshot } from '../services/aiService';
 
@@ -296,15 +296,12 @@ const BudgetGroupStats = ({ selectedMonth }: { selectedMonth: string }) => {
             if (homeDaysCount > 5) scalingFactor = totalDays / homeDaysCount;
         }
 
-        // Filter transactions for display period (AND exclude hidden)
         const relevantTx = transactions.filter(t => {
-            if (t.isHidden) return false; // Exclude hidden
+            if (t.isHidden) return false;
             if (t.date < startStr || t.date > endStr) return false;
-            // Check basic type or negative amount
             const isExpense = t.type === 'EXPENSE' || (!t.type && t.amount < 0);
             if (!isExpense) return false;
             
-            // Exclude Dreams if requested
             if (excludeDreams && t.bucketId) {
                 const bucket = buckets.find(b => b.id === t.bucketId);
                 if (bucket?.type === 'GOAL') return false;
@@ -312,30 +309,28 @@ const BudgetGroupStats = ({ selectedMonth }: { selectedMonth: string }) => {
             return true;
         });
 
-        const groupStats = budgetGroups.map(group => {
-            // STRICT MAPPING LOGIC (Same as OperatingBudgetView)
-            
-            // 1. Linked Subcategories
-            const assignedSubs = subCategories.filter(s => s.budgetGroupId === group.id);
-            
-            // 2. Linked Buckets
-            const linkedBuckets = buckets.filter(b => {
-                const isExplicitlyLinked = b.budgetGroupId 
-                    ? b.budgetGroupId === group.id 
-                    : (group.linkedBucketIds && group.linkedBucketIds.includes(b.id));
-                const isOrphan = !b.budgetGroupId && (!group.linkedBucketIds || !group.linkedBucketIds.includes(b.id));
-                const isClaimedByCatchAll = group.isCatchAll && isOrphan;
-                return isExplicitlyLinked || isClaimedByCatchAll;
-            });
+        // Pre-map buckets to their groups for efficient lookup
+        const bucketIdToGroupId = new Map<string, string>();
+        budgetGroups.forEach(bg => {
+            const bgBuckets = buckets.filter(b => b.budgetGroupId === bg.id || bg.linkedBucketIds?.includes(b.id));
+            bgBuckets.forEach(b => bucketIdToGroupId.set(b.id, bg.id));
+        });
 
-            // 3. Planned Budget Calculation (For current month view or average)
-            let plannedBudget = 0;
+        const groupStats = budgetGroups.map(group => {
+            const assignedSubs = subCategories.filter(s => s.budgetGroupId === group.id);
+            const assignedSubIds = new Set(assignedSubs.map(s => s.id));
             
-            // Collect items for Breakdown view
+            const linkedBuckets = buckets.filter(b => {
+                const gid = bucketIdToGroupId.get(b.id);
+                if (gid) return gid === group.id;
+                return group.isCatchAll; // Orphans go to catch-all
+            });
+            const linkedBucketIds = new Set(linkedBuckets.map(b => b.id));
+
+            let plannedBudget = 0;
             const budgetItems: { name: string; amount: number; type: 'SUB'|'BUCKET'|'BUFFER' }[] = [];
 
             if (timeframe === 1) {
-                // Exact calculation for this month
                 const { data: explicitData } = getEffectiveBudgetGroupData(group, selectedMonth, budgetTemplates, monthConfigs);
                 const manualLimit = explicitData ? explicitData.limit : 0;
                 
@@ -348,9 +343,46 @@ const BudgetGroupStats = ({ selectedMonth }: { selectedMonth: string }) => {
                 });
 
                 linkedBuckets.forEach(b => {
-                    // Logic from OperatingBudgetView
                     let cost = 0;
-                    if (b.type === 'GOAL') cost = calculateGoalBucketCost(b, selectedMonth);
+                    if (b.type === 'GOAL') {
+                        let isVisible = false;
+                        const bucketTxs = relevantTx.filter(t => t.bucketId === b.id);
+                        if (bucketTxs.length > 0) isVisible = true;
+
+                        if (!isVisible) {
+                            const current = parseISO(`${selectedMonth}-01`);
+                            const { start, end } = getBudgetInterval(selectedMonth, settings.payday);
+                            if (b.targetDate) {
+                                const target = parseISO(`${b.targetDate}-01`);
+                                if (isValid(target) && isSameMonth(current, target)) isVisible = true;
+                            }
+                            if (b.eventStartDate && b.eventEndDate) {
+                                const evtStart = parseISO(b.eventStartDate);
+                                const evtEnd = parseISO(b.eventEndDate);
+                                if (isValid(evtStart) && isValid(evtEnd)) {
+                                    if (!isAfter(start, evtEnd) && !isBefore(end, evtStart)) {
+                                        isVisible = true;
+                                    }
+                                }
+                            }
+                        }
+
+                        if (isVisible) {
+                            const { start } = getBudgetInterval(selectedMonth, settings.payday);
+                            const currentStartStr = format(start, 'yyyy-MM-dd');
+                            const pastSpent = transactions
+                                .filter(t => 
+                                    !t.isHidden &&
+                                    t.bucketId === b.id && 
+                                    t.date < currentStartStr && 
+                                    (t.type === 'EXPENSE' || (!t.type && t.amount < 0))
+                                )
+                                .reduce((sum, t) => sum + Math.abs(getEffectiveAmount(t, reimbursementMap)), 0);
+                            cost = Math.max(0, b.targetAmount - pastSpent);
+                        } else {
+                            cost = 0;
+                        }
+                    }
                     else if (b.type === 'FIXED') {
                         const { data } = getEffectiveBucketData(b, selectedMonth, budgetTemplates, monthConfigs);
                         cost = data ? data.amount : 0;
@@ -368,80 +400,87 @@ const BudgetGroupStats = ({ selectedMonth }: { selectedMonth: string }) => {
                             cost = count * data.dailyAmount;
                         }
                     }
-                    // Filter: Only include if active/relevant
-                    if (cost > 0 || isBucketActiveInMonth(b, selectedMonth)) {
+                    const shouldInclude = cost > 0 || (b.type !== 'GOAL' && isBucketActiveInMonth(b, selectedMonth));
+
+                    if (shouldInclude) {
                         childrenSum += cost;
                         budgetItems.push({ name: b.name, amount: cost, type: 'BUCKET' });
                     }
                 });
 
                 plannedBudget = Math.max(childrenSum, manualLimit);
-                
-                // Add Buffer item if applicable
                 if (manualLimit > childrenSum) {
                     budgetItems.push({ name: 'Buffert / Ospecificerat', amount: manualLimit - childrenSum, type: 'BUFFER' });
                 }
 
             } else {
-                // Average budget over timeframe
                 let totalOverPeriod = 0;
                 for (let i = 0; i < timeframe; i++) {
                     const mDate = addMonths(parseISO(`${startMonthKey}-01`), i);
                     const mKey = format(mDate, 'yyyy-MM');
-                    
-                    // Helper to get budget for a month
                     const { data: gData } = getEffectiveBudgetGroupData(group, mKey, budgetTemplates, monthConfigs);
                     const mLimit = gData ? gData.limit : 0;
                     let mChildren = 0;
-                    
-                    // Simple sum approximation for historical
                     assignedSubs.forEach(s => mChildren += getEffectiveSubCategoryBudget(s, mKey, budgetTemplates, monthConfigs));
                     linkedBuckets.forEach(b => {
-                         // Simplified cost checks for speed in loop
                          if (b.type === 'FIXED') mChildren += calculateFixedBucketCost(b, mKey);
                          else if (b.type === 'DAILY') mChildren += calculateDailyBucketCost(b, mKey, settings.payday);
-                         else if (b.type === 'GOAL') mChildren += calculateGoalBucketCost(b, mKey);
+                         else if (b.type === 'GOAL') {
+                             let isVisible = false;
+                             const mCurrent = parseISO(`${mKey}-01`);
+                             const { start: mStart, end: mEnd } = getBudgetInterval(mKey, settings.payday);
+                             if (b.targetDate) {
+                                 const target = parseISO(`${b.targetDate}-01`);
+                                 if (isValid(target) && isSameMonth(mCurrent, target)) isVisible = true;
+                             }
+                             if (b.eventStartDate && b.eventEndDate) {
+                                 const evtStart = parseISO(b.eventStartDate);
+                                 const evtEnd = parseISO(b.eventEndDate);
+                                 if (isValid(evtStart) && isValid(evtEnd)) {
+                                     if (!isAfter(mStart, evtEnd) && !isBefore(mEnd, evtStart)) {
+                                         isVisible = true;
+                                     }
+                                 }
+                             }
+                             if (isVisible) {
+                                 const currentStartStr = format(mStart, 'yyyy-MM-dd');
+                                 const pastSpent = transactions
+                                    .filter(t => 
+                                        !t.isHidden &&
+                                        t.bucketId === b.id && 
+                                        t.date < currentStartStr && 
+                                        (t.type === 'EXPENSE' || (!t.type && t.amount < 0))
+                                    )
+                                    .reduce((sum, t) => sum + Math.abs(getEffectiveAmount(t, reimbursementMap)), 0);
+                                 mChildren += Math.max(0, b.targetAmount - pastSpent);
+                             }
+                         }
                     });
                     totalOverPeriod += Math.max(mChildren, mLimit);
                 }
                 plannedBudget = totalOverPeriod / timeframe;
             }
 
-            // 4. Calculate Spent
-            const assignedSubIds = new Set(assignedSubs.map(s => s.id));
-            const linkedBucketIds = new Set(linkedBuckets.map(b => b.id));
-
-            // Filter transactions for this group based on STRICT mapping
             const groupTxs = relevantTx.filter(t => {
-                if (excludeDreams) {
-                     if (t.bucketId) {
-                        const b = buckets.find(b => b.id === t.bucketId);
-                        if (b?.type === 'GOAL') return false; 
+                // EXCLUSION RULE: If it has a bucketId, it ONLY belongs to that bucket's group.
+                if (t.bucketId) {
+                    if (linkedBucketIds.has(t.bucketId)) return true;
+                    if (group.isCatchAll) {
+                        const belongsElsewhere = bucketIdToGroupId.has(t.bucketId);
+                        return !belongsElsewhere;
                     }
+                    return false;
                 }
-                
-                // Check if transaction belongs to linked SubCategory
+
+                // NO BUCKET: Use Category Sub ID
                 if (t.categorySubId && assignedSubIds.has(t.categorySubId)) return true;
                 
-                // Check if transaction belongs to linked Bucket
-                if (t.bucketId && linkedBucketIds.has(t.bucketId)) return true;
-
-                // Catch-all Logic
+                // CATCH ALL LEFTOVERS
                 if (group.isCatchAll) {
-                    // It is catch-all if:
-                    // 1. Not linked to any specific bucket in another group (Orphan)
-                    // 2. Not linked to any specific subcategory in another group (Orphan)
-                    const sub = t.categorySubId ? subCategories.find(s => s.id === t.categorySubId) : null;
-                    const bucket = t.bucketId ? buckets.find(b => b.id === t.bucketId) : null;
-                    
-                    const isSubOrphan = !sub || !sub.budgetGroupId;
-                    const isBucketOrphan = !bucket || (!bucket.budgetGroupId && (!bucket.type || bucket.type !== 'GOAL')); // Goals usually distinct
-
-                    // Note: If t has NO sub and NO bucket, it's definitely catch-all
-                    if (!t.categorySubId && !t.bucketId) return true;
-                    
-                    if (t.categorySubId && isSubOrphan) return true;
-                    if (t.bucketId && isBucketOrphan) return true;
+                    if (!t.categorySubId) return true;
+                    const sub = subCategories.find(s => s.id === t.categorySubId);
+                    const subBelongsElsewhere = sub && sub.budgetGroupId;
+                    return !subBelongsElsewhere;
                 }
                 return false;
             });
@@ -451,7 +490,6 @@ const BudgetGroupStats = ({ selectedMonth }: { selectedMonth: string }) => {
                 const effAmount = getEffectiveAmount(t, reimbursementMap);
                 const amount = Math.abs(effAmount);
                 if (amount === 0) return;
-
                 let shouldScale = true;
                 if (excludeDreams) {
                     if (t.bucketId) {
@@ -462,18 +500,16 @@ const BudgetGroupStats = ({ selectedMonth }: { selectedMonth: string }) => {
                 } else {
                     shouldScale = false;
                 }
-                
                 spent += shouldScale ? (amount * scalingFactor) : amount;
             });
 
             const avgSpent = spent / timeframe;
             
-            // Detailed Breakdown for UI
-            
-            // 4a. Subcategory Breakdown
+            // BREAKDOWN LOGIC (Nested)
             const breakdown = assignedSubs.map(sub => {
                 let subSpent = 0;
-                const subTxs = groupTxs.filter(t => t.categorySubId === sub.id);
+                // Only count transactions with NO bucketId for subcategory stats to prevent double counting
+                const subTxs = groupTxs.filter(t => !t.bucketId && t.categorySubId === sub.id);
                 subTxs.forEach(t => {
                     const effAmount = getEffectiveAmount(t, reimbursementMap);
                     const amount = Math.abs(effAmount);
@@ -486,7 +522,6 @@ const BudgetGroupStats = ({ selectedMonth }: { selectedMonth: string }) => {
 
             const totalSubSpent = breakdown.reduce((sum, s) => sum + s.spent, 0);
             
-            // 4b. Bucket Breakdown (New logic to separate Buckets from Unclassified)
             const bucketBreakdown = linkedBuckets.map(b => {
                 let bSpent = 0;
                 const bTxs = groupTxs.filter(t => t.bucketId === b.id);
@@ -509,13 +544,10 @@ const BudgetGroupStats = ({ selectedMonth }: { selectedMonth: string }) => {
 
             const totalBucketSpent = bucketBreakdown.reduce((sum, b) => sum + b.spent, 0);
 
-            // 4c. True Unclassified (Neither subcategory nor linked bucket)
             const nonSubOrBucketTxs = groupTxs.filter(t => 
-                !assignedSubIds.has(t.categorySubId || '') && 
-                !linkedBucketIds.has(t.bucketId || '')
+                (t.bucketId ? !linkedBucketIds.has(t.bucketId) : !assignedSubIds.has(t.categorySubId || ''))
             );
             
-            // Calculate unclassified spent total
             const unclassifiedSpent = avgSpent - totalSubSpent - totalBucketSpent;
             
             return {
@@ -539,7 +571,6 @@ const BudgetGroupStats = ({ selectedMonth }: { selectedMonth: string }) => {
     }, [budgetGroups, subCategories, transactions, selectedMonth, timeframe, excludeDreams, buckets, settings.payday, reimbursementMap, budgetTemplates, monthConfigs]);
 
     const handleShowBudgetBreakdown = (groupName: string, items: { name: string; amount: number; type: 'SUB'|'BUCKET'|'BUFFER' }[], total: number) => {
-        // Sort items by amount desc
         const sorted = [...items].sort((a, b) => b.amount - a.amount);
         setBudgetBreakdownData({ groupName, items: sorted, total });
     };
@@ -547,23 +578,14 @@ const BudgetGroupStats = ({ selectedMonth }: { selectedMonth: string }) => {
     const handleAiAnalysis = async () => {
         setIsAiModalOpen(true);
         if (aiReport) return; 
-        
         setIsAiLoading(true);
-        
         try {
             const totalIncome = getTotalFamilyIncome(users, selectedMonth);
-            
-            const currentGroups = data.groupStats.map(g => ({
-                name: g.name,
-                limit: g.limit,
-                spent: g.spent
-            }));
-
+            const currentGroups = data.groupStats.map(g => ({ name: g.name, limit: g.limit, spent: g.spent }));
             const { start, end } = getBudgetInterval(selectedMonth, settings.payday);
             const startStr = format(start, 'yyyy-MM-dd');
             const endStr = format(end, 'yyyy-MM-dd');
             const currentTxs = transactions.filter(t => !t.isHidden && t.date >= startStr && t.date <= endStr && (t.type === 'EXPENSE' || t.amount < 0));
-            
             const transactionLog = currentTxs.map(t => {
                 const amount = Math.abs(getEffectiveAmount(t, reimbursementMap));
                 if (amount === 0) return null;
@@ -572,7 +594,6 @@ const BudgetGroupStats = ({ selectedMonth }: { selectedMonth: string }) => {
                 const category = subName ? `${mainName} > ${subName}` : mainName;
                 return `${t.date} : ${formatMoney(amount)} : ${t.description} : ${category}`;
             }).filter(Boolean).join('\n');
-
             const catMapCurrent = new Map<string, number>();
             currentTxs.forEach(t => {
                 const amt = Math.abs(getEffectiveAmount(t, reimbursementMap));
@@ -587,24 +608,10 @@ const BudgetGroupStats = ({ selectedMonth }: { selectedMonth: string }) => {
                 const [main, sub] = k.split('|');
                 return { main, sub, amount: v };
             }).sort((a,b) => b.amount - a.amount);
-
-            const topExpenses = currentTxs
-                .map(t => ({ name: t.description, amount: Math.abs(getEffectiveAmount(t, reimbursementMap)) }))
-                .sort((a,b) => b.amount - a.amount)
-                .slice(0, 5);
-
-            const snapshot: FinancialSnapshot = {
-                totalIncome,
-                budgetGroups: currentGroups,
-                topExpenses,
-                categoryBreakdownCurrent: breakdownCurrent,
-                transactionLog,
-                monthLabel: data.rangeLabel
-            };
-
+            const topExpenses = currentTxs.map(t => ({ name: t.description, amount: Math.abs(getEffectiveAmount(t, reimbursementMap)) })).sort((a,b) => b.amount - a.amount).slice(0, 5);
+            const snapshot: FinancialSnapshot = { totalIncome, budgetGroups: currentGroups, topExpenses, categoryBreakdownCurrent: breakdownCurrent, transactionLog, monthLabel: data.rangeLabel };
             const report = await generateMonthlyReport(snapshot);
             setAiReport(report);
-
         } catch (error) {
             console.error(error);
             setAiReport("Kunde inte skapa analysen just nu.");
@@ -858,52 +865,158 @@ const AccountStats = () => {
         
         const processedAccounts = accounts.map(acc => {
             const accBuckets = buckets.filter(b => b.accountId === acc.id);
-            const regularBuckets = accBuckets.filter(b => b.type !== 'GOAL');
-            const ownedDreams = accBuckets.filter(b => b.type === 'GOAL');
-            const referencedDreamIds = new Set<string>();
-            relevantTxs.filter(t => t.accountId === acc.id && t.bucketId).forEach(t => {
-                const b = buckets.find(bk => bk.id === t.bucketId);
-                if (b && b.type === 'GOAL') referencedDreamIds.add(b.id);
-            });
-            const allRelevantDreamIds = new Set([...ownedDreams.map(d => d.id), ...referencedDreamIds]);
-            const dreams = Array.from(allRelevantDreamIds).map(id => buckets.find(b => b.id === id)!).filter(Boolean);
             
-            const getBucketData = (bucketList: Bucket[]) => {
-                return bucketList.map(b => {
-                    let plannedTotal = 0;
-                    if (b.accountId === acc.id) {
+            // Generate Flat List of Stats Items from Buckets
+            const bucketItems: any[] = [];
+            
+            accBuckets.forEach(b => {
+                const bucketTxs = relevantTxs.filter(t => t.bucketId === b.id && t.accountId === acc.id);
+                
+                // Helper to sum up actuals
+                const getActuals = (type: 'DEPOSIT' | 'WITHDRAWAL' | 'EXPENSE') => {
+                    const filtered = bucketTxs.filter(t => {
+                        const eff = getEffectiveAmount(t, reimbursementMap);
+                        if (type === 'DEPOSIT') return eff > 0;
+                        if (type === 'WITHDRAWAL') return eff < 0 && t.type !== 'EXPENSE';
+                        if (type === 'EXPENSE') return eff < 0 && t.type === 'EXPENSE';
+                        return false;
+                    });
+                    const sum = filtered.reduce((s, t) => s + Math.abs(getEffectiveAmount(t, reimbursementMap)), 0);
+                    return { sum, txs: filtered };
+                };
+
+                const deposits = getActuals('DEPOSIT');
+                const withdrawals = getActuals('WITHDRAWAL');
+                const expenses = getActuals('EXPENSE');
+
+                // Logic Split for Goals vs Standard
+                if (b.type === 'GOAL') {
+                    // PHASE 1: SAVING (Inflow Plan)
+                    // Visible if: 
+                    // 1. PaymentSource is INCOME (it's a planned saving from salary)
+                    // 2. We are within the saving window (Start -> Target) in any of the months in timeframe
+                    // 3. OR there are actual deposits
+                    
+                    let plannedSavingTotal = 0;
+                    let isSavingPhaseActive = deposits.sum > 0; // Show if actuals exist
+
+                    if (b.paymentSource === 'INCOME' && b.startSavingDate && b.targetDate) {
                         for(let i=0; i<timeframe; i++) {
                             const mDate = subMonths(parseISO(`${selectedMonth}-01`), i);
                             const mKey = format(mDate, 'yyyy-MM');
-                            if (b.type === 'FIXED') plannedTotal += calculateFixedBucketCost(b, mKey);
-                            else if (b.type === 'DAILY') plannedTotal += calculateDailyBucketCost(b, mKey, settings.payday);
-                            else if (b.type === 'GOAL') plannedTotal += calculateGoalBucketCost(b, mKey);
+                            const current = parseISO(`${mKey}-01`);
+                            const start = parseISO(`${b.startSavingDate}-01`);
+                            const target = parseISO(`${b.targetDate}-01`);
+                            const archived = b.archivedDate ? parseISO(`${b.archivedDate}-01`) : null;
+
+                            // Check active saving window (Start <= Current < Target)
+                            if (isValid(current) && isValid(start) && isValid(target)) {
+                                const isSavingRange = !isBefore(current, start) && isBefore(current, target);
+                                const isNotArchived = !archived || !isAfter(current, archived);
+                                
+                                if (isSavingRange && isNotArchived) {
+                                    plannedSavingTotal += calculateGoalBucketCost(b, mKey);
+                                    isSavingPhaseActive = true;
+                                }
+                            }
                         }
                     }
-                    const plannedAvg = plannedTotal / timeframe;
-                    const bucketTxs = relevantTxs.filter(t => t.bucketId === b.id && t.accountId === acc.id);
-                    
-                    // Effective Calcs
-                    const deposits = bucketTxs.filter(t => getEffectiveAmount(t, reimbursementMap) > 0);
-                    const withdrawals = bucketTxs.filter(t => {
-                        const eff = getEffectiveAmount(t, reimbursementMap);
-                        return eff < 0 && t.type !== 'EXPENSE';
-                    });
-                    const expenses = bucketTxs.filter(t => {
-                        const eff = getEffectiveAmount(t, reimbursementMap);
-                        return eff < 0 && t.type === 'EXPENSE';
-                    });
 
-                    const depositSum = deposits.reduce((sum, t) => sum + getEffectiveAmount(t, reimbursementMap), 0);
-                    const withdrawalSum = withdrawals.reduce((sum, t) => sum + Math.abs(getEffectiveAmount(t, reimbursementMap)), 0);
-                    const expenseSum = expenses.reduce((sum, t) => sum + Math.abs(getEffectiveAmount(t, reimbursementMap)), 0);
+                    if (isSavingPhaseActive) {
+                        bucketItems.push({
+                            id: `${b.id}-saving`,
+                            originalId: b.id,
+                            name: `Spara: ${b.name}`,
+                            type: 'GOAL',
+                            mode: 'SAVING',
+                            planned: plannedSavingTotal / timeframe,
+                            deposit: deposits.sum / timeframe,
+                            withdrawal: 0,
+                            expense: 0,
+                            rawDeposits: deposits.txs,
+                            rawWithdrawals: [],
+                            rawExpenses: []
+                        });
+                    }
+
+                    // PHASE 2: SPENDING (Outflow/Project)
+                    // Visible if:
+                    // 1. Target Date is in timeframe OR Event Date in timeframe
+                    // 2. OR Actual expenses exist
                     
-                    return { ...b, planned: plannedAvg, deposit: depositSum / timeframe, withdrawal: withdrawalSum / timeframe, expense: expenseSum / timeframe, rawDeposits: deposits, rawWithdrawals: withdrawals, rawExpenses: expenses };
-                });
-            };
+                    let isSpendingPhaseActive = expenses.sum > 0 || withdrawals.sum > 0;
+                    if (!isSpendingPhaseActive) {
+                         for(let i=0; i<timeframe; i++) {
+                            const mDate = subMonths(parseISO(`${selectedMonth}-01`), i);
+                            const mKey = format(mDate, 'yyyy-MM');
+                            const current = parseISO(`${mKey}-01`);
+                            const { start, end } = getBudgetInterval(mKey, settings.payday);
+
+                            // Target Date check
+                            if (b.targetDate) {
+                                const target = parseISO(`${b.targetDate}-01`);
+                                if (isValid(target) && isSameMonth(current, target)) isSpendingPhaseActive = true;
+                            }
+                            // Event Range check
+                            if (b.eventStartDate && b.eventEndDate) {
+                                const evtStart = parseISO(b.eventStartDate);
+                                const evtEnd = parseISO(b.eventEndDate);
+                                if (isValid(evtStart) && isValid(evtEnd)) {
+                                    if (!isAfter(start, evtEnd) && !isBefore(end, evtStart)) {
+                                        isSpendingPhaseActive = true;
+                                    }
+                                }
+                            }
+                            if (isSpendingPhaseActive) break; 
+                         }
+                    }
+
+                    if (isSpendingPhaseActive) {
+                        bucketItems.push({
+                            id: `${b.id}-spending`,
+                            originalId: b.id,
+                            name: b.name,
+                            type: 'GOAL',
+                            mode: 'SPENDING',
+                            planned: 0, // Spending phase has 0 "planned inflow" usually in this view
+                            deposit: 0,
+                            withdrawal: withdrawals.sum / timeframe,
+                            expense: expenses.sum / timeframe,
+                            rawDeposits: [],
+                            rawWithdrawals: withdrawals.txs,
+                            rawExpenses: expenses.txs
+                        });
+                    }
+
+                } else {
+                    // STANDARD BUCKET (Fixed / Daily)
+                    let plannedTotal = 0;
+                    for(let i=0; i<timeframe; i++) {
+                        const mDate = subMonths(parseISO(`${selectedMonth}-01`), i);
+                        const mKey = format(mDate, 'yyyy-MM');
+                        if (b.type === 'FIXED') plannedTotal += calculateFixedBucketCost(b, mKey);
+                        else if (b.type === 'DAILY') plannedTotal += calculateDailyBucketCost(b, mKey, settings.payday);
+                    }
+                    
+                    bucketItems.push({
+                        id: b.id,
+                        originalId: b.id,
+                        name: b.name,
+                        type: b.type,
+                        mode: 'STANDARD',
+                        planned: plannedTotal / timeframe,
+                        deposit: deposits.sum / timeframe,
+                        withdrawal: withdrawals.sum / timeframe,
+                        expense: expenses.sum / timeframe,
+                        rawDeposits: deposits.txs,
+                        rawWithdrawals: withdrawals.txs,
+                        rawExpenses: expenses.txs
+                    });
+                }
+            });
             
-            const bucketStats = getBucketData(regularBuckets);
-            const dreamStats = getBucketData(dreams);
+            const standardItems = bucketItems.filter(i => i.type !== 'GOAL');
+            const goalItems = bucketItems.filter(i => i.type === 'GOAL');
             
             const unallocatedTxs = relevantTxs.filter(t => t.accountId === acc.id && (!t.bucketId || t.bucketId === 'INTERNAL' || t.bucketId === 'PAYOUT'));
             
@@ -927,11 +1040,11 @@ const AccountStats = () => {
                 rawExpenses: otherExpenses 
             };
             
-            const totalActual = bucketStats.reduce((s, b) => s + b.deposit, 0) + dreamStats.reduce((s, b) => s + b.deposit, 0) + otherStats.deposit;
-            const totalOut = bucketStats.reduce((s, b) => s + b.withdrawal + b.expense, 0) + dreamStats.reduce((s, b) => s + b.withdrawal + b.expense, 0) + otherStats.withdrawal + otherStats.expense;
+            const totalActual = bucketItems.reduce((s, b) => s + b.deposit, 0) + otherStats.deposit;
+            const totalOut = bucketItems.reduce((s, b) => s + b.withdrawal + b.expense, 0) + otherStats.withdrawal + otherStats.expense;
             const netFlow = totalActual - totalOut;
             
-            return { ...acc, bucketStats, dreamStats, otherStats, netFlow };
+            return { ...acc, standardItems, goalItems, otherStats, netFlow };
         });
         return { processedAccounts, targetLabel };
     }, [accounts, buckets, transactions, selectedMonth, timeframe, settings.payday, startStr, endStr, intervalLabel, reimbursementMap]);
@@ -968,10 +1081,10 @@ const AccountStats = () => {
                                     <div className="grid grid-cols-5 gap-2 text-[9px] uppercase font-bold text-slate-500 tracking-wider border-b border-slate-700 pb-2 mb-2 px-2 min-w-[350px]">
                                         <div className="col-span-1">Post</div><div className="text-right text-blue-300">Plan Ins.</div><div className="text-right text-emerald-400">Insättning</div><div className="text-right text-orange-300">Uttag</div><div className="text-right text-rose-400">Utgifter</div>
                                     </div>
-                                    {acc.bucketStats.length > 0 && (
+                                    {acc.standardItems.length > 0 && (
                                         <div className="space-y-1 mb-4 min-w-[350px]">
                                             <div className="text-[10px] font-bold text-cyan-400 uppercase flex items-center gap-1 px-2 mb-1"><LayoutGrid size={10} /> Fasta & Rörliga</div>
-                                            {acc.bucketStats.map(b => (
+                                            {acc.standardItems.map(b => (
                                                 <div key={b.id} className="grid grid-cols-5 gap-2 text-[10px] items-center hover:bg-white/5 p-2 rounded transition-colors">
                                                     <div className="col-span-1 font-medium text-slate-300 truncate" title={b.name}>{b.name}</div>
                                                     <div className="text-right text-blue-200/70 font-mono">{formatMoney(b.planned)}</div>
@@ -982,12 +1095,16 @@ const AccountStats = () => {
                                             ))}
                                         </div>
                                     )}
-                                    {acc.dreamStats.length > 0 && (
+                                    {acc.goalItems.length > 0 && (
                                         <div className="space-y-1 mb-4 min-w-[350px]">
                                             <div className="text-[10px] font-bold text-purple-400 uppercase flex items-center gap-1 px-2 mb-1"><Target size={10} /> Drömmar & Mål</div>
-                                            {acc.dreamStats.map(b => (
+                                            {acc.goalItems.map(b => (
                                                 <div key={b.id} className="grid grid-cols-5 gap-2 text-[10px] items-center hover:bg-white/5 p-2 rounded transition-colors">
-                                                    <div className="col-span-1 font-medium text-slate-300 truncate" title={b.name}>{b.name}</div>
+                                                    <div className="col-span-1 font-medium text-slate-300 truncate flex items-center gap-1" title={b.name}>
+                                                        {b.mode === 'SAVING' && <PiggyBank size={8} className="text-emerald-400"/>}
+                                                        {b.mode === 'SPENDING' && <Rocket size={8} className="text-purple-400"/>}
+                                                        {b.name}
+                                                    </div>
                                                     <div className="text-right text-blue-200/70 font-mono">{formatMoney(b.planned)}</div>
                                                     <div className={cn("text-right font-mono cursor-pointer hover:bg-emerald-500/20 rounded px-1", b.deposit > 0 ? "text-emerald-400 font-bold" : "text-slate-600")} onClick={() => handleDrillDown(`${b.name} - Insättningar`, b.rawDeposits)}>{formatMoney(b.deposit)}</div>
                                                     <div className={cn("text-right font-mono cursor-pointer hover:bg-orange-500/20 rounded px-1", b.withdrawal > 0 ? "text-orange-300" : "text-slate-600")} onClick={() => handleDrillDown(`${b.name} - Uttag`, b.rawWithdrawals)}>{formatMoney(b.withdrawal)}</div>
@@ -1054,6 +1171,133 @@ const AccountStats = () => {
                     </div>
                 </div>
             </Modal>
+        </div>
+    );
+};
+
+// --- NEW COMPONENT: TRENDS ANALYSIS ---
+const TrendsAnalysis = () => {
+    const { transactions, mainCategories } = useApp();
+    const [trendTimeframe, setTrendTimeframe] = useState<6 | 12 | 24>(6);
+
+    const reimbursementMap = useMemo(() => calculateReimbursementMap(transactions), [transactions]);
+
+    const data = useMemo(() => {
+        const today = new Date();
+        const endDate = endOfMonth(today);
+        const startDate = startOfMonth(subMonths(today, trendTimeframe - 1));
+        
+        const startStr = format(startDate, 'yyyy-MM-dd');
+        const endStr = format(endDate, 'yyyy-MM-dd');
+
+        const relevantTxs = transactions.filter(t => 
+            !t.isHidden &&
+            t.date >= startStr && 
+            t.date <= endStr
+        );
+
+        const monthMap = new Map<string, { month: string, income: number, expense: number, categories: Record<string, number> }>();
+        
+        let iter = startDate;
+        while (iter <= endDate) {
+            const mKey = format(iter, 'yyyy-MM');
+            monthMap.set(mKey, { 
+                month: format(iter, 'MMM', { locale: sv }), 
+                income: 0, 
+                expense: 0, 
+                categories: {} 
+            });
+            iter = addMonths(iter, 1);
+        }
+
+        relevantTxs.forEach(t => {
+            const mKey = t.date.substring(0, 7);
+            if (!monthMap.has(mKey)) return;
+            
+            const entry = monthMap.get(mKey)!;
+            const eff = getEffectiveAmount(t, reimbursementMap);
+
+            if (t.type === 'INCOME') {
+                entry.income += eff;
+            } else if (t.type === 'EXPENSE' || (!t.type && eff < 0)) {
+                const absAmount = Math.abs(eff);
+                entry.expense += absAmount;
+                const catId = t.categoryMainId || 'uncat';
+                entry.categories[catId] = (entry.categories[catId] || 0) + absAmount;
+            }
+        });
+
+        return Array.from(monthMap.values());
+    }, [transactions, trendTimeframe, reimbursementMap]);
+
+    return (
+        <div className="space-y-6 animate-in fade-in">
+            <div className="flex bg-slate-800 p-1 rounded-xl overflow-x-auto no-scrollbar gap-1 border border-slate-700">
+                {[6, 12, 24].map(m => (
+                    <button 
+                        key={m}
+                        onClick={() => setTrendTimeframe(m as any)}
+                        className={cn(
+                            "flex-1 px-4 py-2 rounded-lg text-xs font-bold whitespace-nowrap transition-all",
+                            trendTimeframe === m ? "bg-purple-600 text-white shadow-lg" : "text-slate-400 hover:text-white hover:bg-slate-700"
+                        )}
+                    >
+                        Senaste {m} mån
+                    </button>
+                ))}
+            </div>
+
+            <div className="bg-slate-800/50 p-4 rounded-xl border border-slate-700">
+                <h3 className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-4">Inkomst vs Utgifter</h3>
+                <div className="h-64 w-full">
+                    <ResponsiveContainer width="100%" height="100%">
+                        <ComposedChart data={data}>
+                            <CartesianGrid strokeDasharray="3 3" stroke="#334155" vertical={false} />
+                            <XAxis dataKey="month" stroke="#64748b" fontSize={10} tickLine={false} axisLine={false} />
+                            <YAxis stroke="#64748b" fontSize={10} tickLine={false} axisLine={false} tickFormatter={(val) => `${val/1000}k`} />
+                            <Tooltip 
+                                contentStyle={{ backgroundColor: '#1e293b', border: '1px solid #475569', borderRadius: '8px', color: '#fff' }}
+                                formatter={(value: number) => formatMoney(value)}
+                            />
+                            <Legend wrapperStyle={{ fontSize: '12px', paddingTop: '10px' }} />
+                            <Bar dataKey="income" name="Inkomst" fill="#10b981" radius={[4, 4, 0, 0]} barSize={20} />
+                            <Bar dataKey="expense" name="Utgifter" fill="#f43f5e" radius={[4, 4, 0, 0]} barSize={20} />
+                            <Line type="monotone" dataKey="expense" stroke="#f43f5e" strokeWidth={2} dot={false} activeDot={{ r: 4 }} />
+                        </ComposedChart>
+                    </ResponsiveContainer>
+                </div>
+            </div>
+
+            <div className="bg-slate-800/50 p-4 rounded-xl border border-slate-700">
+                <h3 className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-4">Utgifter per Kategori</h3>
+                <div className="h-80 w-full">
+                    <ResponsiveContainer width="100%" height="100%">
+                        <BarChart data={data} stackOffset="sign">
+                            <CartesianGrid strokeDasharray="3 3" stroke="#334155" vertical={false} />
+                            <XAxis dataKey="month" stroke="#64748b" fontSize={10} tickLine={false} axisLine={false} />
+                            <YAxis stroke="#64748b" fontSize={10} tickLine={false} axisLine={false} tickFormatter={(val) => `${val/1000}k`} />
+                            <Tooltip 
+                                contentStyle={{ backgroundColor: '#1e293b', border: '1px solid #475569', borderRadius: '8px', color: '#fff' }}
+                                formatter={(value: number) => formatMoney(value)}
+                                cursor={{fill: '#334155', opacity: 0.2}}
+                            />
+                            {mainCategories.map((cat, index) => {
+                                const COLORS = ['#3b82f6', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#ec4899', '#6366f1', '#14b8a6', '#f43f5e', '#8b5cf6'];
+                                return (
+                                    <Bar 
+                                        key={cat.id} 
+                                        dataKey={`categories.${cat.id}`} 
+                                        name={cat.name} 
+                                        stackId="a" 
+                                        fill={COLORS[index % COLORS.length]} 
+                                    />
+                                );
+                            })}
+                            <Bar dataKey="categories.uncat" name="Okategoriserat" stackId="a" fill="#94a3b8" />
+                        </BarChart>
+                    </ResponsiveContainer>
+                </div>
+            </div>
         </div>
     );
 };
@@ -1701,289 +1945,6 @@ const InsightsAnalysis = () => {
                         Dyrast dag är <span className="text-rose-400 font-bold">{peakDay.day}</span> (snitt {formatMoney(peakDay.amount)})
                     </div>
                 )}
-            </div>
-        </div>
-    );
-};
-
-// --- SUB-COMPONENT: TRENDS ANALYSIS (Updated) ---
-const TrendsAnalysis = () => {
-    const { transactions, buckets, settings, budgetGroups, mainCategories, subCategories, users } = useApp(); 
-    const [trendMonths, setTrendMonths] = useState<6 | 12>(6);
-    
-    // --- FILTERS ---
-    const [trendMainCat, setTrendMainCat] = useState('');
-    const [trendSubCat, setTrendSubCat] = useState('');
-    
-    // --- VIEW TOGGLE ---
-    const [viewScope, setViewScope] = useState<'TOTAL' | 'COSTS'>('TOTAL');
-
-    const reimbursementMap = useMemo(() => calculateReimbursementMap(transactions), [transactions]);
-
-    const trendData = useMemo(() => {
-        const result = [];
-        const today = new Date();
-        const payday = settings.payday;
-
-        // Shades of Green for Income
-        const userColors = ['#4ade80', '#22c55e', '#86efac', '#15803d']; 
-
-        for (let i = trendMonths - 1; i >= 0; i--) {
-            const date = subMonths(today, i);
-            const monthKey = format(date, 'yyyy-MM');
-            const { start, end } = getBudgetInterval(monthKey, payday);
-            const startStr = format(start, 'yyyy-MM-dd');
-            const endStr = format(end, 'yyyy-MM-dd');
-
-            // 1. Fetch relevant transactions
-            const monthTxs = transactions.filter(t => 
-                !t.isHidden && // EXCLUDE HIDDEN
-                t.date >= startStr && 
-                t.date <= endStr
-            );
-
-            // Filter for Expenses
-            const expenseTxs = monthTxs.filter(t => 
-                (t.type === 'EXPENSE' || (!t.type && t.amount < 0))
-            ).filter(t => {
-                if (trendMainCat && t.categoryMainId !== trendMainCat) return false;
-                if (trendSubCat && t.categorySubId !== trendSubCat) return false;
-                return true;
-            });
-
-            // 2. Split into Operating vs Dreams (Using Effective Amount)
-            let operating = 0;
-            let dreams = 0;
-
-            expenseTxs.forEach(t => {
-                const amt = Math.abs(getEffectiveAmount(t, reimbursementMap));
-                if (amt === 0) return;
-
-                let isDream = false;
-                if (t.bucketId) {
-                    const b = buckets.find(bk => bk.id === t.bucketId);
-                    if (b && b.type === 'GOAL') {
-                        isDream = true;
-                    }
-                }
-                
-                if (isDream) {
-                    dreams += amt;
-                } else {
-                    operating += amt;
-                }
-            });
-
-            // 3. Calculate Income per User & Payouts (Only if NO filters active)
-            let incomeData: Record<string, number> = {};
-            let payouts = 0;
-
-            if (!trendMainCat && !trendSubCat) {
-                // Income
-                users.forEach(u => {
-                    const data = u.incomeData[monthKey];
-                    const total = (data?.salary || 0) + (data?.childBenefit || 0) + (data?.insurance || 0);
-                    incomeData[`inc_${u.id}`] = total;
-                });
-
-                // Payouts (Transfers out, bucketId === 'PAYOUT')
-                const payoutTxs = monthTxs.filter(t => t.bucketId === 'PAYOUT');
-                payouts = payoutTxs.reduce((sum, t) => sum + Math.abs(getEffectiveAmount(t, reimbursementMap)), 0);
-            }
-
-            // 4. Calculate Budget
-            let budgetLimit = 0;
-            if (!trendMainCat && !trendSubCat) {
-                budgetLimit = budgetGroups.reduce((sum, g) => {
-                    const { data } = getEffectiveBudgetGroupData(g, monthKey);
-                    return sum + (data?.limit || 0);
-                }, 0);
-            }
-
-            result.push({
-                month: format(date, 'MMM', { locale: sv }),
-                fullMonth: format(date, 'yyyy-MM'),
-                budget: budgetLimit,
-                operating: Math.round(operating),
-                dreams: Math.round(dreams),
-                payouts: Math.round(payouts),
-                totalExpense: Math.round(operating + dreams + payouts),
-                ...incomeData
-            });
-        }
-        return { data: result, userColors };
-    }, [transactions, buckets, budgetGroups, settings.payday, trendMonths, trendMainCat, trendSubCat, users, reimbursementMap]);
-
-    const availableSubCats = useMemo(() => {
-        if (!trendMainCat) return [];
-        return subCategories.filter(s => s.mainCategoryId === trendMainCat);
-    }, [trendMainCat, subCategories]);
-
-    // Show Full Comparison if NO Filters AND ViewScope is TOTAL
-    const showIncome = !trendMainCat && !trendSubCat && viewScope === 'TOTAL';
-    const showBudget = !trendMainCat && !trendSubCat;
-
-    return (
-        <div className="space-y-6 animate-in fade-in">
-            
-            {/* CONTROLS */}
-            <div className="flex flex-col gap-3">
-                <div className="flex justify-between items-center">
-                    <h3 className="text-sm font-bold text-slate-400 uppercase tracking-wider">
-                        Budget vs Verklighet
-                    </h3>
-                    <div className="flex bg-slate-800 p-1 rounded-lg">
-                        <button onClick={() => setTrendMonths(6)} className={cn("px-3 py-1.5 text-xs font-bold rounded transition-all", trendMonths === 6 ? "bg-indigo-600 text-white" : "text-slate-400 hover:text-white")}>6 Mån</button>
-                        <button onClick={() => setTrendMonths(12)} className={cn("px-3 py-1.5 text-xs font-bold rounded transition-all", trendMonths === 12 ? "bg-indigo-600 text-white" : "text-slate-400 hover:text-white")}>1 År</button>
-                    </div>
-                </div>
-
-                {/* VIEW SCOPE TOGGLE */}
-                <div className="flex bg-slate-900 p-1 rounded-lg w-full">
-                    <button 
-                        onClick={() => setViewScope('TOTAL')}
-                        className={cn("flex-1 px-4 py-2 text-xs font-bold rounded-lg transition-all flex items-center justify-center gap-2", 
-                            viewScope === 'TOTAL' ? "bg-slate-700 text-white shadow" : "text-slate-400 hover:text-white"
-                        )}
-                    >
-                        <Eye size={14} /> Totalbild
-                    </button>
-                    <button 
-                        onClick={() => setViewScope('COSTS')}
-                        className={cn("flex-1 px-4 py-2 text-xs font-bold rounded-lg transition-all flex items-center justify-center gap-2", 
-                            viewScope === 'COSTS' ? "bg-rose-600 text-white shadow" : "text-slate-400 hover:text-white"
-                        )}
-                    >
-                        <EyeOff size={14} /> Bara Kostnader
-                    </button>
-                </div>
-
-                {/* FILTERS */}
-                <div className="grid grid-cols-2 gap-2 bg-slate-900/50 p-2 rounded-lg border border-slate-800">
-                    <select 
-                        className="bg-slate-800 border border-slate-700 rounded px-3 py-2 text-xs text-white outline-none focus:border-indigo-500"
-                        value={trendMainCat}
-                        onChange={(e) => {
-                            setTrendMainCat(e.target.value);
-                            setTrendSubCat(''); 
-                        }}
-                    >
-                        <option value="">Alla Kategorier</option>
-                        {mainCategories.map(c => (
-                            <option key={c.id} value={c.id}>{c.name}</option>
-                        ))}
-                    </select>
-
-                    <select 
-                        className="bg-slate-800 border border-slate-700 rounded px-3 py-2 text-xs text-white outline-none focus:border-indigo-500 disabled:opacity-50"
-                        value={trendSubCat}
-                        onChange={(e) => setTrendSubCat(e.target.value)}
-                        disabled={!trendMainCat}
-                    >
-                        <option value="">Alla Underkategorier</option>
-                        {availableSubCats.map(s => (
-                            <option key={s.id} value={s.id}>{s.name}</option>
-                        ))}
-                    </select>
-                </div>
-            </div>
-
-            {/* CHART */}
-            <div className="bg-slate-800/50 p-4 rounded-2xl border border-slate-700 h-80 relative shadow-inner">
-                <ResponsiveContainer width="100%" height="100%">
-                    <ComposedChart data={trendData.data} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
-                        <defs>
-                            <linearGradient id="colorBudget" x1="0" y1="0" x2="0" y2="1">
-                                <stop offset="5%" stopColor="#6366f1" stopOpacity={0.2}/>
-                                <stop offset="95%" stopColor="#6366f1" stopOpacity={0}/>
-                            </linearGradient>
-                        </defs>
-                        <CartesianGrid strokeDasharray="3 3" stroke="#334155" vertical={false} />
-                        <XAxis dataKey="month" stroke="#64748b" fontSize={12} tickLine={false} axisLine={false} />
-                        <YAxis stroke="#64748b" fontSize={11} tickLine={false} axisLine={false} tickFormatter={(val) => `${(val/1000).toFixed(0)}k`} />
-                        <Tooltip 
-                            contentStyle={{ backgroundColor: '#1e293b', border: '1px solid #475569', borderRadius: '8px', color: '#fff' }}
-                            formatter={(value: number, name: string) => {
-                                if (name === 'operating') return [formatMoney(value), 'Driftkostnad'];
-                                if (name === 'dreams') return [formatMoney(value), 'Drömmar/Resor'];
-                                if (name === 'payouts') return [formatMoney(value), 'Utbetalningar'];
-                                if (name === 'budget') return [formatMoney(value), 'Budgettak'];
-                                if (name.startsWith('inc_')) {
-                                    const uid = name.replace('inc_', '');
-                                    const u = users.find(user => user.id === uid);
-                                    return [formatMoney(value), `Inkomst ${u ? u.name : ''}`];
-                                }
-                                return [formatMoney(value), name];
-                            }}
-                            labelStyle={{ color: '#94a3b8', marginBottom: '0.5rem' }}
-                        />
-                        <Legend iconType="circle" wrapperStyle={{ paddingTop: '10px', fontSize: '10px' }} />
-                        
-                        {showBudget && (
-                            <Area type="monotone" dataKey="budget" name="Budget" stroke="#6366f1" strokeWidth={2} fill="url(#colorBudget)" />
-                        )}
-                        
-                        {/* LEFT STACK: INCOME (Only if ShowIncome is true) */}
-                        {showIncome && users.map((u, i) => (
-                            <Bar 
-                                key={u.id} 
-                                dataKey={`inc_${u.id}`} 
-                                name={`Inkomst ${u.name}`} 
-                                stackId="left" 
-                                fill={trendData.userColors[i % trendData.userColors.length]} 
-                                radius={i === users.length - 1 ? [4, 4, 0, 0] : [0, 0, 0, 0]} 
-                                barSize={20} 
-                            />
-                        ))}
-
-                        {/* RIGHT STACK: EXPENSES (Drift is now RED) */}
-                        <Bar dataKey="operating" name="Drift" stackId="right" fill="#ef4444" radius={[0, 0, 4, 4]} barSize={20} />
-                        <Bar dataKey="dreams" name="Drömmar" stackId="right" fill="#8b5cf6" radius={[4, 4, 0, 0]} barSize={20} />
-                        {showIncome && <Bar dataKey="payouts" name="Utbetalningar" stackId="right" fill="#f97316" radius={[4, 4, 0, 0]} barSize={20} />}
-                        
-                    </ComposedChart>
-                </ResponsiveContainer>
-                {!showBudget && (
-                    <div className="absolute top-2 right-4 text-[10px] text-slate-500 bg-black/20 px-2 py-1 rounded">
-                        Budget & Inkomst visas ej vid filtrering
-                    </div>
-                )}
-            </div>
-            
-            {/* KPI Cards */}
-            <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-                {trendData.data.slice(trendMonths === 6 ? -3 : -4).reverse().map(d => {
-                    const isOverBudget = d.budget > 0 && d.operating > d.budget;
-                    return (
-                        <div key={d.fullMonth} className={cn("p-3 rounded-xl border flex flex-col justify-between", isOverBudget ? "bg-rose-950/20 border-rose-500/20" : "bg-slate-800 border-slate-700")}>
-                            <div className="flex justify-between items-start mb-2">
-                                <div className="text-xs font-bold text-slate-400 uppercase capitalize">{d.month}</div>
-                                {d.dreams > 0 && <div className="h-2 w-2 rounded-full bg-purple-500 shadow-[0_0_8px_rgba(139,92,246,0.5)]"></div>}
-                            </div>
-                            
-                            <div>
-                                <div className="text-lg font-mono font-bold text-white">{formatMoney(d.totalExpense)}</div>
-                                <div className="text-[10px] text-slate-500 mt-1 flex justify-between items-center">
-                                    {d.budget > 0 ? (
-                                        <>
-                                            <span>Budget: {formatMoney(d.budget)}</span>
-                                            {isOverBudget && <AlertTriangle size={10} className="text-rose-500" />}
-                                        </>
-                                    ) : (
-                                        <span className="italic">Filter aktivt</span>
-                                    )}
-                                </div>
-                            </div>
-                            
-                            {/* Mini Progress Bar */}
-                            <div className="w-full bg-slate-700/50 h-1 mt-2 rounded-full overflow-hidden flex">
-                                <div className="h-full bg-rose-500" style={{ width: `${d.totalExpense > 0 ? Math.min(100, (d.operating / d.totalExpense) * 100) : 0}%` }}></div>
-                                <div className="h-full bg-purple-500" style={{ width: `${d.totalExpense > 0 ? Math.min(100, (d.dreams / d.totalExpense) * 100) : 0}%` }}></div>
-                                <div className="h-full bg-orange-500" style={{ width: `${d.totalExpense > 0 ? Math.min(100, (d.payouts / d.totalExpense) * 100) : 0}%` }}></div>
-                            </div>
-                        </div>
-                    );
-                })}
             </div>
         </div>
     );

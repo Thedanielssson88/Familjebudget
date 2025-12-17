@@ -1,6 +1,7 @@
 
 import { Bucket, Transaction, MainCategory, SubCategory, User, BudgetGroup } from "../types";
 import { formatMoney } from "../utils";
+import { GoogleGenAI } from "@google/genai";
 
 // This service handles the "Smart" part of the import pipeline
 export const categorizeTransactionsWithAi = async (
@@ -15,14 +16,7 @@ export const categorizeTransactionsWithAi = async (
   if (unknown.length === 0) return {};
 
   try {
-      // Dynamically import the SDK only when needed to prevent load errors if network fails
-      const module = await import("@google/genai");
-      const GoogleGenAI = module.GoogleGenAI || (module.default && module.default.GoogleGenAI);
-
-      if (!GoogleGenAI) {
-        throw new Error("Could not find GoogleGenAI class in imported module");
-      }
-      
+      // Fix: Used process.env.API_KEY exclusively and initialized correctly
       const apiKey = process.env.API_KEY;
       if (!apiKey) {
           console.error("API Key not found in environment");
@@ -73,14 +67,16 @@ export const categorizeTransactionsWithAi = async (
         }
       `;
 
+    // Fix: Updated model to gemini-3-flash-preview as per guidelines
     const response = await ai.models.generateContent({
-      model: 'gemini-2.5-flash',
+      model: 'gemini-3-flash-preview',
       contents: prompt,
       config: {
         responseMimeType: "application/json"
       }
     });
 
+    // Fix: Extracted text correctly using .text property
     const jsonText = response.text || "{}";
     const result = JSON.parse(jsonText);
     return result;
@@ -102,11 +98,9 @@ export interface FinancialSnapshot {
 
 export const generateMonthlyReport = async (data: FinancialSnapshot): Promise<string> => {
     try {
-        const module = await import("@google/genai");
-        const GoogleGenAI = module.GoogleGenAI || (module.default && module.default.GoogleGenAI);
+        // Fix: Used process.env.API_KEY exclusively and initialized correctly
         const apiKey = process.env.API_KEY;
-        
-        if (!apiKey || !GoogleGenAI) return "Kunde inte initiera AI-tjänsten.";
+        if (!apiKey) return "Kunde inte initiera AI-tjänsten.";
 
         const ai = new GoogleGenAI({ apiKey });
 
@@ -135,7 +129,7 @@ export const generateMonthlyReport = async (data: FinancialSnapshot): Promise<st
 
             ## Snabbanalys: ${data.monthLabel}
             *   Ge resultatet (Utfall vs Budget/Inkomst). Gick de plus eller minus?
-            *   Vad är den absolut största avvikelsen?
+            *   What is the absolutely biggest deviation?
 
             ## Var läckte pengarna? (Topp 3 Avvikelser/Insikter)
             *   Välj ut de 3 mest intressanta kategorierna eller händelserna.
@@ -157,11 +151,13 @@ export const generateMonthlyReport = async (data: FinancialSnapshot): Promise<st
             Ton: Professionell men personlig ("Ni/Er"). Använd fetstil för belopp och butiksnamn.
         `;
 
+        // Fix: Updated model to gemini-3-flash-preview as per guidelines
         const response = await ai.models.generateContent({
-            model: 'gemini-2.5-flash',
+            model: 'gemini-3-flash-preview',
             contents: prompt,
         });
 
+        // Fix: Extracted text correctly using .text property
         return response.text || "Kunde inte generera analys.";
 
     } catch (e) {

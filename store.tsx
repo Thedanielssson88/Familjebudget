@@ -217,6 +217,7 @@ interface AppContextType extends GlobalState {
   assignTemplateToMonth: (monthKey: string, templateId: string) => Promise<void>;
   resetMonthToTemplate: (monthKey: string) => Promise<void>;
   setBudgetLimit: (type: 'GROUP' | 'SUB' | 'BUCKET', id: string, amount: number | BucketData, monthKey: string, updateMode: 'TEMPLATE' | 'OVERRIDE') => Promise<void>;
+  clearBudgetOverride: (type: 'GROUP' | 'SUB' | 'BUCKET', id: string, monthKey: string) => Promise<void>;
   toggleMonthLock: (monthKey: string) => Promise<void>;
 
   // Subscription Ignore
@@ -854,6 +855,30 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       }
   };
 
+  const clearBudgetOverride = async (type: 'GROUP' | 'SUB' | 'BUCKET', id: string, monthKey: string) => {
+      const config = monthConfigs.find(c => c.monthKey === monthKey);
+      if (!config) return;
+
+      const newConfig = { ...config };
+      
+      if (type === 'GROUP' && newConfig.groupOverrides) {
+          const newOverrides = { ...newConfig.groupOverrides };
+          delete newOverrides[id];
+          newConfig.groupOverrides = newOverrides;
+      } else if (type === 'SUB' && newConfig.subCategoryOverrides) {
+          const newOverrides = { ...newConfig.subCategoryOverrides };
+          delete newOverrides[id];
+          newConfig.subCategoryOverrides = newOverrides;
+      } else if (type === 'BUCKET' && newConfig.bucketOverrides) {
+          const newOverrides = { ...newConfig.bucketOverrides };
+          delete newOverrides[id];
+          newConfig.bucketOverrides = newOverrides;
+      }
+
+      await db.monthConfigs.put(newConfig);
+      setMonthConfigs(prev => prev.map(c => c.monthKey === monthKey ? newConfig : c));
+  };
+
   const toggleMonthLock = async (monthKey: string) => {
       const config = monthConfigs.find(c => c.monthKey === monthKey) || { 
           monthKey, 
@@ -1066,7 +1091,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     // Budget Groups
     budgetGroups, addBudgetGroup, updateBudgetGroup, deleteBudgetGroup,
     // Templates
-    budgetTemplates, monthConfigs, addTemplate, updateTemplate, deleteTemplate, assignTemplateToMonth, setBudgetLimit, toggleMonthLock, resetMonthToTemplate,
+    budgetTemplates, monthConfigs, addTemplate, updateTemplate, deleteTemplate, assignTemplateToMonth, setBudgetLimit, clearBudgetOverride, toggleMonthLock, resetMonthToTemplate,
     
     // Subscriptions
     ignoredSubscriptions, addIgnoredSubscription,
