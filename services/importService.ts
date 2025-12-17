@@ -72,12 +72,9 @@ export const parseBankFile = async (file: File, accountId: string): Promise<Tran
                             const balanceIdx = headerRow.findIndex((c: any) => c?.toString().toLowerCase().includes('saldo') || c?.toString().toLowerCase().includes('balance'));
 
                             // Fallback om vi inte hittar exakta rubriker (gissa baserat på din filstruktur)
-                            // Din fil: ,Datum,Kategori,Underkategori,Text,Belopp...
-                            // Index blir då: 1, 2, 3, 4, 5
                             const dIdx = dateIdx > -1 ? dateIdx : 1;
                             const tIdx = textIdx > -1 ? textIdx : 4;
                             const aIdx = amountIdx > -1 ? amountIdx : 5;
-                            // No fallback for balance if not found, it is optional
 
                             const dataRows = results.data.slice(headerRowIndex + 1);
                             
@@ -125,7 +122,6 @@ export const parseBankFile = async (file: File, accountId: string): Promise<Tran
                     );
                     
                     if (headerRowIndex === -1) {
-                        // Create a helpful error message listing found headers (first 5 rows)
                         const preview = jsonData.slice(0, 5).map(r => JSON.stringify(r)).join('\n');
                         reject(new Error(`Kunde inte hitta en rad med kolumnen 'Datum'.\n\nFöljande data hittades i början av filen:\n${preview}`));
                         return;
@@ -166,26 +162,15 @@ export const parseBankFile = async (file: File, accountId: string): Promise<Tran
 
 // --- PIPELINE LOGIC ---
 
-/**
- * Looks up the most recent transaction with the same description to find how it was categorized previously.
- */
 const applyHistoricalCategories = async (transactions: Transaction[]): Promise<Transaction[]> => {
     const enriched = await Promise.all(transactions.map(async (t): Promise<Transaction> => {
-        // If it was already matched by a RULE, do not override with history.
         if (t.matchType === 'rule') return t;
 
         try {
-            // Find last transaction with same description that was categorized (has verified data)
-            // IMPORTANT: Scoped to the same accountId to prevent cross-contamination between accounts
             const lastMatch = await db.transactions
                 .where({ accountId: t.accountId, description: t.description })
                 .filter(old => {
-                    // Filter: Must have a category/bucket assigned.
                     if (!old.type || (!old.bucketId && !old.categoryMainId)) return false;
-                    
-                    // STRICT SIGN MATCHING:
-                    // If current tx is negative (expense), history match must also be negative.
-                    // If current tx is positive (income), history match must also be positive.
                     const sameSign = (t.amount < 0 && old.amount < 0) || (t.amount >= 0 && old.amount >= 0);
                     return sameSign;
                 })
@@ -193,10 +178,9 @@ const applyHistoricalCategories = async (transactions: Transaction[]): Promise<T
                 .first();
 
             if (lastMatch) {
-                // If the historical match exists, copy its properties exactly.
                 return {
                     ...t,
-                    type: lastMatch.type, // Copy type (Transfer vs Expense)
+                    type: lastMatch.type,
                     bucketId: lastMatch.bucketId,
                     categoryMainId: lastMatch.categoryMainId,
                     categorySubId: lastMatch.categorySubId,
@@ -220,30 +204,68 @@ export const runImportPipeline = async (
 ): Promise<{ newTransactions: Transaction[], updatedTransactions: Transaction[] }> => {
     
     // 1. DUPLICATE & UPDATE CHECK
-    const existingMap = new Map<string, Transaction>();
+    // Group existing transactions by Date, Amount, and Text to handle multi-matches
+    const existingGroupMap = new Map<string, Transaction[]>();
     existingTransactions.forEach(t => {
         const hash = `${t.originalDate || t.date}_${t.amount}_${(t.originalText || t.description).trim()}`;
-        existingMap.set(hash, t);
+        if (!existingGroupMap.has(hash)) existingGroupMap.set(hash, []);
+        existingGroupMap.get(hash)!.push(t);
     });
 
     const toCreate: Transaction[] = [];
     const toUpdate: Transaction[] = [];
 
+    // Tracks which existing transactions have been "claimed" by this import batch
+    // to correctly handle multiple identical transactions within the same file
+    const claimedExistingIds = new Set<string>();
+
     rawTransactions.forEach(t => {
         const hash = `${t.date}_${t.amount}_${t.description.trim()}`;
-        const existing = existingMap.get(hash);
+        const candidates = existingGroupMap.get(hash) || [];
+        
+        let foundMatch = false;
 
-        if (existing) {
-            // Check if we should update the balance
-            // If existing lacks balance AND incoming has balance
-            if (existing.balance === undefined && t.balance !== undefined) {
-                toUpdate.push({
-                    ...existing,
-                    balance: t.balance
-                });
+        // A. Attempt to find an exact duplicate (Matches everything including Balance)
+        if (t.balance !== undefined) {
+            const exactDuplicate = candidates.find(c => 
+                !claimedExistingIds.has(c.id) && 
+                c.balance !== undefined && 
+                Math.abs(c.balance - (t.balance ?? 0)) < 0.01
+            );
+            if (exactDuplicate) {
+                claimedExistingIds.add(exactDuplicate.id);
+                foundMatch = true;
+                // It's a true duplicate, ignore it.
             }
-            // Otherwise, it's a duplicate, do nothing
-        } else {
+        }
+
+        // B. Attempt to find a "Balance Update" match
+        // (Existing one lacks balance, incoming has balance)
+        if (!foundMatch && t.balance !== undefined) {
+            const updatable = candidates.find(c => 
+                !claimedExistingIds.has(c.id) && 
+                c.balance === undefined
+            );
+            if (updatable) {
+                claimedExistingIds.add(updatable.id);
+                toUpdate.push({ ...updatable, balance: t.balance });
+                foundMatch = true;
+            }
+        }
+
+        // C. Fallback for no-balance banks or identical transactions with missing balance data
+        // If we have an unclaimed candidate with the same hash (and neither have balance or balances differ),
+        // we assume it's a duplicate only if the count matches.
+        if (!foundMatch && t.balance === undefined) {
+            const unclaimed = candidates.find(c => !claimedExistingIds.has(c.id));
+            if (unclaimed) {
+                claimedExistingIds.add(unclaimed.id);
+                foundMatch = true;
+            }
+        }
+
+        // If no match found among existing records, it's a new transaction!
+        if (!foundMatch) {
             toCreate.push(t);
         }
     });
@@ -254,20 +276,12 @@ export const runImportPipeline = async (
         const txSign = t.amount < 0 ? 'negative' : 'positive';
 
         const matchedRule = rules.find(r => {
-            // Check Account Scope
             if (r.accountId && r.accountId !== t.accountId) return false;
-
-            // Check Sign Scope
-            // If rule has a 'sign' property, it must match the transaction's sign.
             if (r.sign && r.sign !== txSign) return false;
-
-            // Fallback for legacy rules without 'sign' property:
-            // Implicitly derive sign from targetType to prevent cross-contamination
             if (!r.sign) {
-                if (t.amount < 0 && r.targetType === 'INCOME') return false; // Negative amount cannot match Income rule
-                if (t.amount > 0 && r.targetType === 'EXPENSE') return false; // Positive amount cannot match Expense rule
+                if (t.amount < 0 && r.targetType === 'INCOME') return false;
+                if (t.amount > 0 && r.targetType === 'EXPENSE') return false;
             }
-
             const kw = r.keyword.toLowerCase();
             if (r.matchType === 'exact') return lowerDesc === kw;
             if (r.matchType === 'starts_with') return lowerDesc.startsWith(kw);
@@ -276,7 +290,6 @@ export const runImportPipeline = async (
 
         if (matchedRule) {
             const type: TransactionType = matchedRule.targetType || (matchedRule.targetBucketId ? 'TRANSFER' : 'EXPENSE');
-            
             if (type === 'TRANSFER') {
                 return { 
                     ...t, 
@@ -290,7 +303,7 @@ export const runImportPipeline = async (
             } else {
                 return { 
                     ...t, 
-                    type: type, // 'EXPENSE' or 'INCOME'
+                    type: type, 
                     bucketId: undefined,
                     categoryMainId: matchedRule.targetCategoryMainId,
                     categorySubId: matchedRule.targetCategorySubId,
@@ -302,18 +315,12 @@ export const runImportPipeline = async (
         return t;
     });
 
-    // 3. APPLY HISTORY (Second Highest Priority)
+    // 3. APPLY HISTORY
     processed = await applyHistoricalCategories(processed);
 
-    // 4. APPLY EVENT/TRIP AUTO-TAGGING (Third Priority)
+    // 4. APPLY EVENT/TRIP AUTO-TAGGING
     processed = processed.map(t => {
-        // Only apply if:
-        // - It's not already matched by a Rule (History matches can be augmented)
-        // - It's likely an expense (negative amount)
-        // - The bucketId isn't already set (don't override transfer rules)
         if (t.matchType === 'rule' || t.amount >= 0 || t.bucketId) return t;
-
-        // Check if transaction date falls within any active Goal's event window
         const eventMatch = buckets.find(b => 
             b.type === 'GOAL' && 
             b.autoTagEvent && 
@@ -322,37 +329,25 @@ export const runImportPipeline = async (
             t.date >= b.eventStartDate && 
             t.date <= b.eventEndDate
         );
-
         if (eventMatch) {
-            // Link to the event bucket
-            // We KEEP the category info (from history or future steps) so we know WHAT was bought
             return {
                 ...t,
                 bucketId: eventMatch.id,
-                matchType: t.matchType || 'event' // Keep history match type if exists, otherwise set to event
+                matchType: t.matchType || 'event'
             };
         }
-
         return t;
     });
 
-    // 5. SMART DETECTION & DEFAULTS (Fallback)
+    // 5. SMART DETECTION & DEFAULTS
     processed = processed.map(t => {
-        // If already matched by Rule, skip completely.
         if (t.matchType === 'rule') return t;
-
         const lowerDesc = t.description.toLowerCase();
-
-        // A. Smart Transfer Detection (Keywords)
-        // Only run if not already identified as something else
         if (!t.type) {
             const isTransferKeywords = ['överföring', 'till konto', 'omsättning', 'sparande', 'flytt', 'insättning', 'girering'];
             const isLikelyTransfer = isTransferKeywords.some(kw => lowerDesc.includes(kw));
-
             if (isLikelyTransfer) {
-                // Find a Bucket that matches the description name
                 const targetBucket = buckets.find(b => lowerDesc.includes(b.name.toLowerCase()));
-                
                 return {
                     ...t,
                     type: 'TRANSFER',
@@ -361,21 +356,12 @@ export const runImportPipeline = async (
                 };
             }
         }
-
-        // B. Default to Income
         if (t.amount > 0 && !t.type) {
-             return { ...t, type: 'INCOME', categoryMainId: '9', bucketId: undefined }; // 9 = Inkomster
+             return { ...t, type: 'INCOME', categoryMainId: '9', bucketId: undefined };
         }
-        
-        // C. Default to Consumption (Expense)
         if (!t.type) {
-            return { 
-                ...t, 
-                type: 'EXPENSE', 
-                bucketId: t.bucketId // Keep bucketId if set by Event logic
-            };
+            return { ...t, type: 'EXPENSE', bucketId: t.bucketId };
         }
-
         return t;
     });
 
