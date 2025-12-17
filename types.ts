@@ -91,7 +91,7 @@ export interface SubCategory {
   name: string;
   mainCategoryId: string;
   description?: string;
-  monthlyBudget?: number; // Target budget for this subcategory
+  deprecated_monthlyBudget?: number; // RENAMED: Use getEffectiveSubCategoryBudget instead
   budgetGroupId?: string; // Links this specific category to a high-level budget group
   accountId?: string; // Specific account override. If undefined, uses budgetGroup.defaultAccountId
   isSavings?: boolean; // NEW: Marks this category as savings/investment in the waterfall
