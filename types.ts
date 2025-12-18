@@ -57,6 +57,7 @@ export interface Account {
   id: string;
   name: string;
   icon: string;
+  type?: string; // NEW: Account type (CHECKING, SAVINGS, CREDIT)
   startBalances: Record<MonthKey, number>; // Manual override or carried over
 }
 

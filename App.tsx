@@ -9,6 +9,7 @@ import { StatsView } from './views/StatsView';
 import { DreamsView } from './views/DreamsView';
 import { TransactionsView } from './views/TransactionsView';
 import { SettingsCategories } from './views/SettingsCategories';
+import { SettingsAccounts } from './views/SettingsAccounts'; 
 import { OperatingBudgetView } from './views/OperatingBudgetView';
 import { HousingCalculator } from './views/HousingCalculator';
 import { LayoutGrid, Wallet, PieChart, ArrowLeftRight, Calendar, Settings, Sparkles, Cloud, RefreshCw, Trash2, Download, Receipt, Database, AlertTriangle, Home } from 'lucide-react';
@@ -21,7 +22,7 @@ type View = 'home' | 'budget' | 'dashboard' | 'dreams' | 'transactions' | 'housi
 
 const MainApp = () => {
   const [currentView, setCurrentView] = useState<View>('home');
-  const { selectedMonth, setMonth, settings, setPayday, updateSettings, getExportData, importData, deleteAllTransactions } = useApp();
+  const { selectedMonth, setMonth, settings, setPayday, updateSettings, getExportData, importData, deleteAllTransactions, users, updateUserName } = useApp();
   const [showSettings, setShowSettings] = useState(false);
   
   // Google Drive State
@@ -183,6 +184,22 @@ const MainApp = () => {
               <div>
                 <h3 className="font-bold text-sm text-slate-400 uppercase mb-2">Inställningar</h3>
                 <div className="space-y-4">
+                    {/* Profilinställningar */}
+                    <div className="bg-slate-800/50 p-4 rounded-xl border border-slate-700/50 space-y-3 mb-4">
+                        <h4 className="text-xs font-bold text-slate-400 uppercase tracking-wider">Profil</h4>
+                        {users.length > 0 && (
+                            <div className="space-y-2">
+                                <label className="text-xs text-slate-500">Ditt namn</label>
+                                <input 
+                                    type="text" 
+                                    value={users[0].name} 
+                                    onChange={(e) => updateUserName(users[0].id, e.target.value)}
+                                    className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-white focus:border-blue-500 outline-none"
+                                />
+                            </div>
+                        )}
+                    </div>
+
                     <div className="flex items-center justify-between bg-slate-800 p-3 rounded-lg">
                         <span>Lönedag (brytdatum)</span>
                         <input 
@@ -243,6 +260,11 @@ const MainApp = () => {
                                 <div className={cn("w-4 h-4 bg-white rounded-full shadow-md transform transition-transform", settings.autoApproveSmartTransfers ? "translate-x-4" : "")} />
                             </div>
                         </div>
+                    </div>
+
+                    {/* Account Management */}
+                    <div className="bg-slate-800/50 p-4 rounded-xl border border-slate-700/50 mb-4">
+                        <SettingsAccounts />
                     </div>
 
                     {/* Category Management */}

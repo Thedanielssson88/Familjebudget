@@ -30,6 +30,10 @@ interface AppContextType {
   updateUserIncome: (userId: string, month: MonthKey, type: 'salary'|'childBenefit'|'insurance'|'vabDays'|'dailyDeduction', amount: number) => Promise<void>;
   updateUserName: (userId: string, name: string) => Promise<void>;
   
+  addAccount: (name: string, type: string, icon: string) => Promise<void>;
+  updateAccount: (account: Account) => Promise<void>;
+  deleteAccount: (id: string) => Promise<void>;
+
   addBucket: (bucket: Bucket) => Promise<void>;
   updateBucket: (bucket: Bucket) => Promise<void>;
   deleteBucket: (id: string, month: MonthKey, scope: 'THIS_MONTH' | 'THIS_AND_FUTURE' | 'ALL') => Promise<void>;
@@ -45,8 +49,6 @@ interface AppContextType {
   addBudgetGroup: (name: string, limit: number, icon: string, forecastType: 'FIXED' | 'VARIABLE') => Promise<void>;
   updateBudgetGroup: (group: BudgetGroup) => Promise<void>;
   deleteBudgetGroup: (id: string) => Promise<void>;
-
-  updateAccount: (account: Account) => Promise<void>;
 
   addTransactions: (txs: Transaction[]) => Promise<void>;
   updateTransaction: (tx: Transaction) => Promise<void>;
@@ -185,6 +187,22 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     setUsers(prev => prev.map(u => u.id === userId ? updated : u));
   };
 
+  const addAccount = async (name: string, type: string, icon: string) => {
+    const acc: Account = { id: generateId(), name, type, icon, startBalances: {} };
+    await db.accounts.add(acc);
+    setAccounts(prev => [...prev, acc]);
+  };
+
+  const updateAccount = async (account: Account) => {
+    await db.accounts.put(account);
+    setAccounts(prev => prev.map(a => a.id === account.id ? account : a));
+  };
+
+  const deleteAccount = async (id: string) => {
+    await db.accounts.delete(id);
+    setAccounts(prev => prev.filter(a => a.id !== id));
+  };
+
   const addBucket = async (bucket: Bucket) => {
     await db.buckets.add(bucket);
     setBuckets(prev => [...prev, bucket]);
@@ -294,11 +312,6 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   const deleteBudgetGroup = async (id: string) => {
     await db.budgetGroups.delete(id);
     setBudgetGroups(prev => prev.filter(g => g.id !== id));
-  };
-
-  const updateAccount = async (account: Account) => {
-    await db.accounts.put(account);
-    setAccounts(prev => prev.map(a => a.id === account.id ? account : a));
   };
 
   const addTransactions = async (txs: Transaction[]) => {
@@ -486,8 +499,8 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
 
   const value = {
     users, accounts, buckets, mainCategories, subCategories, budgetGroups, budgetTemplates, monthConfigs, settings, selectedMonth, transactions, importRules, ignoredSubscriptions,
-    setMonth, updateUserIncome, updateUserName, addBucket, updateBucket, deleteBucket, archiveBucket, addMainCategory, deleteMainCategory, addSubCategory, deleteSubCategory, updateSubCategory, resetCategoriesToDefault,
-    addBudgetGroup, updateBudgetGroup, deleteBudgetGroup, updateAccount, addTransactions, updateTransaction, deleteTransaction, deleteAllTransactions, addImportRule, deleteImportRule, updateImportRule, addIgnoredSubscription,
+    setMonth, updateUserIncome, updateUserName, addAccount, updateAccount, deleteAccount, addBucket, updateBucket, deleteBucket, archiveBucket, addMainCategory, deleteMainCategory, addSubCategory, deleteSubCategory, updateSubCategory, resetCategoriesToDefault,
+    addBudgetGroup, updateBudgetGroup, deleteBudgetGroup, addTransactions, updateTransaction, deleteTransaction, deleteAllTransactions, addImportRule, deleteImportRule, updateImportRule, addIgnoredSubscription,
     setPayday, updateSettings, getExportData, importData, setBudgetLimit, toggleMonthLock, assignTemplateToMonth, clearBudgetOverride, addTemplate, updateTemplate, resetMonthToTemplate
   };
 
