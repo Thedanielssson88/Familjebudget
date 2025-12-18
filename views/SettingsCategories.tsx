@@ -3,12 +3,14 @@ import React, { useState } from 'react';
 import { useApp } from '../store';
 import { ChevronRight, ChevronDown, Plus, Trash2, RefreshCw, PiggyBank } from 'lucide-react';
 import { Button, Input, Modal, cn } from '../components/components';
+import { EmojiPickerModal } from '../components/EmojiPicker';
 
 export const SettingsCategories: React.FC = () => {
   const { 
     mainCategories, subCategories, 
     addMainCategory, deleteMainCategory, 
     addSubCategory, deleteSubCategory,
+    updateSubCategory,
     resetCategoriesToDefault
   } = useApp();
 
@@ -17,6 +19,9 @@ export const SettingsCategories: React.FC = () => {
   const [newSubNames, setNewSubNames] = useState<Record<string, string>>({});
   const [newSubIsSavings, setNewSubIsSavings] = useState<Record<string, boolean>>({});
   const [showResetModal, setShowResetModal] = useState(false);
+  
+  // Icon Picker State
+  const [iconPickerTarget, setIconPickerTarget] = useState<{ id: string, name: string } | null>(null);
 
   const toggleExpand = (id: string) => {
     const next = new Set(expanded);
@@ -38,6 +43,13 @@ export const SettingsCategories: React.FC = () => {
     await addSubCategory(mainId, name.trim(), isSavings);
     setNewSubNames(prev => ({ ...prev, [mainId]: '' }));
     setNewSubIsSavings(prev => ({ ...prev, [mainId]: false }));
+  };
+
+  const handleIconSelect = async (emoji: string) => {
+      if (!iconPickerTarget) return;
+      const sub = subCategories.find(s => s.id === iconPickerTarget.id);
+      if (sub) await updateSubCategory({ ...sub, icon: emoji });
+      setIconPickerTarget(null);
   };
 
   return (
@@ -80,7 +92,13 @@ export const SettingsCategories: React.FC = () => {
                 <div className="bg-slate-900/50 border-t border-slate-700 p-3 space-y-2 animate-in slide-in-from-top-1">
                   {subs.map(sub => (
                     <div key={sub.id} className="flex items-center justify-between pl-6 pr-2 py-1.5 rounded hover:bg-white/5 group">
-                       <div className="flex items-center gap-2">
+                       <div className="flex items-center gap-3">
+                           <button 
+                             onClick={() => setIconPickerTarget({ id: sub.id, name: sub.name })}
+                             className="w-8 h-8 flex items-center justify-center bg-slate-800 rounded-lg hover:bg-slate-700 transition-colors"
+                           >
+                             {sub.icon || (sub.isSavings ? "💰" : "💳")}
+                           </button>
                            <span className="text-sm text-slate-300">{sub.name}</span>
                            {sub.isSavings && <PiggyBank size={12} className="text-emerald-400" />}
                        </div>
@@ -125,6 +143,13 @@ export const SettingsCategories: React.FC = () => {
         })}
       </div>
 
+      <EmojiPickerModal
+        isOpen={!!iconPickerTarget}
+        onClose={() => setIconPickerTarget(null)}
+        onSelect={handleIconSelect}
+        title={iconPickerTarget ? `Ikon för ${iconPickerTarget.name}` : undefined}
+      />
+
       {/* Add Main Input */}
       <div className="flex gap-2 pt-2">
         <input 
@@ -143,8 +168,7 @@ export const SettingsCategories: React.FC = () => {
       <Modal isOpen={showResetModal} onClose={() => setShowResetModal(false)} title="Återställ kategorier">
          <div className="space-y-4">
             <p className="text-slate-300">
-              Är du säker? Detta tar bort alla dina egna kategorier och återställer till standardlistan. 
-              Befintliga transaktioner kan tappa sin koppling om deras kategori försvinner.
+              Är du säker? Detta tar bort alla dina egna kategorier och återställer till standardlistan.
             </p>
             <div className="flex gap-2">
                <Button variant="danger" className="flex-1" onClick={async () => { await resetCategoriesToDefault(); setShowResetModal(false); }}>

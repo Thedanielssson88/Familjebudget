@@ -5,12 +5,13 @@ import { OperatingBudgetView } from './OperatingBudgetView';
 import { IncomeView } from './IncomeView';
 import { getBudgetInterval, calculateGoalBucketCost, formatMoney, getEffectiveBucketData, getEffectiveBudgetGroupData, getEffectiveSubCategoryBudget } from '../utils';
 import { cn, Card, Modal, Button } from '../components/components';
-import { Wallet, ArrowRightLeft, PieChart, Check, AlertTriangle, CalendarRange, ArrowRight, ChevronRight, X } from 'lucide-react';
+import { Wallet, ArrowRightLeft, PieChart, Check, AlertTriangle, CalendarRange, ArrowRight, ChevronRight, X, Receipt } from 'lucide-react';
 import { useBudgetActuals } from '../hooks/useBudgetActuals';
 import { BudgetProgressBar } from '../components/BudgetProgressBar';
 import { BudgetPlanningView } from './BudgetPlanningView';
-import { SubCategory, Bucket } from '../types';
+import { SubCategory, Bucket, Account, Transaction } from '../types';
 import { eachDayOfInterval, getDay } from 'date-fns';
+import { EmojiPickerModal } from '../components/EmojiPicker';
 
 export const BudgetView: React.FC = () => {
   const [activeTab, setActiveTab] = useState<'income' | 'transfers' | 'operating' | 'planning'>('operating');
@@ -96,14 +97,16 @@ type NeedItem = {
 };
 
 const TransfersViewContent: React.FC = () => {
-  const { accounts, buckets, budgetGroups, subCategories, mainCategories, selectedMonth, settings, budgetTemplates, monthConfigs, updateSubCategory, updateBucket } = useApp();
+  const { accounts, buckets, budgetGroups, subCategories, mainCategories, selectedMonth, settings, budgetTemplates, monthConfigs, updateSubCategory, updateBucket, updateAccount } = useApp();
   
   // REAL-TIME ACTUALS HOOK
   const actuals = useBudgetActuals(selectedMonth, settings.payday);
 
   // UI STATE
   const [selectedNeedAccount, setSelectedNeedAccount] = useState<{ id: string, name: string, items: NeedItem[] } | null>(null);
+  const [selectedActualTransfers, setSelectedActualTransfers] = useState<{ name: string, transactions: Transaction[], total: number } | null>(null);
   const [movingItem, setMovingItem] = useState<NeedItem | null>(null);
+  const [iconPickerTarget, setIconPickerTarget] = useState<Account | null>(null);
 
   // --- CALCULATE NEED PER ACCOUNT ---
   const { accountNeeds, unallocatedNeeds, detailedNeeds, unallocatedItems } = useMemo(() => {
@@ -256,6 +259,15 @@ const TransfersViewContent: React.FC = () => {
       setSelectedNeedAccount({ id: accountId, name, items });
   };
 
+  const handleOpenActualTransfers = (accountId: string, name: string) => {
+      const txs = (actuals?.transactions || [])
+          .filter(t => t.accountId === accountId && (t.type === 'TRANSFER' || t.type === 'INCOME') && t.amount > 0)
+          .sort((a, b) => b.date.localeCompare(a.date));
+      
+      const total = txs.reduce((sum, t) => sum + t.amount, 0);
+      setSelectedActualTransfers({ name, transactions: txs, total });
+  };
+
   const handleMoveItem = async (targetAccountId: string) => {
       if (!movingItem) return;
 
@@ -273,6 +285,12 @@ const TransfersViewContent: React.FC = () => {
       setMovingItem(null);
       // Close the main modal as data will refresh
       setSelectedNeedAccount(null);
+  };
+
+  const handleAccountIconSelect = async (emoji: string) => {
+      if (!iconPickerTarget) return;
+      await updateAccount({ ...iconPickerTarget, icon: emoji });
+      setIconPickerTarget(null);
   };
 
   return (
@@ -301,7 +319,12 @@ const TransfersViewContent: React.FC = () => {
                   <div key={account.id} className="bg-slate-800 rounded-xl border border-slate-700 p-4 shadow-lg">
                       <div className="flex justify-between items-center mb-2">
                           <div className="flex items-center gap-3">
-                              <span className="text-2xl">{account.icon}</span>
+                              <button 
+                                onClick={() => setIconPickerTarget(account)}
+                                className="text-2xl hover:bg-slate-700/50 p-2 rounded-xl transition-all active:scale-90"
+                              >
+                                {account.icon}
+                              </button>
                               <div>
                                   <h3 className="font-bold text-white text-lg">{account.name}</h3>
                                   <div 
@@ -313,9 +336,12 @@ const TransfersViewContent: React.FC = () => {
                                   </div>
                               </div>
                           </div>
-                          <div className="text-right">
-                              <div className="text-[10px] text-slate-500 uppercase font-bold">Överfört</div>
-                              <div className={cn("font-mono font-bold text-lg", transfersIn >= needed ? "text-emerald-400" : "text-white")}>
+                          <div 
+                            className="text-right cursor-pointer group/transferred"
+                            onClick={() => transfersIn > 0 && handleOpenActualTransfers(account.id, account.name)}
+                          >
+                              <div className="text-[10px] text-slate-500 uppercase font-bold group-hover/transferred:text-blue-400 transition-colors">Överfört</div>
+                              <div className={cn("font-mono font-bold text-lg group-hover/transferred:underline transition-all", transfersIn >= needed ? "text-emerald-400" : "text-white")}>
                                   {formatMoney(transfersIn)}
                               </div>
                           </div>
@@ -365,7 +391,14 @@ const TransfersViewContent: React.FC = () => {
           )}
       </div>
 
-      {/* DRILL DOWN MODAL (DETAIL LIST) */}
+      <EmojiPickerModal 
+        isOpen={!!iconPickerTarget} 
+        onClose={() => setIconPickerTarget(null)} 
+        onSelect={handleAccountIconSelect}
+        title={iconPickerTarget ? `Ikon för ${iconPickerTarget.name}` : undefined}
+      />
+
+      {/* DRILL DOWN MODAL (DETAIL LIST - BUDGETED) */}
       <Modal isOpen={!!selectedNeedAccount} onClose={() => setSelectedNeedAccount(null)} title={`Behov: ${selectedNeedAccount?.name}`}>
           <div className="space-y-4">
               <p className="text-sm text-slate-400">
@@ -401,6 +434,44 @@ const TransfersViewContent: React.FC = () => {
               </div>
               <div className="pt-2 flex justify-end">
                   <Button variant="secondary" onClick={() => setSelectedNeedAccount(null)}>Stäng</Button>
+              </div>
+          </div>
+      </Modal>
+
+      {/* DRILL DOWN MODAL (ACTUAL TRANSFERS) */}
+      <Modal isOpen={!!selectedActualTransfers} onClose={() => setSelectedActualTransfers(null)} title={`Insättningar: ${selectedActualTransfers?.name}`}>
+          <div className="space-y-4">
+              <div className="bg-slate-800 p-4 rounded-xl border border-slate-700 flex justify-between items-center">
+                  <div className="flex items-center gap-2 text-emerald-400">
+                      <Receipt size={18} />
+                      <span className="text-sm font-bold uppercase tracking-wider">Totalt Överfört</span>
+                  </div>
+                  <span className="text-2xl font-bold text-white font-mono">{formatMoney(selectedActualTransfers?.total || 0)}</span>
+              </div>
+              
+              <div className="space-y-2 max-h-[60vh] overflow-y-auto pr-1">
+                  {selectedActualTransfers?.transactions.map(t => (
+                      <div key={t.id} className="flex justify-between items-center p-3 bg-slate-900/50 border border-slate-800 rounded-lg">
+                          <div className="flex-1 mr-4 overflow-hidden">
+                              <div className="text-white font-medium truncate">{t.description}</div>
+                              <div className="text-xs text-slate-500">{t.date}</div>
+                          </div>
+                          <div className="text-right">
+                              <div className="font-mono font-bold text-emerald-400">+{formatMoney(t.amount)}</div>
+                              {t.bucketId && (
+                                  <div className="text-[10px] text-blue-400">
+                                      {t.bucketId === 'INTERNAL' ? 'Intern' : buckets.find(b => b.id === t.bucketId)?.name}
+                                  </div>
+                              )}
+                          </div>
+                      </div>
+                  ))}
+                  {selectedActualTransfers?.transactions.length === 0 && (
+                      <div className="text-center py-8 text-slate-500 italic">Inga transaktioner hittades.</div>
+                  )}
+              </div>
+              <div className="pt-2 flex justify-end">
+                  <Button variant="secondary" onClick={() => setSelectedActualTransfers(null)}>Stäng</Button>
               </div>
           </div>
       </Modal>

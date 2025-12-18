@@ -1,11 +1,26 @@
 
 import React, { useState, useMemo } from 'react';
 import { useApp } from '../store';
-import { calculateDailyBucketCost, calculateDailyBucketCostSoFar, calculateFixedBucketCost, calculateGoalBucketCost, formatMoney, getEffectiveBudgetGroupData, getEffectiveSubCategoryBudget, getLatestDailyDeduction, getTotalFamilyIncome, getUserIncome, calculateReimbursementMap, getEffectiveAmount, getBudgetInterval } from '../utils';
-import { Card, cn } from '../components/components';
-import { ArrowDown, Sliders, Landmark, Calculator, PiggyBank, LayoutGrid, BarChart3 } from 'lucide-react';
+import { 
+  calculateDailyBucketCost, 
+  calculateGoalBucketCost, 
+  formatMoney, 
+  getEffectiveBudgetGroupData, 
+  getEffectiveSubCategoryBudget, 
+  getLatestDailyDeduction, 
+  getTotalFamilyIncome, 
+  getUserIncome, 
+  calculateReimbursementMap, 
+  getEffectiveAmount, 
+  getBudgetInterval, 
+  getEffectiveBucketData, 
+  isBucketActiveInMonth 
+} from '../utils';
+import { Card, cn, Modal, Button } from '../components/components';
+import { ArrowDown, Sliders, Landmark, Calculator, PiggyBank, LayoutGrid, BarChart3, Receipt, ChevronRight } from 'lucide-react';
 import { StatsView } from './StatsView';
-import { format } from 'date-fns';
+// Fix: Added missing startOfDay import from date-fns
+import { format, parseISO, isBefore, isValid, isAfter, eachDayOfInterval, getDay, startOfDay } from 'date-fns';
 
 // Simple SVG Gauge Component
 const SavingsGauge = ({ percentage }: { percentage: number }) => {
@@ -46,8 +61,9 @@ const SavingsGauge = ({ percentage }: { percentage: number }) => {
 };
 
 const WaterfallOverview: React.FC = () => {
-  const { users, buckets, selectedMonth, settings, budgetGroups, subCategories, budgetTemplates, monthConfigs, transactions } = useApp();
+  const { users, buckets, selectedMonth, settings, budgetGroups, subCategories, budgetTemplates, monthConfigs, transactions, accounts } = useApp();
   const [scenarioAdjustment, setScenarioAdjustment] = useState(0);
+  const [drillDown, setDrillDown] = useState<{ title: string, items: { name: string, amount: number, type: string }[], total: number } | null>(null);
 
   const reimbursementMap = useMemo(() => calculateReimbursementMap(transactions), [transactions]);
 
@@ -56,111 +72,147 @@ const WaterfallOverview: React.FC = () => {
     getTotalFamilyIncome(users, selectedMonth), 
   [users, selectedMonth]);
 
-  // 2. Calculate BUDGETED Outflow (Split by Consumption vs Savings)
-  const { consumptionExpenses, savingsExpenses, totalDailySoFar, totalFixedForBalance } = useMemo(() => {
+  // 2. Calculate BUDGETED Outflow (Perfect mirror of OperatingBudgetView logic)
+  const budgetFlow = useMemo(() => {
     let consumption = 0;
     let savings = 0;
-    let dailySoFar = 0;
-    let fixedForBalance = 0; // Tracks actual expected cash outflow for balance calc
+    let totalFixedForBalance = 0; // Tracks cash leaving the account for surplus calculation
+    
+    const consumptionItems: { name: string, amount: number, type: string }[] = [];
+    const savingsItems: { name: string, amount: number, type: string }[] = [];
 
-    // Helper for Start Date of current month (for Goal calculation)
-    const { start } = getBudgetInterval(selectedMonth, settings.payday);
-    const startStr = format(start, 'yyyy-MM-dd');
+    const { start, end } = getBudgetInterval(selectedMonth, settings.payday);
 
-    // A. BUCKETS (Fixed, Daily, Goals)
-    buckets.forEach(b => {
-        if (b.paymentSource === 'BALANCE') return;
-
-        let cost = 0;
-        let isDaily = false;
-
-        if (b.type === 'FIXED') {
-            cost = calculateFixedBucketCost(b, selectedMonth);
-        } else if (b.type === 'GOAL') {
-            // Updated Logic: Match OperatingBudgetView (Project Budget / Remaining Target)
-            // Instead of monthly saving rate, we use (Target - Past Spent) to show available budget
-            const pastSpent = transactions
-                .filter(t => 
-                    !t.isHidden &&
-                    t.bucketId === b.id && 
-                    t.date < startStr && 
-                    (t.type === 'EXPENSE' || (!t.type && t.amount < 0))
-                )
-                .reduce((sum, t) => sum + Math.abs(getEffectiveAmount(t, reimbursementMap)), 0);
-            
-            cost = Math.max(0, b.targetAmount - pastSpent);
-        } else if (b.type === 'DAILY') {
-            isDaily = true;
-            cost = calculateDailyBucketCost(b, selectedMonth, settings.payday);
-            dailySoFar += calculateDailyBucketCostSoFar(b, selectedMonth, settings.payday);
-        }
-
-        // Logic for balance calculation (money leaving account)
-        if (!isDaily) {
-            fixedForBalance += cost;
-        }
-
-        // Logic for Waterfall (Classification)
-        if (b.isSavings) {
-            savings += cost;
+    // Helper to map items to consumption or savings based on Group and Item flags
+    const classifyAndAdd = (amount: number, name: string, type: string, isGroupSavings: boolean, isItemSavings: boolean) => {
+        if (amount <= 0) return;
+        // Priority: Group level "SAVINGS" override takes priority, then item level flag
+        if (isGroupSavings || isItemSavings) {
+            savings += amount;
+            savingsItems.push({ name, amount, type });
         } else {
-            consumption += cost;
+            consumption += amount;
+            consumptionItems.push({ name, amount, type });
+        }
+    };
+
+    // Correct bucket assignment map logic (Matches Drift View)
+    const assignedBucketIds = new Set<string>();
+    const groupToBuckets = new Map<string, string[]>();
+
+    budgetGroups.forEach(g => groupToBuckets.set(g.id, []));
+    buckets.forEach(b => {
+        if (b.budgetGroupId) {
+            const list = groupToBuckets.get(b.budgetGroupId);
+            if (list) {
+                list.push(b.id);
+                assignedBucketIds.add(b.id);
+            }
         }
     });
 
-    // B. BUDGET GROUPS (Variable Categories)
-    // Iterate budget groups to find their effective budget.
-    // Split subcategories based on 'isSavings' flag.
     budgetGroups.forEach(group => {
-        // Get effective total limit for the group
-        const { data } = getEffectiveBudgetGroupData(group, selectedMonth, budgetTemplates, monthConfigs);
-        const groupLimit = data ? data.limit : 0;
+        if (group.linkedBucketIds) {
+            group.linkedBucketIds.forEach(bid => {
+                if (!assignedBucketIds.has(bid)) {
+                    groupToBuckets.get(group.id)?.push(bid);
+                    assignedBucketIds.add(bid);
+                }
+            });
+        }
+    });
 
-        // Get subcategories for this group
+    const catchAllGroup = budgetGroups.find(g => g.isCatchAll);
+    if (catchAllGroup) {
+        buckets.forEach(b => {
+            if (!assignedBucketIds.has(b.id)) {
+                groupToBuckets.get(catchAllGroup.id)?.push(b.id);
+            }
+        });
+    }
+
+    // MAIN LOOP: Group by Group
+    budgetGroups.forEach(group => {
+        const { data: explicitData } = getEffectiveBudgetGroupData(group, selectedMonth, budgetTemplates, monthConfigs);
+        const manualLimit = explicitData && !explicitData.isExplicitlyDeleted ? explicitData.limit : 0;
+        const isGroupSavings = group.forecastType === 'SAVINGS';
+
+        let groupChildrenSum = 0;
+
+        // A. SubCategories
         const groupSubs = subCategories.filter(s => s.budgetGroupId === group.id);
-        
-        let sumSubBudgets = 0;
-        
-        // Sum up specific subcategory budgets
         groupSubs.forEach(sub => {
             const subBudget = getEffectiveSubCategoryBudget(sub, selectedMonth, budgetTemplates, monthConfigs);
-            sumSubBudgets += subBudget;
-            
-            if (sub.isSavings) {
-                savings += subBudget;
-            } else {
-                consumption += subBudget;
+            if (subBudget > 0) {
+                groupChildrenSum += subBudget;
+                classifyAndAdd(subBudget, sub.name, 'SUB', isGroupSavings, !!sub.isSavings);
             }
         });
 
-        // Handle "Unallocated" / Buffer within the group limit
-        // Typically, unallocated budget in a group is considered consumption (buffer for overspending)
-        const unallocated = Math.max(0, groupLimit - sumSubBudgets);
-        consumption += unallocated;
+        // B. Custom Buckets (Fixed, Daily, Goals)
+        const groupBucketIds = groupToBuckets.get(group.id) || [];
+        buckets.filter(b => groupBucketIds.includes(b.id)).forEach(b => {
+            let cost = 0;
+            let isDaily = false;
+
+            if (b.type === 'FIXED') {
+                const { data } = getEffectiveBucketData(b, selectedMonth, budgetTemplates, monthConfigs);
+                cost = data ? data.amount : 0;
+            } else if (b.type === 'DAILY') {
+                isDaily = true;
+                const { data } = getEffectiveBucketData(b, selectedMonth, budgetTemplates, monthConfigs);
+                if (data) {
+                    const days = eachDayOfInterval({ start, end });
+                    const count = days.filter(day => data.activeDays.includes(getDay(day))).length;
+                    cost = count * data.dailyAmount;
+                }
+            } else if (b.type === 'GOAL') {
+                // GOAL LOGIC FOR WATERFALL:
+                // Only count the monthly saving contribution (Från Månadslön).
+                // Consumption/Spending budget is funded from account balance, so it's NOT included in the waterfall outflow.
+                if (b.paymentSource === 'INCOME') {
+                    cost = calculateGoalBucketCost(b, selectedMonth);
+                }
+            }
+
+            if (cost > 0) {
+                groupChildrenSum += cost;
+                classifyAndAdd(cost, b.name, 'BUCKET', isGroupSavings, !!b.isSavings);
+                
+                // Track for "Current Balance" estimate (Money leaving primary account)
+                // Goal spending phase is also excluded from here because it's already "accounted for" in the assets.
+                if (!isDaily && b.paymentSource !== 'BALANCE') {
+                    totalFixedForBalance += cost;
+                }
+            }
+        });
+
+        // C. Group Buffer (Manual Limit - Children)
+        const unallocated = Math.max(0, manualLimit - groupChildrenSum);
+        if (unallocated > 0) {
+            classifyAndAdd(unallocated, `Buffert: ${group.name}`, 'BUFFER', isGroupSavings, false);
+        }
     });
 
     return { 
         consumptionExpenses: consumption, 
         savingsExpenses: savings, 
-        totalDailySoFar: dailySoFar,
-        totalFixedForBalance: fixedForBalance
+        totalFixedForBalance,
+        consumptionItems: consumptionItems.sort((a,b) => b.amount - a.amount),
+        savingsItems: savingsItems.sort((a,b) => b.amount - a.amount)
     };
-  }, [buckets, budgetGroups, subCategories, selectedMonth, settings.payday, budgetTemplates, monthConfigs, transactions, reimbursementMap]);
+  }, [buckets, budgetGroups, subCategories, selectedMonth, settings.payday, budgetTemplates, monthConfigs]);
+
+  const { consumptionExpenses, savingsExpenses, totalFixedForBalance, consumptionItems, savingsItems } = budgetFlow;
 
   // 3. Totals and Surplus
-  // Scenario adjustment is assumed to be extra CONSUMPTION (bills/food increasing)
-  const totalProjectedExpenses = consumptionExpenses + savingsExpenses;
   const effectiveConsumption = consumptionExpenses + scenarioAdjustment;
   const surplus = totalActualIncome - (effectiveConsumption + savingsExpenses);
-
-  // Intermediate Waterfall Step: Result before Savings
   const resultBeforeSavings = totalActualIncome - effectiveConsumption;
-
-  // Savings Rate
   const savingsRate = totalActualIncome > 0 ? (savingsExpenses / totalActualIncome) * 100 : 0;
 
   // 4. Distribution Logic
-  const { distribution, totalDistributed } = useMemo(() => {
+  const { distribution } = useMemo(() => {
     const userCalculations = users.map(user => {
         const data = user.incomeData[selectedMonth];
         const actualIncome = getUserIncome(user, selectedMonth);
@@ -168,29 +220,41 @@ const WaterfallOverview: React.FC = () => {
         const rate = data?.dailyDeduction !== undefined ? data.dailyDeduction : getLatestDailyDeduction(user, selectedMonth);
         const incomeLoss = days * rate;
         const theoreticalIncome = actualIncome + incomeLoss;
-    
         return { ...user, actualIncome, incomeLoss, theoreticalIncome };
     });
 
     const totalTheoreticalIncome = userCalculations.reduce((sum, u) => sum + u.theoreticalIncome, 0);
-
     const dist = userCalculations.map(user => {
         const contributionShare = totalTheoreticalIncome > 0 ? user.theoreticalIncome / totalTheoreticalIncome : 0;
         const returnAmount = Math.max(0, surplus * contributionShare);
         return { ...user, returnAmount, contributionShare };
     });
 
-    const totalDist = dist.reduce((sum, d) => sum + d.returnAmount, 0);
-
-    return { distribution: dist, totalDistributed: totalDist };
+    return { distribution: dist };
   }, [users, selectedMonth, surplus]);
 
-  // Balance Calculations
-  // Note: This calculation mixes actual income with BUDGETED fixed costs.
-  // Ideally, for "Current Account Balance", we should use actuals, but the request focuses on the Waterfall (Budget) flow.
-  // We keep this calculation consistent with the waterfall figures derived above.
-  const currentAccountBalance = totalActualIncome - totalFixedForBalance - totalDailySoFar;
-  const balanceAfterTransfers = currentAccountBalance - totalDistributed;
+  // Balance Estimate: Current Cash Status
+  const currentAccountBalance = useMemo(() => {
+    let dailySoFar = 0;
+    buckets.forEach(b => {
+        if (b.type === 'DAILY') {
+            const { data } = getEffectiveBucketData(b, selectedMonth, budgetTemplates, monthConfigs);
+            if (data) {
+                const { start } = getBudgetInterval(selectedMonth, settings.payday);
+                const today = startOfDay(new Date());
+                if (!isBefore(today, start)) {
+                    const days = eachDayOfInterval({ start, end: today > getBudgetInterval(selectedMonth, settings.payday).end ? getBudgetInterval(selectedMonth, settings.payday).end : today });
+                    const count = days.filter(d => data.activeDays.includes(getDay(d))).length;
+                    dailySoFar += count * data.dailyAmount;
+                }
+            }
+        }
+    });
+    return totalActualIncome - totalFixedForBalance - dailySoFar;
+  }, [totalActualIncome, totalFixedForBalance, buckets, selectedMonth, settings.payday, budgetTemplates, monthConfigs]);
+
+  const balanceAfterTransfers = currentAccountBalance - distribution.reduce((sum, d) => sum + d.returnAmount, 0);
+  const primaryAccountIcon = accounts.length > 0 ? accounts[0].icon : '💳';
 
   return (
     <div className="space-y-8 animate-in fade-in duration-500">
@@ -223,54 +287,62 @@ const WaterfallOverview: React.FC = () => {
                     <SavingsGauge percentage={savingsRate} />
                 </div>
             </div>
-            {/* Connector */}
             <div className="absolute left-1/2 -bottom-4 w-0.5 h-4 bg-emerald-600/50"></div>
         </div>
         
         <div className="flex justify-center py-1"><ArrowDown className="w-4 h-4 text-slate-600" /></div>
 
         {/* Step 2: Consumption Expenses */}
-        <div className="bg-rose-600 rounded-xl p-4 text-white relative z-10 shadow-lg shadow-rose-900/20">
+        <div 
+            onClick={() => setDrillDown({ title: 'Räkningar & Mat (Budget)', items: consumptionItems, total: consumptionExpenses })}
+            className="bg-rose-600 rounded-xl p-4 text-white relative z-10 shadow-lg shadow-rose-900/20 cursor-pointer hover:brightness-110 active:scale-[0.98] transition-all group"
+        >
             <div className="flex justify-between items-center">
-                <span className="font-medium opacity-90">Räkningar & Mat (Konsumtion)</span>
-                <span className="font-bold font-mono">-{formatMoney(effectiveConsumption)}</span>
+                <div className="flex flex-col">
+                    <span className="font-medium opacity-90 flex items-center gap-1.5">
+                        Räkningar & Mat (Konsumtion) <ChevronRight size={14} className="opacity-50 group-hover:opacity-100 group-hover:translate-x-0.5 transition-all" />
+                    </span>
+                </div>
+                <span className="font-bold font-mono text-xl">-{formatMoney(effectiveConsumption)}</span>
             </div>
             {scenarioAdjustment !== 0 && (
                 <div className="mt-2 text-xs bg-black/20 rounded px-2 py-1 text-rose-200 inline-block">
                     Scenario: {scenarioAdjustment > 0 ? '+' : ''}{formatMoney(scenarioAdjustment)}
                 </div>
             )}
-             {/* Connector */}
              <div className="absolute left-1/2 -bottom-4 w-0.5 h-4 bg-rose-600/50"></div>
         </div>
 
         <div className="flex justify-center py-1"><ArrowDown className="w-4 h-4 text-slate-600" /></div>
 
-        {/* Step 3: Result BEFORE Savings (Grey/Neutral) */}
+        {/* Step 3: Result BEFORE Savings */}
         <div className="bg-slate-700/80 rounded-xl p-3 text-slate-300 relative z-10 border border-slate-600">
              <div className="flex justify-between items-center text-sm">
                  <span className="uppercase tracking-wide font-bold text-xs">Resultat före sparande</span>
                  <span className="font-mono font-bold">{formatMoney(resultBeforeSavings)}</span>
              </div>
-             {/* Connector */}
              <div className="absolute left-1/2 -bottom-4 w-0.5 h-4 bg-slate-600/50"></div>
         </div>
 
         <div className="flex justify-center py-1"><ArrowDown className="w-4 h-4 text-slate-600" /></div>
 
-        {/* Step 4: Savings (Blue/Purple - Investment) */}
-        <div className="bg-gradient-to-r from-blue-600 to-indigo-600 rounded-xl p-4 text-white relative z-10 shadow-lg shadow-blue-900/20 border-l-4 border-l-indigo-300">
-             <div className="flex items-center gap-2 mb-1">
-                 <PiggyBank className="w-5 h-5 text-indigo-200" />
-                 <span className="font-bold text-indigo-100 uppercase tracking-wide text-xs">Investeringar & Sparande</span>
-             </div>
-             <div className="flex justify-between items-end">
-                 <div className="text-xs text-blue-200 max-w-[70%]">
-                     Drömmar, buffert och långsiktigt sparande (Budgeterat).
+        {/* Step 4: Savings */}
+        <div 
+            onClick={() => setDrillDown({ title: 'Investeringar & Sparande (Budget)', items: savingsItems, total: savingsExpenses })}
+            className="bg-gradient-to-r from-blue-600 to-indigo-600 rounded-xl p-4 text-white relative z-10 shadow-lg shadow-blue-900/20 border-l-4 border-l-indigo-300 cursor-pointer hover:brightness-110 active:scale-[0.98] transition-all group"
+        >
+             <div className="flex items-center justify-between mb-1">
+                 <div className="flex items-center gap-2">
+                    <PiggyBank className="w-5 h-5 text-indigo-200" />
+                    <span className="font-bold text-indigo-100 uppercase tracking-wide text-xs flex items-center gap-1.5">
+                        Investeringar & Sparande <ChevronRight size={14} className="opacity-50 group-hover:opacity-100 group-hover:translate-x-0.5 transition-all" />
+                    </span>
                  </div>
                  <span className="font-bold font-mono text-xl">-{formatMoney(savingsExpenses)}</span>
              </div>
-             {/* Connector */}
+             <div className="text-xs text-blue-200 max-w-[70%]">
+                 Budgeterad avsättning från lön till sparande och mål.
+             </div>
              <div className="absolute left-1/2 -bottom-4 w-0.5 h-4 bg-indigo-600/50"></div>
         </div>
 
@@ -310,21 +382,19 @@ const WaterfallOverview: React.FC = () => {
 
       {/* BALANCES SECTION */}
       <div className="grid gap-4 pt-4">
-        {/* INTERMEDIATE CALCULATION: CURRENT BALANCE */}
         <div className="bg-blue-900/30 rounded-xl p-4 text-slate-300 border border-blue-500/20">
              <div className="flex items-center gap-2 mb-2">
-                 <Landmark className="w-4 h-4 text-blue-400" />
+                 <span className="text-xl">{primaryAccountIcon}</span>
                  <span className="text-xs font-bold text-blue-200 uppercase tracking-wide">Saldo på överföringskonto (Just Nu)</span>
              </div>
              <div className="flex justify-between items-end">
                  <div className="text-[10px] text-slate-400 max-w-[60%]">
-                     Inkomst minus alla budgeterade fasta utgifter och upplupna dagliga utgifter fram till idag.
+                     Beräknat saldo: Inkomst minus fasta utgifter och förbrukad rörlig budget fram till idag.
                  </div>
                  <span className="font-bold font-mono text-lg text-blue-100">{formatMoney(currentAccountBalance)}</span>
              </div>
         </div>
 
-        {/* FINAL CALCULATION: REMAINING FOR TRANSFERS */}
         <div className="bg-slate-800 rounded-xl p-4 text-slate-300 border border-slate-600">
              <div className="flex items-center gap-2 mb-2">
                  <Calculator className="w-4 h-4 text-emerald-400" />
@@ -332,7 +402,7 @@ const WaterfallOverview: React.FC = () => {
              </div>
              <div className="flex justify-between items-end">
                  <div className="text-[10px] text-slate-400 max-w-[60%]">
-                     Detta belopp ska finnas kvar efter att fickpengarna delats ut för att täcka resten av månaden.
+                     Detta belopp ska finnas kvar efter att fickpengarna delats ut för att täcka resten av månadens drift.
                  </div>
                  <span className={cn("font-bold font-mono text-lg", balanceAfterTransfers < 0 ? "text-red-400" : "text-emerald-400")}>
                     {formatMoney(balanceAfterTransfers)}
@@ -364,6 +434,41 @@ const WaterfallOverview: React.FC = () => {
             <span>+10 000 kr</span>
         </div>
       </div>
+
+      {/* DRILL DOWN MODAL */}
+      <Modal isOpen={!!drillDown} onClose={() => setDrillDown(null)} title={drillDown?.title || 'Detaljer'}>
+          <div className="space-y-4">
+              <div className="bg-slate-800 p-4 rounded-xl border border-slate-700 flex justify-between items-center shadow-sm">
+                  <div className="flex items-center gap-2 text-blue-400">
+                      <Receipt size={18} />
+                      <span className="text-sm font-bold uppercase tracking-wider">Total Budget</span>
+                  </div>
+                  <span className="text-2xl font-bold font-mono text-white">
+                      {formatMoney(drillDown?.total || 0)}
+                  </span>
+              </div>
+              <div className="space-y-2 max-h-[60vh] overflow-y-auto pr-1 no-scrollbar">
+                  <p className="text-xs text-slate-500 uppercase font-bold tracking-wider px-1">Sammansättning</p>
+                  {drillDown?.items.map((item, idx) => (
+                      <div key={idx} className="flex justify-between items-center p-3 bg-slate-900/50 border border-slate-800 rounded-lg">
+                          <div className="flex items-center gap-2 min-w-0">
+                              <span className="text-white font-medium text-sm truncate">{item.name}</span>
+                              {item.type === 'BUCKET' && <span className="text-[9px] bg-indigo-900/50 text-indigo-300 px-1.5 py-0.5 rounded border border-indigo-900 shrink-0">Fast/Mål/Daglig</span>}
+                              {item.type === 'BUFFER' && <span className="text-[9px] bg-slate-700 text-slate-300 px-1.5 py-0.5 rounded border border-slate-600 shrink-0">Buffert</span>}
+                          </div>
+                          <span className="font-mono font-bold text-white shrink-0 ml-2">{formatMoney(item.amount)}</span>
+                      </div>
+                  ))}
+                  {drillDown?.items.length === 0 && (
+                      <div className="text-center py-8 text-slate-500 italic">Inga budgeterade poster.</div>
+                  )}
+              </div>
+              <div className="mt-2 flex justify-end">
+                  <Button variant="secondary" onClick={() => setDrillDown(null)} className="w-full">Stäng</Button>
+              </div>
+          </div>
+      </Modal>
+
     </div>
   );
 };
@@ -373,7 +478,6 @@ export const DashboardView: React.FC = () => {
 
     return (
         <div className="space-y-6 pb-24">
-             {/* Header */}
             <div className="flex flex-col gap-4">
                 <header>
                     <h1 className="text-3xl font-bold text-transparent bg-clip-text bg-gradient-to-r from-blue-400 to-emerald-400">Översikt</h1>

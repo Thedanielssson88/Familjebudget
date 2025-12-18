@@ -29,6 +29,7 @@ export interface Bucket {
   accountId: string; // Can be empty string to inherit from Group
   name: string;
   type: BucketType;
+  icon?: string; // NEW: Custom emoji
   isSavings: boolean; // If true, builds capital. If false, is an expense.
   paymentSource?: 'INCOME' | 'BALANCE'; // 'INCOME' = Deducted from monthly flow. 'BALANCE' = Deducted from account assets (transfer/spend).
   backgroundImage?: string; // URL for the dream card background
@@ -83,13 +84,14 @@ export interface BudgetGroup {
 
   isCatchAll?: boolean; // If true, this is the "Other/Unbudgeted" group
   icon?: string;
-  forecastType?: 'FIXED' | 'VARIABLE'; // Determines how forecast calculates projection
+  forecastType?: 'FIXED' | 'VARIABLE' | 'SAVINGS'; // Determines how forecast calculates projection
 }
 
 export interface SubCategory {
   id: string;
   name: string;
   mainCategoryId: string;
+  icon?: string; // NEW: Custom emoji
   description?: string;
   deprecated_monthlyBudget?: number; // RENAMED: Use getEffectiveSubCategoryBudget instead
   budgetGroupId?: string; // Links this specific category to a high-level budget group

@@ -46,6 +46,8 @@ interface AppContextType {
   updateBudgetGroup: (group: BudgetGroup) => Promise<void>;
   deleteBudgetGroup: (id: string) => Promise<void>;
 
+  updateAccount: (account: Account) => Promise<void>;
+
   addTransactions: (txs: Transaction[]) => Promise<void>;
   updateTransaction: (tx: Transaction) => Promise<void>;
   deleteTransaction: (id: string) => Promise<void>;
@@ -294,6 +296,11 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     setBudgetGroups(prev => prev.filter(g => g.id !== id));
   };
 
+  const updateAccount = async (account: Account) => {
+    await db.accounts.put(account);
+    setAccounts(prev => prev.map(a => a.id === account.id ? account : a));
+  };
+
   const addTransactions = async (txs: Transaction[]) => {
     await db.transactions.bulkAdd(txs);
     setTransactions(prev => [...prev, ...txs]);
@@ -368,7 +375,8 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   const importData = async (json: string) => {
     try {
       const data = JSON.parse(json);
-      await db.transaction('rw', db.users, db.accounts, db.buckets, db.mainCategories, db.subCategories, db.budgetGroups, db.budgetTemplates, db.monthConfigs, db.settings, db.transactions, db.importRules, db.ignoredSubscriptions, async () => {
+      // Fix: Use Dexie transaction with string table names to avoid type inference issues on method names
+      await (db as any).transaction('rw', ['users', 'accounts', 'buckets', 'mainCategories', 'subCategories', 'budgetGroups', 'budgetTemplates', 'monthConfigs', 'settings', 'transactions', 'importRules', 'ignoredSubscriptions'], async () => {
           await db.users.clear(); await db.users.bulkAdd(data.users || []);
           await db.accounts.clear(); await db.accounts.bulkAdd(data.accounts || []);
           await db.buckets.clear(); await db.buckets.bulkAdd(data.buckets || []);
@@ -479,7 +487,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   const value = {
     users, accounts, buckets, mainCategories, subCategories, budgetGroups, budgetTemplates, monthConfigs, settings, selectedMonth, transactions, importRules, ignoredSubscriptions,
     setMonth, updateUserIncome, updateUserName, addBucket, updateBucket, deleteBucket, archiveBucket, addMainCategory, deleteMainCategory, addSubCategory, deleteSubCategory, updateSubCategory, resetCategoriesToDefault,
-    addBudgetGroup, updateBudgetGroup, deleteBudgetGroup, addTransactions, updateTransaction, deleteTransaction, deleteAllTransactions, addImportRule, deleteImportRule, updateImportRule, addIgnoredSubscription,
+    addBudgetGroup, updateBudgetGroup, deleteBudgetGroup, updateAccount, addTransactions, updateTransaction, deleteTransaction, deleteAllTransactions, addImportRule, deleteImportRule, updateImportRule, addIgnoredSubscription,
     setPayday, updateSettings, getExportData, importData, setBudgetLimit, toggleMonthLock, assignTemplateToMonth, clearBudgetOverride, addTemplate, updateTemplate, resetMonthToTemplate
   };
 
