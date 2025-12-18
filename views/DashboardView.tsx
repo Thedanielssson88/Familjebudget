@@ -17,10 +17,9 @@ import {
   isBucketActiveInMonth 
 } from '../utils';
 import { Card, cn, Modal, Button } from '../components/components';
-import { ArrowDown, Sliders, Landmark, Calculator, PiggyBank, LayoutGrid, BarChart3, Receipt, ChevronRight } from 'lucide-react';
+import { ArrowDown, Sliders, Landmark, Calculator, PiggyBank, LayoutGrid, BarChart3, Receipt, ChevronRight, Info } from 'lucide-react';
 import { StatsView } from './StatsView';
-// Fix: Added missing startOfDay import from date-fns
-import { format, parseISO, isBefore, isValid, isAfter, eachDayOfInterval, getDay, startOfDay } from 'date-fns';
+import { format, parseISO, isBefore, isValid, isAfter, eachDayOfInterval, getDay, startOfDay, addDays } from 'date-fns';
 
 // Simple SVG Gauge Component
 const SavingsGauge = ({ percentage }: { percentage: number }) => {
@@ -72,21 +71,18 @@ const WaterfallOverview: React.FC = () => {
     getTotalFamilyIncome(users, selectedMonth), 
   [users, selectedMonth]);
 
-  // 2. Calculate BUDGETED Outflow (Perfect mirror of OperatingBudgetView logic)
+  // 2. Calculate BUDGETED Outflow
   const budgetFlow = useMemo(() => {
     let consumption = 0;
     let savings = 0;
-    let totalFixedForBalance = 0; // Tracks cash leaving the account for surplus calculation
     
     const consumptionItems: { name: string, amount: number, type: string }[] = [];
     const savingsItems: { name: string, amount: number, type: string }[] = [];
 
     const { start, end } = getBudgetInterval(selectedMonth, settings.payday);
 
-    // Helper to map items to consumption or savings based on Group and Item flags
     const classifyAndAdd = (amount: number, name: string, type: string, isGroupSavings: boolean, isItemSavings: boolean) => {
         if (amount <= 0) return;
-        // Priority: Group level "SAVINGS" override takes priority, then item level flag
         if (isGroupSavings || isItemSavings) {
             savings += amount;
             savingsItems.push({ name, amount, type });
@@ -96,7 +92,6 @@ const WaterfallOverview: React.FC = () => {
         }
     };
 
-    // Correct bucket assignment map logic (Matches Drift View)
     const assignedBucketIds = new Set<string>();
     const groupToBuckets = new Map<string, string[]>();
 
@@ -131,7 +126,6 @@ const WaterfallOverview: React.FC = () => {
         });
     }
 
-    // MAIN LOOP: Group by Group
     budgetGroups.forEach(group => {
         const { data: explicitData } = getEffectiveBudgetGroupData(group, selectedMonth, budgetTemplates, monthConfigs);
         const manualLimit = explicitData && !explicitData.isExplicitlyDeleted ? explicitData.limit : 0;
@@ -139,7 +133,6 @@ const WaterfallOverview: React.FC = () => {
 
         let groupChildrenSum = 0;
 
-        // A. SubCategories
         const groupSubs = subCategories.filter(s => s.budgetGroupId === group.id);
         groupSubs.forEach(sub => {
             const subBudget = getEffectiveSubCategoryBudget(sub, selectedMonth, budgetTemplates, monthConfigs);
@@ -149,17 +142,14 @@ const WaterfallOverview: React.FC = () => {
             }
         });
 
-        // B. Custom Buckets (Fixed, Daily, Goals)
         const groupBucketIds = groupToBuckets.get(group.id) || [];
         buckets.filter(b => groupBucketIds.includes(b.id)).forEach(b => {
             let cost = 0;
-            let isDaily = false;
 
             if (b.type === 'FIXED') {
                 const { data } = getEffectiveBucketData(b, selectedMonth, budgetTemplates, monthConfigs);
                 cost = data ? data.amount : 0;
             } else if (b.type === 'DAILY') {
-                isDaily = true;
                 const { data } = getEffectiveBucketData(b, selectedMonth, budgetTemplates, monthConfigs);
                 if (data) {
                     const days = eachDayOfInterval({ start, end });
@@ -167,9 +157,6 @@ const WaterfallOverview: React.FC = () => {
                     cost = count * data.dailyAmount;
                 }
             } else if (b.type === 'GOAL') {
-                // GOAL LOGIC FOR WATERFALL:
-                // Only count the monthly saving contribution (Från Månadslön).
-                // Consumption/Spending budget is funded from account balance, so it's NOT included in the waterfall outflow.
                 if (b.paymentSource === 'INCOME') {
                     cost = calculateGoalBucketCost(b, selectedMonth);
                 }
@@ -178,16 +165,9 @@ const WaterfallOverview: React.FC = () => {
             if (cost > 0) {
                 groupChildrenSum += cost;
                 classifyAndAdd(cost, b.name, 'BUCKET', isGroupSavings, !!b.isSavings);
-                
-                // Track for "Current Balance" estimate (Money leaving primary account)
-                // Goal spending phase is also excluded from here because it's already "accounted for" in the assets.
-                if (!isDaily && b.paymentSource !== 'BALANCE') {
-                    totalFixedForBalance += cost;
-                }
             }
         });
 
-        // C. Group Buffer (Manual Limit - Children)
         const unallocated = Math.max(0, manualLimit - groupChildrenSum);
         if (unallocated > 0) {
             classifyAndAdd(unallocated, `Buffert: ${group.name}`, 'BUFFER', isGroupSavings, false);
@@ -197,21 +177,18 @@ const WaterfallOverview: React.FC = () => {
     return { 
         consumptionExpenses: consumption, 
         savingsExpenses: savings, 
-        totalFixedForBalance,
         consumptionItems: consumptionItems.sort((a,b) => b.amount - a.amount),
         savingsItems: savingsItems.sort((a,b) => b.amount - a.amount)
     };
   }, [buckets, budgetGroups, subCategories, selectedMonth, settings.payday, budgetTemplates, monthConfigs]);
 
-  const { consumptionExpenses, savingsExpenses, totalFixedForBalance, consumptionItems, savingsItems } = budgetFlow;
+  const { consumptionExpenses, savingsExpenses, consumptionItems, savingsItems } = budgetFlow;
 
-  // 3. Totals and Surplus
   const effectiveConsumption = consumptionExpenses + scenarioAdjustment;
   const surplus = totalActualIncome - (effectiveConsumption + savingsExpenses);
   const resultBeforeSavings = totalActualIncome - effectiveConsumption;
   const savingsRate = totalActualIncome > 0 ? (savingsExpenses / totalActualIncome) * 100 : 0;
 
-  // 4. Distribution Logic
   const { distribution } = useMemo(() => {
     const userCalculations = users.map(user => {
         const data = user.incomeData[selectedMonth];
@@ -233,28 +210,33 @@ const WaterfallOverview: React.FC = () => {
     return { distribution: dist };
   }, [users, selectedMonth, surplus]);
 
-  // Balance Estimate: Current Cash Status
-  const currentAccountBalance = useMemo(() => {
-    let dailySoFar = 0;
+  // CALCULATION FOR REMAINING DAILY BUDGET
+  // "beräknas som Dagliga budgetposter... från imorgon fram till och med dagen innan löning"
+  const dailyRemainingNeeded = useMemo(() => {
+    let total = 0;
+    const { end: intervalEnd } = getBudgetInterval(selectedMonth, settings.payday);
+    const todayRef = startOfDay(new Date());
+    const tomorrow = addDays(todayRef, 1);
+
     buckets.forEach(b => {
         if (b.type === 'DAILY') {
             const { data } = getEffectiveBucketData(b, selectedMonth, budgetTemplates, monthConfigs);
-            if (data) {
-                const { start } = getBudgetInterval(selectedMonth, settings.payday);
-                const today = startOfDay(new Date());
-                if (!isBefore(today, start)) {
-                    const days = eachDayOfInterval({ start, end: today > getBudgetInterval(selectedMonth, settings.payday).end ? getBudgetInterval(selectedMonth, settings.payday).end : today });
+            if (data && !data.isExplicitlyDeleted) {
+                const { start: intervalStart } = getBudgetInterval(selectedMonth, settings.payday);
+                
+                // Range for calculation is tomorrow -> intervalEnd (which is day before next payday)
+                const calcStart = isAfter(tomorrow, intervalStart) ? tomorrow : intervalStart;
+                
+                if (!isAfter(calcStart, intervalEnd)) {
+                    const days = eachDayOfInterval({ start: calcStart, end: intervalEnd });
                     const count = days.filter(d => data.activeDays.includes(getDay(d))).length;
-                    dailySoFar += count * data.dailyAmount;
+                    total += count * data.dailyAmount;
                 }
             }
         }
     });
-    return totalActualIncome - totalFixedForBalance - dailySoFar;
-  }, [totalActualIncome, totalFixedForBalance, buckets, selectedMonth, settings.payday, budgetTemplates, monthConfigs]);
-
-  const balanceAfterTransfers = currentAccountBalance - distribution.reduce((sum, d) => sum + d.returnAmount, 0);
-  const primaryAccountIcon = accounts.length > 0 ? accounts[0].icon : '💳';
+    return total;
+  }, [buckets, selectedMonth, settings.payday, budgetTemplates, monthConfigs]);
 
   return (
     <div className="space-y-8 animate-in fade-in duration-500">
@@ -382,31 +364,25 @@ const WaterfallOverview: React.FC = () => {
 
       {/* BALANCES SECTION */}
       <div className="grid gap-4 pt-4">
-        <div className="bg-blue-900/30 rounded-xl p-4 text-slate-300 border border-blue-500/20">
-             <div className="flex items-center gap-2 mb-2">
-                 <span className="text-xl">{primaryAccountIcon}</span>
-                 <span className="text-xs font-bold text-blue-200 uppercase tracking-wide">Saldo på överföringskonto (Just Nu)</span>
+        <div className="bg-slate-800 rounded-xl p-6 text-slate-300 border border-slate-700 shadow-xl">
+             <div className="flex items-center gap-2 mb-3">
+                 <div className="p-2 bg-indigo-500/20 rounded-lg">
+                    <Calculator className="w-5 h-5 text-indigo-400" />
+                 </div>
+                 <span className="text-xs font-bold text-slate-200 uppercase tracking-widest">Kvar på konto efter utdelning</span>
              </div>
              <div className="flex justify-between items-end">
-                 <div className="text-[10px] text-slate-400 max-w-[60%]">
-                     Beräknat saldo: Inkomst minus fasta utgifter och förbrukad rörlig budget fram till idag.
+                 <div className="text-xs text-slate-400 max-w-[65%] leading-relaxed">
+                     Detta belopp reserveras för att täcka budgeterade dagliga rörliga kostnader från imorgon fram till nästa lön.
                  </div>
-                 <span className="font-bold font-mono text-lg text-blue-100">{formatMoney(currentAccountBalance)}</span>
-             </div>
-        </div>
-
-        <div className="bg-slate-800 rounded-xl p-4 text-slate-300 border border-slate-600">
-             <div className="flex items-center gap-2 mb-2">
-                 <Calculator className="w-4 h-4 text-emerald-400" />
-                 <span className="text-xs font-bold text-slate-200 uppercase tracking-wide">Kvar på kontot efter utdelning</span>
-             </div>
-             <div className="flex justify-between items-end">
-                 <div className="text-[10px] text-slate-400 max-w-[60%]">
-                     Detta belopp ska finnas kvar efter att fickpengarna delats ut för att täcka resten av månadens drift.
+                 <div className="text-right">
+                    <div className="text-3xl font-bold font-mono text-white">
+                        {formatMoney(dailyRemainingNeeded)}
+                    </div>
+                    <div className="text-[9px] text-slate-500 uppercase font-bold tracking-tighter mt-1 flex items-center justify-end gap-1">
+                        <Info size={10}/> Beräknat behov
+                    </div>
                  </div>
-                 <span className={cn("font-bold font-mono text-lg", balanceAfterTransfers < 0 ? "text-red-400" : "text-emerald-400")}>
-                    {formatMoney(balanceAfterTransfers)}
-                 </span>
              </div>
         </div>
       </div>

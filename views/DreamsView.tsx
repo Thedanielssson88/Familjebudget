@@ -1,11 +1,11 @@
 
 import React, { useEffect, useState, useMemo } from 'react';
 import { useApp } from '../store';
-import { calculateSavedAmount, calculateGoalBucketCost, formatMoney, generateId, calculateReimbursementMap, getEffectiveAmount, getEffectiveBucketData } from '../utils';
+import { calculateSavedAmount, calculateGoalBucketCost, formatMoney, generateId, calculateReimbursementMap, getEffectiveAmount } from '../utils';
 import { PieChart, Pie, Cell, ResponsiveContainer } from 'recharts';
 import { format, parseISO, isValid, addMonths, differenceInMonths } from 'date-fns';
 import { sv } from 'date-fns/locale';
-import { Archive, CheckCircle, Pause, Play, Rocket, TrendingUp, Calendar, Trash2, Settings, Save, Search, Receipt, CheckSquare, Square, X, Unlink, Wallet, PiggyBank, PieChart as PieChartIcon, ChevronDown, ChevronRight, Plus, Target, Image as ImageIcon, Link, Calculator, ArrowRight, Plane, Landmark, RotateCcw } from 'lucide-react';
+import { Archive, CheckCircle, Pause, Play, Rocket, TrendingUp, Calendar, Trash2, Settings, Save, Search, Receipt, CheckSquare, Square, X, Unlink, Wallet, PiggyBank, PieChart as PieChartIcon, ChevronDown, ChevronRight, Plus, Target, Image as ImageIcon, Link, Calculator, ArrowRight, Plane, Landmark } from 'lucide-react';
 import { cn, Button, Modal, Input } from '../components/components';
 import { Bucket, Transaction, MainCategory, SubCategory } from '../types';
 import { EmojiPickerModal } from '../components/EmojiPicker';
@@ -29,10 +29,9 @@ interface DreamCardProps {
     onDelete: (id: string, name: string) => void;
     onEdit: (goal: Bucket) => void;
     onShowStats: (goal: Bucket) => void;
-    onEditAmount: (goal: Bucket, currentAmount: number) => void;
 }
 
-const DreamCard: React.FC<DreamCardProps> = ({ goal, isArchived, selectedMonth, transactions, onArchive, onDelete, onEdit, onShowStats, onEditAmount }) => {
+const DreamCard: React.FC<DreamCardProps> = ({ goal, isArchived, selectedMonth, transactions, onArchive, onDelete, onEdit, onShowStats }) => {
     const { updateBucket } = useApp();
     const [isIconPickerOpen, setIsIconPickerOpen] = useState(false);
 
@@ -47,27 +46,10 @@ const DreamCard: React.FC<DreamCardProps> = ({ goal, isArchived, selectedMonth, 
     }, [transactions, goal.id, reimbursementMap]);
 
     const isPaused = goal.monthlyData[selectedMonth]?.isExplicitlyDeleted;
-    // An override for a dream is present if there is an explicit amount set for that month in monthlyData
-    const isOverridden = goal.monthlyData[selectedMonth]?.amount !== undefined && goal.monthlyData[selectedMonth]?.amount > 0;
-
     let dateLabel = goal.targetDate ? format(parseISO(`${goal.targetDate}-01`), 'MMM yyyy', {locale: sv}) : 'Ej satt';
 
     const handleIconSelect = async (emoji: string) => {
         await updateBucket({ ...goal, icon: emoji });
-    };
-
-    const handleRestore = async (e: React.MouseEvent) => {
-        e.stopPropagation();
-        const nextData = { ...goal.monthlyData };
-        if (nextData[selectedMonth]) {
-            const { amount, ...rest } = nextData[selectedMonth];
-            if (Object.keys(rest).length === 0 || (Object.keys(rest).length === 1 && rest.isExplicitlyDeleted === false)) {
-                delete nextData[selectedMonth];
-            } else {
-                nextData[selectedMonth] = { ...rest };
-            }
-        }
-        await updateBucket({ ...goal, monthlyData: nextData });
     };
 
     return (
@@ -104,21 +86,9 @@ const DreamCard: React.FC<DreamCardProps> = ({ goal, isArchived, selectedMonth, 
                 </div>
 
                 <div className="grid grid-cols-2 gap-4">
-                  <div className="bg-black/30 p-3 rounded-xl border border-white/5 backdrop-blur-sm relative">
-                    <div className="text-[9px] font-bold uppercase tracking-widest text-purple-300 mb-0.5">Spara denna månad</div>
-                    <div 
-                        className={cn("text-xl font-bold font-mono transition-colors flex items-center gap-2 cursor-pointer", isOverridden ? "text-yellow-400" : "text-white hover:text-blue-400")}
-                        onClick={(e) => { 
-                            e.stopPropagation(); 
-                            const cost = calculateGoalBucketCost(goal, selectedMonth);
-                            onEditAmount(goal, cost); 
-                        }}
-                    >
-                        {formatMoney(calculateGoalBucketCost(goal, selectedMonth))}
-                        {isOverridden && (
-                            <button onClick={handleRestore} className="text-slate-400 hover:text-white p-0.5"><RotateCcw size={12} /></button>
-                        )}
-                    </div>
+                  <div className="bg-black/30 p-3 rounded-xl border border-white/5 backdrop-blur-sm">
+                    <div className="text-[9px] font-bold uppercase tracking-widest text-purple-300 mb-0.5">Total Budget</div>
+                    <div className="text-xl font-bold font-mono text-white">{formatMoney(goal.targetAmount)}</div>
                   </div>
                   <div className="bg-black/30 p-3 rounded-xl border border-white/5 backdrop-blur-sm">
                     <div className="text-[9px] font-bold uppercase tracking-widest text-rose-300 mb-0.5">Totalt Spenderat</div>
@@ -161,10 +131,6 @@ export const DreamsView: React.FC<{ onNavigate?: (view: any) => void }> = ({ onN
     const [editingGoal, setEditingGoal] = useState<Bucket | null>(null);
     const [statsGoal, setStatsGoal] = useState<Bucket | null>(null);
     const [expandedMains, setExpandedMains] = useState<Set<string>>(new Set());
-
-    // Interactive Edit state
-    const [editingBucket, setEditingBucket] = useState<Bucket | null>(null);
-    const [editAmount, setEditAmount] = useState('');
 
     const goals = useMemo(() => {
         return buckets.filter(b => b.type === 'GOAL').filter(b => showArchived ? !!b.archivedDate : !b.archivedDate).sort((a, b) => (a.targetDate || '') > (b.targetDate || '') ? 1 : -1);
@@ -223,20 +189,6 @@ export const DreamsView: React.FC<{ onNavigate?: (view: any) => void }> = ({ onN
         setIsEditModalOpen(false); 
     };
 
-    const handleEditBucket = (bucket: Bucket, currentAmount: number) => {
-        setEditingBucket(bucket);
-        setEditAmount(currentAmount.toString());
-    };
-
-    const saveDreamOverride = async () => {
-        if (!editingBucket) return;
-        const val = parseFloat(editAmount) || 0;
-        const nextData = { ...editingBucket.monthlyData };
-        nextData[selectedMonth] = { ...(nextData[selectedMonth] || { dailyAmount: 0, activeDays: [] }), amount: val, isExplicitlyDeleted: false };
-        await updateBucket({ ...editingBucket, monthlyData: nextData });
-        setEditingBucket(null);
-    };
-
     return (
         <div className="space-y-6 pb-24 animate-in slide-in-from-right duration-300">
             <header className="flex flex-col gap-4">
@@ -276,7 +228,6 @@ export const DreamsView: React.FC<{ onNavigate?: (view: any) => void }> = ({ onN
                         onDelete={handleDelete} 
                         onEdit={(g) => {setEditingGoal(g); setIsEditModalOpen(true);}} 
                         onShowStats={(g) => setStatsGoal(g)}
-                        onEditAmount={handleEditBucket}
                     />
                 ))}
                 {!showArchived && (
@@ -304,32 +255,63 @@ export const DreamsView: React.FC<{ onNavigate?: (view: any) => void }> = ({ onN
                       <Plus className="w-6 h-6 mr-2" /> Skapa Ny Dröm
                   </Button>
                 )}
+                {goals.length === 0 && (
+                    <div className="text-center py-20 bg-slate-900/30 rounded-3xl border-2 border-dashed border-slate-800">
+                        <Rocket className="w-12 h-12 text-slate-700 mx-auto mb-4" />
+                        <h3 className="text-slate-500 font-bold">Inga drömmar här än</h3>
+                        <p className="text-slate-600 text-sm">Börja planera din nästa milstolpe.</p>
+                    </div>
+                )}
             </div>
 
             <Modal isOpen={isEditModalOpen} onClose={() => setIsEditModalOpen(false)} title={editingGoal?.name ? `Redigera ${editingGoal.name}` : "Ny Dröm"}>
                 {editingGoal && (
                     <div className="space-y-5">
                         <Input label="Namn på drömmen" value={editingGoal.name} onChange={e => setEditingGoal({...editingGoal, name: e.target.value})} autoFocus placeholder="T.ex. Sommarresa, Ny bil, Buffert" />
+                        
                         <div className="space-y-2">
-                          <label className="text-xs font-bold text-slate-400 uppercase tracking-wider">Kopplat Konto</label>
-                          <select value={editingGoal.accountId} onChange={(e) => setEditingGoal({...editingGoal, accountId: e.target.value})} className="w-full bg-slate-900 border border-slate-700 rounded-xl px-4 py-3 text-white">
+                          <label className="text-xs font-bold text-slate-500 uppercase tracking-wider">Kopplat Konto</label>
+                          <select 
+                            value={editingGoal.accountId} 
+                            onChange={(e) => setEditingGoal({...editingGoal, accountId: e.target.value})} 
+                            className="w-full bg-slate-900 border border-slate-700 rounded-xl px-4 py-3 text-white focus:outline-none focus:ring-2 focus:ring-purple-500 focus:border-transparent transition-all"
+                          >
                             {accounts.map(acc => (<option key={acc.id} value={acc.id}>{acc.icon} {acc.name}</option>))}
                           </select>
                         </div>
+
+                        <div className="space-y-3">
+                            <label className="text-xs font-bold text-slate-500 uppercase tracking-wider">Finansiering (Waterfall)</label>
+                            <div className="grid grid-cols-2 gap-2">
+                                <button 
+                                    onClick={() => setEditingGoal({...editingGoal, paymentSource: 'INCOME'})}
+                                    className={cn("flex flex-col items-center gap-2 p-3 rounded-xl border transition-all", editingGoal.paymentSource === 'INCOME' ? "bg-purple-500/20 border-purple-500 text-purple-200" : "bg-slate-900 border-slate-800 text-slate-500 hover:bg-slate-800")}
+                                >
+                                    <Wallet size={20} />
+                                    <span className="text-[10px] font-bold uppercase">Från Månadslön</span>
+                                </button>
+                                <button 
+                                    onClick={() => setEditingGoal({...editingGoal, paymentSource: 'BALANCE'})}
+                                    className={cn("flex flex-col items-center gap-2 p-3 rounded-xl border transition-all", editingGoal.paymentSource === 'BALANCE' ? "bg-amber-500/20 border-amber-500 text-amber-200" : "bg-slate-900 border-slate-800 text-slate-500 hover:bg-slate-800")}
+                                >
+                                    <Landmark size={20} />
+                                    <span className="text-[10px] font-bold uppercase">Sparade Medel</span>
+                                </button>
+                            </div>
+                        </div>
+
                         <Input label="Målbelopp (kr)" type="number" value={editingGoal.targetAmount} onChange={e => setEditingGoal({...editingGoal, targetAmount: Number(e.target.value)})} placeholder="0" />
+                        
                         <div className="grid grid-cols-2 gap-4">
-                          <Input label="Startmånad" type="month" value={editingGoal.startSavingDate} onChange={e => setEditingGoal({...editingGoal, startSavingDate: e.target.value})} />
-                          <Input label="Målmånad" type="month" value={editingGoal.targetDate} onChange={e => setEditingGoal({...editingGoal, targetDate: e.target.value})} />
+                          <Input label="Startmånad (Spara)" type="month" value={editingGoal.startSavingDate} onChange={e => setEditingGoal({...editingGoal, startSavingDate: e.target.value})} />
+                          <Input label="Målmånad (Köp)" type="month" value={editingGoal.targetDate} onChange={e => setEditingGoal({...editingGoal, targetDate: e.target.value})} />
                         </div>
 
                         {/* --- DATUMINSTÄLLNINGAR FÖR RESA/EVENT --- */}
-                        <div className="bg-slate-900/50 p-4 rounded-xl border border-slate-700 space-y-4 mt-4">
-                            <div className="flex items-center gap-2 mb-2">
-                                <span className="text-xl">✈️</span>
-                                <h4 className="text-xs font-bold text-slate-400 uppercase tracking-wider">
-                                    Reseplanering
-                                </h4>
-                            </div>
+                        <div className="bg-slate-900/50 p-4 rounded-xl border border-slate-700 space-y-4">
+                            <h4 className="text-xs font-bold text-slate-400 uppercase tracking-wider flex items-center gap-2">
+                                <Calendar size={12} /> Reseplanering
+                            </h4>
                             
                             <div className="grid grid-cols-2 gap-4">
                                 <div>
@@ -352,7 +334,7 @@ export const DreamsView: React.FC<{ onNavigate?: (view: any) => void }> = ({ onN
                                 </div>
                             </div>
 
-                            {/* SEPARAT CHECKBOX FÖR ATT AKTIVERA AUTOMATISK BOKFÖRING */}
+                            {/* SEPARAT CHECKBOX FÖR IMPORT-REGLEN */}
                             {editingGoal.eventStartDate && editingGoal.eventEndDate && (
                                 <div className="flex items-start gap-3 p-3 bg-blue-500/10 rounded-lg border border-blue-500/20">
                                     <input
@@ -364,38 +346,37 @@ export const DreamsView: React.FC<{ onNavigate?: (view: any) => void }> = ({ onN
                                     />
                                     <label htmlFor="autoTag" className="text-sm text-slate-300 cursor-pointer">
                                         <span className="block text-white font-medium mb-0.5">Automatisera Import</span>
-                                        Alla kortköp som görs mellan dessa datum kommer automatiskt bokföras mot denna resa.
+                                        Koppla automatiskt alla mina kortköp till denna resa under datumen ovan.
                                     </label>
                                 </div>
                             )}
                         </div>
 
+                        <div className="space-y-3">
+                            <label className="text-xs font-bold text-slate-500 uppercase tracking-wider block">Bakgrundsbild</label>
+                            <div className="flex gap-2 overflow-x-auto pb-2 no-scrollbar">
+                                {DREAM_IMAGES.map((img, i) => (
+                                    <button 
+                                      key={i} 
+                                      onClick={() => setEditingGoal({...editingGoal, backgroundImage: img})} 
+                                      className={cn(
+                                        "w-16 h-16 shrink-0 rounded-xl overflow-hidden border-2 transition-all relative", 
+                                        editingGoal.backgroundImage === img ? "border-purple-500 scale-110 shadow-lg shadow-purple-500/20" : "border-transparent opacity-50 hover:opacity-100"
+                                      )}
+                                    >
+                                        <img src={img} className="w-full h-full object-cover" alt="theme" />
+                                        {editingGoal.backgroundImage === img && <div className="absolute inset-0 bg-purple-500/20 flex items-center justify-center"><CheckCircle className="text-white w-6 h-6" /></div>}
+                                    </button>
+                                ))}
+                            </div>
+                        </div>
+
                         <div className="pt-4 flex gap-3">
                           <Button variant="secondary" onClick={() => setIsEditModalOpen(false)} className="flex-1">Avbryt</Button>
-                          <Button onClick={handleSaveGoal} disabled={!editingGoal.name} className="flex-1 bg-purple-600">Spara Dröm</Button>
+                          <Button onClick={handleSaveGoal} disabled={!editingGoal.name} className="flex-1 bg-purple-600 hover:bg-purple-500 shadow-lg shadow-purple-900/20">Spara Dröm</Button>
                         </div>
                     </div>
                 )}
-            </Modal>
-
-            {/* EDIT SAVING AMOUNT MODAL (DREAMS) */}
-            <Modal isOpen={!!editingBucket} onClose={() => setEditingBucket(null)} title={`Ändra sparande: ${editingBucket?.name}`}>
-                <div className="space-y-6">
-                    <div className="bg-slate-800 p-4 rounded-xl text-center border border-slate-700">
-                        <label className="text-xs text-slate-400 uppercase font-bold mb-2 block">Spara denna månad</label>
-                        <Input 
-                            type="number" 
-                            value={editAmount} 
-                            onChange={(e) => setEditAmount(e.target.value)}
-                            className="text-center text-3xl font-mono"
-                            autoFocus
-                        />
-                        <p className="text-[10px] text-slate-500 mt-2 italic leading-relaxed">
-                            Ändringar denna månad justerar framtida sparbehov automatiskt för att nå målet.
-                        </p>
-                    </div>
-                    <Button onClick={saveDreamOverride} className="w-full bg-purple-600">Bekräfta</Button>
-                </div>
             </Modal>
 
             <Modal isOpen={!!statsGoal} onClose={() => setStatsGoal(null)} title={`Detaljer: ${statsGoal?.name}`}>
@@ -411,35 +392,64 @@ export const DreamsView: React.FC<{ onNavigate?: (view: any) => void }> = ({ onN
                                 <div className="text-xl font-mono font-bold text-rose-400">{formatMoney(statsData.totalBooked)}</div>
                             </div>
                         </div>
+
                         <div className="space-y-3">
-                            {statsData.breakdown.map(main => {
-                                const isExpanded = expandedMains.has(main.id);
-                                return (
-                                    <div key={main.id} className="bg-slate-900/50 rounded-xl border border-slate-700 overflow-hidden">
-                                        <div className="flex justify-between items-center p-3 cursor-pointer hover:bg-slate-800 transition-colors" onClick={() => toggleMain(main.id)}>
-                                          <div className="flex items-center gap-3">
-                                            {isExpanded ? <ChevronDown size={16} className="text-blue-400"/> : <ChevronRight size={16} className="text-slate-500"/>}
-                                            <span className="font-bold text-white text-sm">{main.name}</span>
-                                          </div>
-                                          <span className="font-mono text-white text-xs">{formatMoney(main.total)}</span>
-                                        </div>
-                                        {isExpanded && (
-                                          <div className="bg-black/20 border-t border-slate-800 pb-2">
-                                            {main.subs.map(sub => (
-                                              <div key={sub.id} className="p-3 border-b border-white/5 last:border-0">
-                                                <div className="flex justify-between items-center px-2 mb-2"><span className="text-xs text-slate-300 font-medium">{sub.name}</span><span className="text-xs font-mono text-slate-400">{formatMoney(sub.total)}</span></div>
-                                                <div className="space-y-1.5 pl-2">{sub.transactions.map(t => (
-                                                    <div key={t.id} className="flex justify-between items-center text-[10px] bg-white/5 p-2 rounded-lg"><div className="flex flex-col"><span className="text-slate-200 font-medium">{t.description}</span><span className="text-slate-500">{t.date}</span></div><span className="font-mono text-slate-400">{formatMoney(Math.abs(getEffectiveAmount(t, reimbursementMap)))}</span></div>
-                                                ))}</div>
+                            <h3 className="text-xs font-bold text-slate-400 uppercase tracking-widest px-1">Uppdelning per kategori</h3>
+                            <div className="space-y-2">
+                                {statsData.breakdown.map(main => {
+                                    const isExpanded = expandedMains.has(main.id);
+                                    return (
+                                        <div key={main.id} className="bg-slate-900/50 rounded-xl border border-slate-700 overflow-hidden">
+                                            <div 
+                                              className="flex justify-between items-center p-3 cursor-pointer hover:bg-slate-800 transition-colors"
+                                              onClick={() => toggleMain(main.id)}
+                                            >
+                                              <div className="flex items-center gap-3">
+                                                {isExpanded ? <ChevronDown size={16} className="text-blue-400"/> : <ChevronRight size={16} className="text-slate-500"/>}
+                                                <span className="font-bold text-white text-sm">{main.name}</span>
                                               </div>
-                                            ))}
-                                          </div>
-                                        )}
+                                              <span className="font-mono text-white text-xs">{formatMoney(main.total)}</span>
+                                            </div>
+                                            {isExpanded && (
+                                              <div className="bg-black/20 border-t border-slate-800 pb-2">
+                                                {main.subs.map(sub => (
+                                                  <div key={sub.id} className="space-y-2 p-3 border-b border-white/5 last:border-0">
+                                                    <div className="flex justify-between items-center px-2">
+                                                      <span className="text-xs text-slate-300 font-medium">{sub.name}</span>
+                                                      <span className="text-xs font-mono text-slate-400">{formatMoney(sub.total)}</span>
+                                                    </div>
+                                                    <div className="space-y-1.5 pl-2">
+                                                      {sub.transactions.map(t => {
+                                                        const eff = Math.abs(getEffectiveAmount(t, reimbursementMap));
+                                                        return (
+                                                          <div key={t.id} className="flex justify-between items-center text-[10px] bg-white/5 p-2 rounded-lg">
+                                                            <div className="flex flex-col">
+                                                              <span className="text-slate-200 font-medium">{t.description}</span>
+                                                              <span className="text-slate-500">{t.date}</span>
+                                                            </div>
+                                                            <span className="font-mono text-slate-400">{formatMoney(eff)}</span>
+                                                          </div>
+                                                        );
+                                                      })}
+                                                    </div>
+                                                  </div>
+                                                ))}
+                                              </div>
+                                            )}
+                                        </div>
+                                    );
+                                })}
+                                {statsData.breakdown.length === 0 && (
+                                    <div className="text-center py-8 text-slate-500 italic bg-slate-900/30 rounded-xl border border-slate-800 border-dashed">
+                                        Inga utgifter bokförda än.
                                     </div>
-                                );
-                            })}
+                                )}
+                            </div>
                         </div>
-                        <Button variant="secondary" onClick={() => setStatsGoal(null)} className="w-full">Stäng</Button>
+                        
+                        <div className="pt-2 flex justify-end">
+                          <Button variant="secondary" onClick={() => setStatsGoal(null)} className="w-full">Stäng</Button>
+                        </div>
                     </div>
                 )}
             </Modal>
