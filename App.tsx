@@ -10,11 +10,12 @@ import { TransactionsView } from './views/TransactionsView';
 import { SettingsCategories } from './views/SettingsCategories';
 import { SettingsAccounts } from './views/SettingsAccounts'; 
 import { HousingCalculator } from './views/HousingCalculator';
-import { LayoutGrid, Wallet, PieChart, ArrowLeftRight, Calendar, Settings, Sparkles, Cloud, RefreshCw, Trash2, Download, Receipt, Database, AlertTriangle, Home, ChevronDown, Plus, Layout, X, Check } from 'lucide-react';
+import { LayoutGrid, Wallet, PieChart, ArrowLeftRight, Calendar, Settings, Sparkles, Cloud, RefreshCw, Trash2, Download, Receipt, Database, AlertTriangle, Home, ChevronDown, Plus, Layout, X, Check, Edit2 } from 'lucide-react';
 import { cn, Button, Modal, Input } from './components/components';
 import { format, subMonths, addMonths } from 'date-fns';
 import { sv } from 'date-fns/locale';
 import { initGoogleDrive, loginToGoogle, listBackups, createBackupFile, loadBackupFile, deleteBackupFile, DriveFile } from './services/googleDrive';
+import { Budget } from './types';
 
 type View = 'home' | 'budget' | 'dashboard' | 'dreams' | 'transactions' | 'housing-calculator';
 
@@ -23,12 +24,13 @@ const MainApp = () => {
   const { 
     selectedMonth, setMonth, settings, setPayday, updateSettings, 
     getExportData, importData, deleteAllTransactions, users, updateUserName,
-    budgets, activeBudgetId, setActiveBudget, addBudget, deleteBudget
+    budgets, activeBudgetId, setActiveBudget, addBudget, deleteBudget, updateBudget
   } = useApp();
   
   const [showSettings, setShowSettings] = useState(false);
   const [showBudgetPicker, setShowBudgetPicker] = useState(false);
   const [isAddingBudget, setIsAddingBudget] = useState(false);
+  const [renamingBudget, setRenamingBudget] = useState<Budget | null>(null);
   const [newBudgetName, setNewBudgetName] = useState('');
   const [newBudgetIcon, setNewBudgetIcon] = useState('🏠');
   
@@ -154,6 +156,14 @@ const MainApp = () => {
       setNewBudgetName('');
   };
 
+  const handleSaveRename = async () => {
+      if (renamingBudget && newBudgetName.trim()) {
+          await updateBudget({ ...renamingBudget, name: newBudgetName, icon: newBudgetIcon });
+          setRenamingBudget(null);
+          setNewBudgetName('');
+      }
+  };
+
   const handleDeleteBudget = async (id: string, name: string) => {
       if (confirm(`Är du helt säker på att du vill radera budgeten "${name}"? All data på kontot kommer försvinna.`)) {
           await deleteBudget(id);
@@ -232,22 +242,32 @@ const MainApp = () => {
                                   <span className="font-bold text-sm">{b.name}</span>
                                   {b.id === activeBudgetId && <Check size={16} className="ml-auto" />}
                               </button>
-                              {budgets.length > 1 && (
+                              <div className="flex opacity-0 group-hover:opacity-100 transition-opacity">
                                   <button 
-                                    onClick={() => handleDeleteBudget(b.id, b.name)}
-                                    className="p-3 text-slate-600 hover:text-rose-400 transition-colors opacity-0 group-hover:opacity-100"
+                                    onClick={() => { setRenamingBudget(b); setNewBudgetName(b.name); setNewBudgetIcon(b.icon); }}
+                                    className="p-2 text-slate-500 hover:text-blue-400 transition-colors"
+                                    title="Byt namn"
                                   >
-                                      <Trash2 size={16}/>
+                                      <Edit2 size={16}/>
                                   </button>
-                              )}
+                                  {budgets.length > 1 && (
+                                      <button 
+                                        onClick={() => handleDeleteBudget(b.id, b.name)}
+                                        className="p-2 text-slate-500 hover:text-rose-400 transition-colors"
+                                        title="Radera budget"
+                                      >
+                                          <Trash2 size={16}/>
+                                      </button>
+                                  )}
+                              </div>
                           </div>
                       ))}
                       <button 
-                        onClick={() => setIsAddingBudget(true)}
+                        onClick={() => { setIsAddingBudget(true); setNewBudgetName(''); setNewBudgetIcon('🏠'); }}
                         className="w-full flex items-center gap-3 p-3 rounded-xl hover:bg-slate-800 text-blue-400 font-bold text-sm transition-all"
                       >
                           <Plus size={18} />
-                          <span>Lägg till privat budget</span>
+                          <span>Skapa ny budget</span>
                       </button>
                   </div>
               </div>
@@ -255,14 +275,14 @@ const MainApp = () => {
       )}
 
       {/* NEW BUDGET MODAL */}
-      <Modal isOpen={isAddingBudget} onClose={() => setIsAddingBudget(false)} title="Ny Privat Budget">
+      <Modal isOpen={isAddingBudget} onClose={() => setIsAddingBudget(false)} title="Ny Budget">
           <div className="space-y-4">
               <p className="text-sm text-slate-400">Skapa en separat ekonomisk profil för t.ex. ditt egna företag eller personlig fickpeng.</p>
               <Input label="Namn" value={newBudgetName} onChange={e => setNewBudgetName(e.target.value)} placeholder="Min Egen Budget" autoFocus />
               <div>
                   <label className="text-xs font-bold text-slate-500 uppercase tracking-widest mb-2 block">Välj Ikon</label>
                   <div className="flex gap-3 overflow-x-auto no-scrollbar pb-2">
-                      {['🏠', '👤', '💼', '💳', '📈', '🚀', '🛠️'].map(emoji => (
+                      {['🏠', '👤', '💼', '💳', '📈', '🚀', '🛠️', '💎', '🛒', '🌴'].map(emoji => (
                           <button 
                             key={emoji}
                             onClick={() => setNewBudgetIcon(emoji)}
@@ -277,6 +297,34 @@ const MainApp = () => {
                   </div>
               </div>
               <Button onClick={handleAddBudget} className="w-full" disabled={!newBudgetName.trim()}>Skapa Budget</Button>
+          </div>
+      </Modal>
+
+      {/* RENAME BUDGET MODAL */}
+      <Modal isOpen={!!renamingBudget} onClose={() => setRenamingBudget(null)} title="Redigera Budget">
+          <div className="space-y-4">
+              <Input label="Namn" value={newBudgetName} onChange={e => setNewBudgetName(e.target.value)} placeholder="Budgetens namn" autoFocus />
+              <div>
+                  <label className="text-xs font-bold text-slate-500 uppercase tracking-widest mb-2 block">Välj Ikon</label>
+                  <div className="flex gap-3 overflow-x-auto no-scrollbar pb-2">
+                      {['🏠', '👤', '💼', '💳', '📈', '🚀', '🛠️', '💎', '🛒', '🌴'].map(emoji => (
+                          <button 
+                            key={emoji}
+                            onClick={() => setNewBudgetIcon(emoji)}
+                            className={cn(
+                                "text-2xl p-3 rounded-xl border transition-all",
+                                newBudgetIcon === emoji ? "bg-blue-600 border-blue-400 scale-110 shadow-lg" : "bg-slate-800 border-slate-700 hover:bg-slate-700"
+                            )}
+                          >
+                              {emoji}
+                          </button>
+                      ))}
+                  </div>
+              </div>
+              <div className="flex gap-2">
+                <Button variant="secondary" onClick={() => setRenamingBudget(null)} className="flex-1">Avbryt</Button>
+                <Button onClick={handleSaveRename} className="flex-1" disabled={!newBudgetName.trim()}>Spara ändringar</Button>
+              </div>
           </div>
       </Modal>
 

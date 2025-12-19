@@ -30,6 +30,7 @@ interface AppContextType {
   setActiveBudget: (id: string) => void;
   addBudget: (name: string, icon: string) => Promise<string>;
   deleteBudget: (id: string) => Promise<void>;
+  updateBudget: (budget: Budget) => Promise<void>;
   
   setMonth: (month: MonthKey) => void;
   updateUserIncome: (userId: string, month: MonthKey, type: 'salary'|'childBenefit'|'insurance'|'vabDays'|'dailyDeduction', amount: number) => Promise<void>;
@@ -209,6 +210,11 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       await db.budgets.add(newBudget);
       setBudgets(prev => [...prev, newBudget]);
       return id;
+  };
+
+  const updateBudget = async (budget: Budget) => {
+      await db.budgets.put(budget);
+      setBudgets(prev => prev.map(b => b.id === budget.id ? budget : b));
   };
 
   const deleteBudget = async (id: string) => {
@@ -569,7 +575,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   };
 
   const value = {
-    budgets, activeBudgetId, setActiveBudget, addBudget, deleteBudget,
+    budgets, activeBudgetId, setActiveBudget, addBudget, deleteBudget, updateBudget,
     users, accounts, buckets, mainCategories, subCategories, budgetGroups, budgetTemplates, monthConfigs, settings, selectedMonth, transactions, importRules, ignoredSubscriptions,
     setMonth, updateUserIncome, updateUserName, addAccount, updateAccount, deleteAccount, addBucket, updateBucket, deleteBucket, archiveBucket, addMainCategory, deleteMainCategory, addSubCategory, deleteSubCategory, updateSubCategory, resetCategoriesToDefault,
     addBudgetGroup, updateBudgetGroup, deleteBudgetGroup, addTransactions, updateTransaction, deleteTransaction, deleteAllTransactions, addImportRule, deleteImportRule, updateImportRule, addIgnoredSubscription,
