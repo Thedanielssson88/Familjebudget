@@ -1,19 +1,18 @@
 
 import React, { useState, useEffect } from 'react';
 import { AppProvider, useApp } from './store';
-import { IncomeView } from './views/IncomeView'; // Still needed if referenced, but actually we can remove if only BudgetView uses it. Wait, BudgetView imports it.
 import { BudgetView } from './views/BudgetView';
-import { DashboardView } from './views/DashboardView'; // Keep file name, rename UI
-import { HomeDashboardView } from './views/HomeDashboardView'; // NEW
+import { DashboardView } from './views/DashboardView'; 
+import { HomeDashboardView } from './views/HomeDashboardView'; 
 import { StatsView } from './views/StatsView';
 import { DreamsView } from './views/DreamsView';
 import { TransactionsView } from './views/TransactionsView';
 import { SettingsCategories } from './views/SettingsCategories';
 import { SettingsAccounts } from './views/SettingsAccounts'; 
-import { OperatingBudgetView } from './views/OperatingBudgetView';
 import { HousingCalculator } from './views/HousingCalculator';
-import { LayoutGrid, Wallet, PieChart, ArrowLeftRight, Calendar, Settings, Sparkles, Cloud, RefreshCw, Trash2, Download, Receipt, Database, AlertTriangle, Home } from 'lucide-react';
-import { cn, Button } from './components/components';
+// Added missing X and Check icons to lucide-react imports
+import { LayoutGrid, Wallet, PieChart, ArrowLeftRight, Calendar, Settings, Sparkles, Cloud, RefreshCw, Trash2, Download, Receipt, Database, AlertTriangle, Home, ChevronDown, Plus, Layout, X, Check } from 'lucide-react';
+import { cn, Button, Modal, Input } from './components/components';
 import { format, subMonths, addMonths } from 'date-fns';
 import { sv } from 'date-fns/locale';
 import { initGoogleDrive, loginToGoogle, listBackups, createBackupFile, loadBackupFile, deleteBackupFile, DriveFile } from './services/googleDrive';
@@ -22,8 +21,17 @@ type View = 'home' | 'budget' | 'dashboard' | 'dreams' | 'transactions' | 'housi
 
 const MainApp = () => {
   const [currentView, setCurrentView] = useState<View>('home');
-  const { selectedMonth, setMonth, settings, setPayday, updateSettings, getExportData, importData, deleteAllTransactions, users, updateUserName } = useApp();
+  const { 
+    selectedMonth, setMonth, settings, setPayday, updateSettings, 
+    getExportData, importData, deleteAllTransactions, users, updateUserName,
+    budgets, activeBudgetId, setActiveBudget, addBudget, deleteBudget
+  } = useApp();
+  
   const [showSettings, setShowSettings] = useState(false);
+  const [showBudgetPicker, setShowBudgetPicker] = useState(false);
+  const [isAddingBudget, setIsAddingBudget] = useState(false);
+  const [newBudgetName, setNewBudgetName] = useState('');
+  const [newBudgetIcon, setNewBudgetIcon] = useState('🏠');
   
   // Google Drive State
   const [driveInitialized, setDriveInitialized] = useState(false);
@@ -89,12 +97,10 @@ const MainApp = () => {
       setBackupStatus('Återställer...');
       try {
           const jsonContent = await loadBackupFile(fileId);
-          // AWAIT the import process to ensure DB is populated before reload
           const success = await importData(jsonContent);
           
           if (success) {
               setBackupStatus('Återställd! Laddar om...');
-              // Give the user a moment to see the success message before reloading
               setTimeout(() => {
                   window.location.reload(); 
               }, 2000);
@@ -123,8 +129,6 @@ const MainApp = () => {
       
       setBackupStatus('Rensar...');
       try {
-          // backups are ordered by createdTime desc (newest first)
-          // Keep index 0, delete rest
           const toDelete = backups.slice(1);
           for (const file of toDelete) {
               await deleteBackupFile(file.id);
@@ -141,6 +145,23 @@ const MainApp = () => {
           await deleteAllTransactions();
       }
   };
+
+  const handleAddBudget = async () => {
+      if (!newBudgetName.trim()) return;
+      const id = await addBudget(newBudgetName, newBudgetIcon);
+      setActiveBudget(id);
+      setIsAddingBudget(false);
+      setShowBudgetPicker(false);
+      setNewBudgetName('');
+  };
+
+  const handleDeleteBudget = async (id: string, name: string) => {
+      if (confirm(`Är du helt säker på att du vill radera budgeten "${name}"? All data på kontot kommer försvinna.`)) {
+          await deleteBudget(id);
+      }
+  };
+
+  const activeBudget = budgets.find(b => b.id === activeBudgetId);
   
   const renderView = () => {
     switch (currentView) {
@@ -162,42 +183,129 @@ const MainApp = () => {
             <div className="bg-blue-600 rounded-lg p-1.5">
                 <LayoutGrid className="w-5 h-5 text-white" />
             </div>
-            <span className="font-bold text-lg tracking-tight">FamilyFlow</span>
+            <span className="font-bold text-lg tracking-tight hidden sm:inline">FamilyFlow</span>
         </div>
+        
         <div className="flex items-center bg-slate-800 rounded-full px-1 py-1">
             <button onClick={() => changeMonth(-1)} className="p-2 hover:text-white text-slate-400 transition-colors">←</button>
-            <span className="text-sm font-semibold px-2 w-28 text-center capitalize">
+            <span className="text-sm font-semibold px-2 w-24 sm:w-28 text-center capitalize overflow-hidden whitespace-nowrap">
                 {format(new Date(`${selectedMonth}-01`), 'MMM yyyy', { locale: sv })}
             </span>
             <button onClick={() => changeMonth(1)} className="p-2 hover:text-white text-slate-400 transition-colors">→</button>
         </div>
-        <button onClick={() => setShowSettings(!showSettings)} className={cn("p-2 transition-colors", showSettings ? "text-blue-400" : "text-slate-400 hover:text-white")}>
-            <Settings className="w-5 h-5" />
-        </button>
+
+        <div className="flex items-center gap-1 sm:gap-2">
+            {/* BUDGET SWITCHER */}
+            <button 
+                onClick={() => setShowBudgetPicker(true)}
+                className="flex items-center gap-1.5 bg-slate-800 hover:bg-slate-700 px-3 py-2 rounded-xl border border-slate-700 transition-all active:scale-95 group"
+            >
+                <span className="text-lg leading-none">{activeBudget?.icon}</span>
+                <span className="text-xs font-bold text-white hidden md:inline">{activeBudget?.name}</span>
+                <ChevronDown size={14} className="text-slate-500 group-hover:text-slate-300" />
+            </button>
+
+            <button onClick={() => {setShowSettings(!showSettings); setShowBudgetPicker(false);}} className={cn("p-2 rounded-xl transition-colors", showSettings ? "bg-blue-600 text-white" : "text-slate-400 hover:text-white hover:bg-slate-800")}>
+                <Settings className="w-5 h-5" />
+            </button>
+        </div>
       </div>
+
+      {/* BUDGET PICKER OVERLAY */}
+      {showBudgetPicker && (
+          <div className="fixed inset-0 z-50 flex items-start justify-center pt-20 px-4 bg-black/60 backdrop-blur-sm animate-in fade-in duration-200" onClick={() => setShowBudgetPicker(false)}>
+              <div className="bg-surface w-full max-w-xs rounded-3xl border border-slate-700 shadow-2xl overflow-hidden" onClick={e => e.stopPropagation()}>
+                  <div className="p-4 border-b border-slate-700 bg-slate-800/50 flex justify-between items-center">
+                      <h3 className="font-bold text-sm text-slate-400 uppercase tracking-widest">Välj Budget</h3>
+                      <button onClick={() => setShowBudgetPicker(false)} className="text-slate-500 hover:text-white"><X size={18}/></button>
+                  </div>
+                  <div className="p-2 space-y-1">
+                      {budgets.map(b => (
+                          <div key={b.id} className="group flex items-center gap-1">
+                              <button 
+                                onClick={() => {setActiveBudget(b.id); setShowBudgetPicker(false);}}
+                                className={cn(
+                                    "flex-1 flex items-center gap-3 p-3 rounded-xl transition-all",
+                                    b.id === activeBudgetId ? "bg-blue-600 text-white shadow-lg" : "hover:bg-slate-800 text-slate-300"
+                                )}
+                              >
+                                  <span className="text-xl leading-none">{b.icon}</span>
+                                  <span className="font-bold text-sm">{b.name}</span>
+                                  {b.id === activeBudgetId && <Check size={16} className="ml-auto" />}
+                              </button>
+                              {budgets.length > 1 && (
+                                  <button 
+                                    onClick={() => handleDeleteBudget(b.id, b.name)}
+                                    className="p-3 text-slate-600 hover:text-rose-400 transition-colors opacity-0 group-hover:opacity-100"
+                                  >
+                                      <Trash2 size={16}/>
+                                  </button>
+                              )}
+                          </div>
+                      ))}
+                      <button 
+                        onClick={() => setIsAddingBudget(true)}
+                        className="w-full flex items-center gap-3 p-3 rounded-xl hover:bg-slate-800 text-blue-400 font-bold text-sm transition-all"
+                      >
+                          <Plus size={18} />
+                          <span>Lägg till privat budget</span>
+                      </button>
+                  </div>
+              </div>
+          </div>
+      )}
+
+      {/* NEW BUDGET MODAL */}
+      <Modal isOpen={isAddingBudget} onClose={() => setIsAddingBudget(false)} title="Ny Privat Budget">
+          <div className="space-y-4">
+              <p className="text-sm text-slate-400">Skapa en separat ekonomisk profil för t.ex. ditt egna företag eller personlig fickpeng.</p>
+              <Input label="Namn" value={newBudgetName} onChange={e => setNewBudgetName(e.target.value)} placeholder="Min Egen Budget" autoFocus />
+              <div>
+                  <label className="text-xs font-bold text-slate-500 uppercase tracking-widest mb-2 block">Välj Ikon</label>
+                  <div className="flex gap-3 overflow-x-auto no-scrollbar pb-2">
+                      {['🏠', '👤', '💼', '💼', '💳', '📈', '🚀', '🛠️'].map(emoji => (
+                          <button 
+                            key={emoji}
+                            onClick={() => setNewBudgetIcon(emoji)}
+                            className={cn(
+                                "text-2xl p-3 rounded-xl border transition-all",
+                                newBudgetIcon === emoji ? "bg-blue-600 border-blue-400 scale-110 shadow-lg" : "bg-slate-800 border-slate-700 hover:bg-slate-700"
+                            )}
+                          >
+                              {emoji}
+                          </button>
+                      ))}
+                  </div>
+              </div>
+              <Button onClick={handleAddBudget} className="w-full" disabled={!newBudgetName.trim()}>Skapa Budget</Button>
+          </div>
+      </Modal>
 
       {/* SETTINGS DRAWER */}
       {showSettings && (
-          <div className="bg-slate-900 border-b border-slate-800 p-4 animate-in slide-in-from-top-2 space-y-6 max-h-[85vh] overflow-y-auto shadow-2xl">
+          <div className="bg-slate-900 border-b border-slate-800 p-4 animate-in slide-in-from-top-2 space-y-6 max-h-[85vh] overflow-y-auto shadow-2xl no-scrollbar">
               
               {/* General Settings */}
               <div>
-                <h3 className="font-bold text-sm text-slate-400 uppercase mb-2">Inställningar</h3>
+                <h3 className="font-bold text-sm text-slate-400 uppercase mb-2">Inställningar ({activeBudget?.name})</h3>
                 <div className="space-y-4">
                     {/* Profilinställningar */}
                     <div className="bg-slate-800/50 p-4 rounded-xl border border-slate-700/50 space-y-3 mb-4">
-                        <h4 className="text-xs font-bold text-slate-400 uppercase tracking-wider">Profil</h4>
-                        {users.length > 0 && (
-                            <div className="space-y-2">
-                                <label className="text-xs text-slate-500">Ditt namn</label>
-                                <input 
-                                    type="text" 
-                                    value={users[0].name} 
-                                    onChange={(e) => updateUserName(users[0].id, e.target.value)}
-                                    className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-white focus:border-blue-500 outline-none"
-                                />
+                        <h4 className="text-xs font-bold text-slate-400 uppercase tracking-wider">Profil i denna budget</h4>
+                        {users.map(user => (
+                            <div key={user.id} className="space-y-2">
+                                <label className="text-xs text-slate-500">{user.id === users[0].id ? "Huvudanvändare" : "Användare"}</label>
+                                <div className="flex gap-2">
+                                    <input 
+                                        type="text" 
+                                        value={user.name} 
+                                        onChange={(e) => updateUserName(user.id, e.target.value)}
+                                        className="flex-1 bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-white focus:border-blue-500 outline-none"
+                                    />
+                                    <button className="text-xl bg-slate-900 px-3 rounded-lg border border-slate-700">{user.avatar}</button>
+                                </div>
                             </div>
-                        )}
+                        ))}
                     </div>
 
                     <div className="flex items-center justify-between bg-slate-800 p-3 rounded-lg">
@@ -280,7 +388,7 @@ const MainApp = () => {
                          
                          <div className="space-y-2">
                              <p className="text-[10px] text-red-300/70">
-                                 Här kan du rensa all historik. Kategorier och regler sparas.
+                                 Här kan du rensa all historik i <strong>denna</strong> budget. Kategorier och regler sparas.
                              </p>
                              <Button
                                 variant="danger"
@@ -298,7 +406,7 @@ const MainApp = () => {
               {/* Cloud Backup */}
               <div>
                   <h3 className="font-bold text-sm text-slate-400 uppercase mb-2 flex items-center gap-2">
-                      <Cloud className="w-4 h-4" /> Cloud Backup (Google Drive)
+                      <Cloud className="w-4 h-4" /> Cloud Backup (Global)
                   </h3>
                   
                   <div className="bg-slate-800 p-4 rounded-xl space-y-4">
@@ -348,10 +456,6 @@ const MainApp = () => {
                                           ))}
                                       </div>
                                   </div>
-                              )}
-                              
-                              {backups.length === 0 && !isLoadingBackups && (
-                                  <p className="text-xs text-slate-500 text-center italic">Inga backups hittades.</p>
                               )}
                           </div>
                       )}

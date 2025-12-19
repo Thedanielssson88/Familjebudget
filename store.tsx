@@ -4,14 +4,15 @@ import { db } from './db';
 import { 
   User, Account, Bucket, MainCategory, SubCategory, 
   BudgetGroup, BudgetTemplate, MonthConfig, Transaction, 
-  ImportRule, IgnoredSubscription, AppSettings, MonthKey, BucketData 
+  ImportRule, IgnoredSubscription, AppSettings, MonthKey, BucketData, Budget
 } from './types';
 import { generateId, getEffectiveBucketData } from './utils';
 import { format, addMonths, parseISO } from 'date-fns';
 import { DEFAULT_MAIN_CATEGORIES, DEFAULT_SUB_CATEGORIES } from './constants/defaultCategories';
 
-// Fix: Defined AppContextType interface to cover all methods used across the app
 interface AppContextType {
+  budgets: Budget[];
+  activeBudgetId: string;
   users: User[];
   accounts: Account[];
   buckets: Bucket[];
@@ -26,6 +27,10 @@ interface AppContextType {
   importRules: ImportRule[];
   ignoredSubscriptions: IgnoredSubscription[];
 
+  setActiveBudget: (id: string) => void;
+  addBudget: (name: string, icon: string) => Promise<string>;
+  deleteBudget: (id: string) => Promise<void>;
+  
   setMonth: (month: MonthKey) => void;
   updateUserIncome: (userId: string, month: MonthKey, type: 'salary'|'childBenefit'|'insurance'|'vabDays'|'dailyDeduction', amount: number) => Promise<void>;
   updateUserName: (userId: string, name: string) => Promise<void>;
@@ -79,8 +84,10 @@ interface AppContextType {
 
 const AppContext = createContext<AppContextType | undefined>(undefined);
 
-// Fix: Implemented AppProvider with state and DB synchronization
 export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => {
+  const [budgets, setBudgets] = useState<Budget[]>([]);
+  const [activeBudgetId, setActiveBudgetId] = useState<string>('');
+  
   const [users, setUsers] = useState<User[]>([]);
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [buckets, setBuckets] = useState<Bucket[]>([]);
@@ -95,51 +102,56 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   const [importRules, setImportRules] = useState<ImportRule[]>([]);
   const [ignoredSubscriptions, setIgnoredSubscriptions] = useState<IgnoredSubscription[]>([]);
 
-  // Fix: Load initial data from Dexie on mount
+  // Load Budgets & Initial Sync
   useEffect(() => {
-    const load = async () => {
-      const u = await db.users.toArray();
+    const init = async () => {
+      let b = await db.budgets.toArray();
+      if (b.length === 0) {
+          const defaultBudget: Budget = { id: 'default', name: 'Gemensam', icon: '🏠', isDefault: true };
+          await db.budgets.add(defaultBudget);
+          b = [defaultBudget];
+          
+          // Migration of orphan records
+          const tablesToMigrate = ['users', 'accounts', 'buckets', 'budgetGroups', 'budgetTemplates', 'monthConfigs', 'transactions', 'importRules', 'ignoredSubscriptions'] as const;
+          for (const table of tablesToMigrate) {
+              await (db[table] as any).toCollection().modify((item: any) => {
+                  if (!item.budgetId) item.budgetId = 'default';
+              });
+          }
+      }
+      setBudgets(b);
+      
+      const savedId = localStorage.getItem('last_active_budget_id');
+      const startId = (savedId && b.find(x => x.id === savedId)) ? savedId : b[0].id;
+      setActiveBudgetId(startId);
+    };
+    init();
+  }, []);
+
+  // Load Budget-Specific Data
+  useEffect(() => {
+    if (!activeBudgetId) return;
+    localStorage.setItem('last_active_budget_id', activeBudgetId);
+
+    const loadData = async () => {
+      const u = await db.users.where('budgetId').equals(activeBudgetId).toArray();
       if (u.length === 0) {
-          const initialUser: User = { id: generateId(), name: 'Familj', avatar: '🏠', incomeData: {} };
+          const initialUser: User = { id: generateId(), budgetId: activeBudgetId, name: 'Jag', avatar: '👤', incomeData: {} };
           await db.users.add(initialUser);
           setUsers([initialUser]);
       } else {
           setUsers(u);
       }
 
-      const acc = await db.accounts.toArray();
-      if (acc.length === 0) {
-          const defaultAcc: Account = { id: generateId(), name: 'Huvudkonto', icon: '💳', startBalances: {} };
-          await db.accounts.add(defaultAcc);
-          setAccounts([defaultAcc]);
-      } else {
-          setAccounts(acc);
-      }
-
-      setBuckets(await db.buckets.toArray());
+      setAccounts(await db.accounts.where('budgetId').equals(activeBudgetId).toArray());
+      setBuckets(await db.buckets.where('budgetId').equals(activeBudgetId).toArray());
+      setBudgetGroups(await db.budgetGroups.where('budgetId').equals(activeBudgetId).toArray());
       
-      const mc = await db.mainCategories.toArray();
-      if (mc.length === 0) {
-          await db.mainCategories.bulkAdd(DEFAULT_MAIN_CATEGORIES);
-          setMainCategories(DEFAULT_MAIN_CATEGORIES);
-      } else {
-          setMainCategories(mc);
-      }
-
-      const sc = await db.subCategories.toArray();
-      if (sc.length === 0) {
-          await db.subCategories.bulkAdd(DEFAULT_SUB_CATEGORIES);
-          setSubCategories(DEFAULT_SUB_CATEGORIES);
-      } else {
-          setSubCategories(sc);
-      }
-
-      setBudgetGroups(await db.budgetGroups.toArray());
-      
-      const bt = await db.budgetTemplates.toArray();
+      const bt = await db.budgetTemplates.where('budgetId').equals(activeBudgetId).toArray();
       if (bt.length === 0) {
           const defaultTemplate: BudgetTemplate = { 
               id: generateId(), 
+              budgetId: activeBudgetId,
               name: 'Standard', 
               isDefault: true, 
               groupLimits: {}, 
@@ -152,19 +164,71 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
           setBudgetTemplates(bt);
       }
 
-      setMonthConfigs(await db.monthConfigs.toArray());
-      
-      const s = await db.settings.toArray();
-      if (s.length > 0) {
-          setSettings(s[0]);
-      }
+      setMonthConfigs(await db.monthConfigs.where('budgetId').equals(activeBudgetId).toArray());
+      setTransactions(await db.transactions.where('budgetId').equals(activeBudgetId).toArray());
+      setImportRules(await db.importRules.where('budgetId').equals(activeBudgetId).toArray());
+      setIgnoredSubscriptions(await db.ignoredSubscriptions.where('budgetId').equals(activeBudgetId).toArray());
 
-      setTransactions(await db.transactions.toArray());
-      setImportRules(await db.importRules.toArray());
-      setIgnoredSubscriptions(await db.ignoredSubscriptions.toArray());
+      // Global Settings (same across budgets for now, or could be split)
+      const s = await db.settings.toArray();
+      if (s.length > 0) setSettings(s[0]);
     };
-    load();
+
+    loadData();
+  }, [activeBudgetId]);
+
+  // Load Categories (Shared)
+  useEffect(() => {
+      const loadCategories = async () => {
+          const mc = await db.mainCategories.toArray();
+          if (mc.length === 0) {
+              await db.mainCategories.bulkAdd(DEFAULT_MAIN_CATEGORIES);
+              setMainCategories(DEFAULT_MAIN_CATEGORIES);
+          } else {
+              setMainCategories(mc);
+          }
+
+          const sc = await db.subCategories.toArray();
+          if (sc.length === 0) {
+              await db.subCategories.bulkAdd(DEFAULT_SUB_CATEGORIES);
+              setSubCategories(DEFAULT_SUB_CATEGORIES);
+          } else {
+              setSubCategories(sc);
+          }
+      };
+      loadCategories();
   }, []);
+
+  const setActiveBudget = (id: string) => setActiveBudgetId(id);
+
+  const addBudget = async (name: string, icon: string) => {
+      const id = generateId();
+      const newBudget: Budget = { id, name, icon };
+      await db.budgets.add(newBudget);
+      setBudgets(prev => [...prev, newBudget]);
+      return id;
+  };
+
+  const deleteBudget = async (id: string) => {
+      if (budgets.length <= 1) return;
+      await (db as any).transaction('rw', ['budgets', 'users', 'accounts', 'buckets', 'budgetGroups', 'budgetTemplates', 'monthConfigs', 'transactions', 'importRules', 'ignoredSubscriptions'], async () => {
+          await db.budgets.delete(id);
+          await db.users.where('budgetId').equals(id).delete();
+          await db.accounts.where('budgetId').equals(id).delete();
+          await db.buckets.where('budgetId').equals(id).delete();
+          await db.budgetGroups.where('budgetId').equals(id).delete();
+          await db.budgetTemplates.where('budgetId').equals(id).delete();
+          await db.monthConfigs.where('budgetId').equals(id).delete();
+          await db.transactions.where('budgetId').equals(id).delete();
+          await db.importRules.where('budgetId').equals(id).delete();
+          await db.ignoredSubscriptions.where('budgetId').equals(id).delete();
+      });
+      setBudgets(prev => prev.filter(b => b.id !== id));
+      if (activeBudgetId === id) {
+          const next = budgets.find(b => b.id !== id);
+          if (next) setActiveBudgetId(next.id);
+      }
+  };
 
   const setMonth = (month: MonthKey) => setSelectedMonth(month);
 
@@ -188,7 +252,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   };
 
   const addAccount = async (name: string, type: string, icon: string) => {
-    const acc: Account = { id: generateId(), name, type, icon, startBalances: {} };
+    const acc: Account = { id: generateId(), budgetId: activeBudgetId, name, type, icon, startBalances: {} };
     await db.accounts.add(acc);
     setAccounts(prev => [...prev, acc]);
   };
@@ -204,8 +268,9 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   };
 
   const addBucket = async (bucket: Bucket) => {
-    await db.buckets.add(bucket);
-    setBuckets(prev => [...prev, bucket]);
+    const b = { ...bucket, budgetId: activeBudgetId };
+    await db.buckets.add(b);
+    setBuckets(prev => [...prev, b]);
   };
 
   const updateBucket = async (bucket: Bucket) => {
@@ -213,7 +278,6 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     setBuckets(prev => prev.map(b => b.id === bucket.id ? bucket : b));
   };
 
-  // Fix: Implemented deleteBucket with all scopes as per provided logic snippet
   const deleteBucket = async (id: string, month: MonthKey, scope: 'THIS_MONTH' | 'THIS_AND_FUTURE' | 'ALL') => {
     if (scope === 'ALL') {
         await db.buckets.delete(id);
@@ -295,6 +359,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   const addBudgetGroup = async (name: string, limit: number, icon: string, forecastType: 'FIXED' | 'VARIABLE') => {
     const group: BudgetGroup = { 
         id: generateId(), 
+        budgetId: activeBudgetId,
         name, 
         icon, 
         forecastType,
@@ -315,8 +380,9 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   };
 
   const addTransactions = async (txs: Transaction[]) => {
-    await db.transactions.bulkAdd(txs);
-    setTransactions(prev => [...prev, ...txs]);
+    const withBudgetId = txs.map(t => ({ ...t, budgetId: activeBudgetId }));
+    await db.transactions.bulkAdd(withBudgetId);
+    setTransactions(prev => [...prev, ...withBudgetId]);
   };
 
   const updateTransaction = async (tx: Transaction) => {
@@ -330,13 +396,14 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   };
 
   const deleteAllTransactions = async () => {
-    await db.transactions.clear();
+    await db.transactions.where('budgetId').equals(activeBudgetId).delete();
     setTransactions([]);
   };
 
   const addImportRule = async (rule: ImportRule) => {
-    await db.importRules.add(rule);
-    setImportRules(prev => [...prev, rule]);
+    const r = { ...rule, budgetId: activeBudgetId };
+    await db.importRules.add(r);
+    setImportRules(prev => [...prev, r]);
   };
 
   const deleteImportRule = async (id: string) => {
@@ -350,7 +417,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   };
 
   const addIgnoredSubscription = async (id: string) => {
-    const sub = { id };
+    const sub = { id, budgetId: activeBudgetId };
     await db.ignoredSubscriptions.add(sub);
     setIgnoredSubscriptions(prev => [...prev, sub]);
   };
@@ -369,6 +436,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
 
   const getExportData = async () => {
     const data = {
+      budgets: await db.budgets.toArray(),
       users: await db.users.toArray(),
       accounts: await db.accounts.toArray(),
       buckets: await db.buckets.toArray(),
@@ -388,8 +456,8 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   const importData = async (json: string) => {
     try {
       const data = JSON.parse(json);
-      // Fix: Use Dexie transaction with string table names to avoid type inference issues on method names
-      await (db as any).transaction('rw', ['users', 'accounts', 'buckets', 'mainCategories', 'subCategories', 'budgetGroups', 'budgetTemplates', 'monthConfigs', 'settings', 'transactions', 'importRules', 'ignoredSubscriptions'], async () => {
+      await (db as any).transaction('rw', ['budgets', 'users', 'accounts', 'buckets', 'mainCategories', 'subCategories', 'budgetGroups', 'budgetTemplates', 'monthConfigs', 'settings', 'transactions', 'importRules', 'ignoredSubscriptions'], async () => {
+          await db.budgets.clear(); await db.budgets.bulkAdd(data.budgets || []);
           await db.users.clear(); await db.users.bulkAdd(data.users || []);
           await db.accounts.clear(); await db.accounts.bulkAdd(data.accounts || []);
           await db.buckets.clear(); await db.buckets.bulkAdd(data.buckets || []);
@@ -424,7 +492,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
             setBudgetTemplates(prev => prev.map(t => t.id === template.id ? updated : t));
         }
     } else {
-        const config = monthConfigs.find(c => c.monthKey === month) || { monthKey: month, templateId: budgetTemplates.find(t => t.isDefault)?.id || '' };
+        const config = monthConfigs.find(c => c.monthKey === month) || { monthKey: month, budgetId: activeBudgetId, templateId: budgetTemplates.find(t => t.isDefault)?.id || '' };
         const updated = { ...config };
         if (type === 'GROUP') { updated.groupOverrides = { ...(updated.groupOverrides || {}), [id]: amount as number }; }
         if (type === 'SUB') { updated.subCategoryOverrides = { ...(updated.subCategoryOverrides || {}), [id]: amount as number }; }
@@ -438,7 +506,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   };
 
   const toggleMonthLock = async (month: MonthKey) => {
-    const config = monthConfigs.find(c => c.monthKey === month) || { monthKey: month, templateId: budgetTemplates.find(t => t.isDefault)?.id || '' };
+    const config = monthConfigs.find(c => c.monthKey === month) || { monthKey: month, budgetId: activeBudgetId, templateId: budgetTemplates.find(t => t.isDefault)?.id || '' };
     const updated = { ...config, isLocked: !config.isLocked };
     await db.monthConfigs.put(updated);
     setMonthConfigs(prev => {
@@ -448,7 +516,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   };
 
   const assignTemplateToMonth = async (month: MonthKey, templateId: string) => {
-    const config = monthConfigs.find(c => c.monthKey === month) || { monthKey: month, templateId };
+    const config = monthConfigs.find(c => c.monthKey === month) || { monthKey: month, budgetId: activeBudgetId, templateId };
     const updated = { ...config, templateId, groupOverrides: {}, subCategoryOverrides: {}, bucketOverrides: {} };
     await db.monthConfigs.put(updated);
     setMonthConfigs(prev => {
@@ -474,6 +542,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       const activeTemplate = budgetTemplates.find(t => t.id === activeTemplateId);
       const newTemplate: BudgetTemplate = {
           id: generateId(),
+          budgetId: activeBudgetId,
           name,
           isDefault: false,
           groupLimits: { ...(activeTemplate?.groupLimits || {}), ...(config?.groupOverrides || {}) },
@@ -498,6 +567,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   };
 
   const value = {
+    budgets, activeBudgetId, setActiveBudget, addBudget, deleteBudget,
     users, accounts, buckets, mainCategories, subCategories, budgetGroups, budgetTemplates, monthConfigs, settings, selectedMonth, transactions, importRules, ignoredSubscriptions,
     setMonth, updateUserIncome, updateUserName, addAccount, updateAccount, deleteAccount, addBucket, updateBucket, deleteBucket, archiveBucket, addMainCategory, deleteMainCategory, addSubCategory, deleteSubCategory, updateSubCategory, resetCategoriesToDefault,
     addBudgetGroup, updateBudgetGroup, deleteBudgetGroup, addTransactions, updateTransaction, deleteTransaction, deleteAllTransactions, addImportRule, deleteImportRule, updateImportRule, addIgnoredSubscription,
@@ -507,7 +577,6 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   return <AppContext.Provider value={value}>{children}</AppContext.Provider>;
 };
 
-// Fix: Export useApp hook to allow functional components to consume the context
 export const useApp = () => {
   const context = useContext(AppContext);
   if (!context) throw new Error('useApp must be used within an AppProvider');

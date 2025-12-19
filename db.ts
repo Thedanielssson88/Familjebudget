@@ -1,8 +1,9 @@
 
 import Dexie, { type Table } from 'dexie';
-import { User, Account, Bucket, AppSettings, Transaction, ImportRule, MainCategory, SubCategory, BudgetGroup, IgnoredSubscription, BudgetTemplate, MonthConfig } from './types';
+import { User, Account, Bucket, AppSettings, Transaction, ImportRule, MainCategory, SubCategory, BudgetGroup, IgnoredSubscription, BudgetTemplate, MonthConfig, Budget } from './types';
 
 export class FamilyFlowDB extends Dexie {
+  budgets!: Table<Budget, string>;
   users!: Table<User, string>;
   accounts!: Table<Account, string>;
   buckets!: Table<Bucket, string>;
@@ -21,20 +22,21 @@ export class FamilyFlowDB extends Dexie {
   constructor() {
     super('FamilyFlowDB');
     
-    // Define schema and indexes
-    (this as any).version(10).stores({
-      users: 'id',
-      accounts: 'id',
-      buckets: 'id, type, isSavings, accountId',
+    // Cast 'this' to 'any' to avoid potential environment-specific TS errors with version()
+    (this as any).version(11).stores({
+      budgets: 'id',
+      users: 'id, budgetId',
+      accounts: 'id, budgetId',
+      buckets: 'id, budgetId, type, isSavings, accountId',
       settings: '++id',
-      transactions: 'id, accountId, date, bucketId, categoryMainId, categorySubId, isVerified, description, linkedTransactionId, linkedExpenseId, [accountId+description]',
-      importRules: 'id, keyword, accountId',
+      transactions: 'id, budgetId, accountId, date, bucketId, categoryMainId, categorySubId, isVerified, description, linkedTransactionId, linkedExpenseId, [accountId+description]',
+      importRules: 'id, budgetId, keyword, accountId',
       mainCategories: 'id',
       subCategories: 'id, mainCategoryId, budgetGroupId',
-      budgetGroups: 'id',
-      ignoredSubscriptions: 'id',
-      budgetTemplates: 'id',
-      monthConfigs: 'monthKey'
+      budgetGroups: 'id, budgetId',
+      ignoredSubscriptions: 'id, budgetId',
+      budgetTemplates: 'id, budgetId',
+      monthConfigs: 'monthKey, budgetId'
     });
   }
 }

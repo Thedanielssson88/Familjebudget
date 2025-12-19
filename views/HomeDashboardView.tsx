@@ -28,8 +28,10 @@ import {
     eachDayOfInterval,
     getDay,
     isValid,
-    isSameMonth
+    isSameMonth,
+    subYears
 } from 'date-fns';
+import { sv } from 'date-fns/locale';
 import { cn, Modal, Button } from '../components/components';
 import { 
     CheckCircle2, 
@@ -55,7 +57,10 @@ import {
     Activity,
     PiggyBank,
     TrendingDown,
-    BarChart3
+    BarChart3,
+    AlertTriangle,
+    Magnet,
+    History
 } from 'lucide-react';
 import { BudgetProgressBar } from '../components/BudgetProgressBar';
 
@@ -70,7 +75,8 @@ export const HomeDashboardView: React.FC<{ onNavigate: (view: any) => void }> = 
         ignoredSubscriptions,
         settings,
         budgetTemplates,
-        monthConfigs
+        monthConfigs,
+        mainCategories
     } = useApp();
     
     const { start, end, startStr, endStr, intervalLabel } = useBudgetMonth(selectedMonth);
@@ -330,34 +336,108 @@ export const HomeDashboardView: React.FC<{ onNavigate: (view: any) => void }> = 
         };
     }, [budgetGroups, transactions, startStr, endStr, buckets, subCategories, reimbursementMap, daysPassed, daysRemaining, futureDays, selectedMonth, settings.payday, budgetTemplates, monthConfigs, start, end]);
 
-    const unverifiedCount = transactions.filter(t => !t.isVerified && !t.isHidden).length;
-    const unlinkedTransfersCount = transactions.filter(t => !t.isHidden && t.type === 'TRANSFER' && (!t.bucketId || t.bucketId === 'INTERNAL') && !t.linkedTransactionId && t.date >= startStr && t.date <= endStr).length;
-    
+    // --- 3. ANALYSIS & INSIGHTS ---
     const analysisData = useMemo(() => {
         const currentTxs = transactions.filter(t => !t.isHidden && t.date >= startStr && t.date <= endStr);
         const expenseTxs = currentTxs.filter(t => t.type === 'EXPENSE' || (!t.type && t.amount < 0));
         
         const cleanName = (desc: string) => {
             let name = desc.trim();
-            const parts = name.split(' ');
-            name = parts.length > 1 ? `${parts[0]} ${parts[1]}` : parts[0];
-            return name.replace(/AB|SE|Kortköp|Reserverat/gi, '').trim();
+            // Remove common suffixes like "AB", "SE", date stamps etc.
+            name = name.replace(/\d{4}-\d{2}-\d{2}|\d{6}|AB|SE|Kortköp|Reserverat|Betalning|Månad/gi, '').trim();
+            // Take first few words for grouping
+            const parts = name.split(' ').filter(p => p.length > 2);
+            name = parts.slice(0, 2).join(' ');
+            return name || 'Övrigt';
         };
 
-        const smallTxMap = new Map<string, { total: number, count: number }>();
+        // Potentials Duplicates (Same Day, Same Amount, Same Account, Same Text)
+        const duplicateGroups = new Map<string, number>();
+        currentTxs.forEach(t => {
+            const key = `${t.date}_${t.amount}_${t.accountId}_${t.description.trim().toLowerCase()}`;
+            duplicateGroups.set(key, (duplicateGroups.get(key) || 0) + 1);
+        });
+        const duplicateCount = Array.from(duplicateGroups.values()).filter(count => count > 1).length;
+
+        // Small Spends summary
+        const smallSpends = expenseTxs.filter(t => Math.abs(getEffectiveAmount(t, reimbursementMap)) < 200);
+        const smallSpendsTotal = smallSpends.reduce((sum, t) => sum + Math.abs(getEffectiveAmount(t, reimbursementMap)), 0);
+
+        // Money Magnet & Habitual Animal
+        const merchantMap = new Map<string, { total: number, count: number, icon?: string }>();
         expenseTxs.forEach(t => {
             const eff = Math.abs(getEffectiveAmount(t, reimbursementMap));
-            if (eff === 0 || eff >= 200) return;
+            if (eff === 0) return;
             const name = cleanName(t.description);
-            const current = smallTxMap.get(name) || { total: 0, count: 0 };
-            smallTxMap.set(name, { total: current.total + eff, count: current.count + 1 });
+            const current = merchantMap.get(name) || { total: 0, count: 0 };
+            merchantMap.set(name, { total: current.total + eff, count: current.count + 1 });
         });
 
-        return { 
-            topSmallSpends: Array.from(smallTxMap.entries()).sort((a, b) => b[1].total - a[1].total).slice(0, 5).map(([name, data], i) => ({ rank: i+1, name, amount: data.total, count: data.count }))
-        };
-    }, [transactions, startStr, endStr, reimbursementMap]);
+        const sortedByAmount = Array.from(merchantMap.entries()).sort((a, b) => b[1].total - a[1].total);
+        const moneyMagnet = sortedByAmount[0] ? { name: sortedByAmount[0][0], amount: sortedByAmount[0][1].total } : null;
 
+        const sortedByFrequency = Array.from(merchantMap.entries()).sort((a, b) => b[1].count - a[1].count);
+        const habitualAnimal = sortedByFrequency[0] ? { name: sortedByFrequency[0][0], count: sortedByFrequency[0][1].count } : null;
+
+        // Year-over-Year comparison
+        const lastYearMonth = format(subYears(parseISO(`${selectedMonth}-01`), 1), 'yyyy-MM');
+        const { start: lyStart, end: lyEnd } = getBudgetInterval(lastYearMonth, settings.payday);
+        const lyStartStr = format(lyStart, 'yyyy-MM-dd');
+        const lyEndStr = format(lyEnd, 'yyyy-MM-dd');
+
+        const lastYearTxs = transactions.filter(t => 
+            !t.isHidden && 
+            t.date >= lyStartStr && 
+            t.date <= lyEndStr && 
+            (t.type === 'EXPENSE' || (!t.type && t.amount < 0))
+        );
+
+        const lastYearTotal = lastYearTxs.reduce((sum, t) => sum + Math.abs(getEffectiveAmount(t, reimbursementMap)), 0);
+        const yoyDiff = budgetData.totalSpent - lastYearTotal;
+        const hasLastYearData = lastYearTxs.length > 0;
+
+        // Find a significant category shift for YoY
+        let categoryShiftMessage = "";
+        if (hasLastYearData) {
+            const currentByCat = new Map<string, number>();
+            expenseTxs.forEach(t => {
+                const catName = mainCategories.find(c => c.id === t.categoryMainId)?.name || 'Övrigt';
+                currentByCat.set(catName, (currentByCat.get(catName) || 0) + Math.abs(getEffectiveAmount(t, reimbursementMap)));
+            });
+
+            const lyByCat = new Map<string, number>();
+            lastYearTxs.forEach(t => {
+                const catName = mainCategories.find(c => c.id === t.categoryMainId)?.name || 'Övrigt';
+                lyByCat.set(catName, (lyByCat.get(catName) || 0) + Math.abs(getEffectiveAmount(t, reimbursementMap)));
+            });
+
+            const shifts = Array.from(currentByCat.keys()).map(cat => {
+                const curr = currentByCat.get(cat) || 0;
+                const ly = lyByCat.get(cat) || 0;
+                return { cat, diff: curr - ly };
+            }).sort((a, b) => Math.abs(b.diff) - Math.abs(a.diff));
+
+            if (shifts[0] && Math.abs(shifts[0].diff) > 500) {
+                categoryShiftMessage = `Ni lade ${formatMoney(Math.abs(shifts[0].diff))} ${shifts[0].diff > 0 ? 'mer' : 'mindre'} på ${shifts[0].cat} i år.`;
+            }
+        }
+
+        return { 
+            duplicateCount,
+            smallSpendsTotal,
+            moneyMagnet,
+            habitualAnimal,
+            lastYearTotal,
+            yoyDiff,
+            hasLastYearData,
+            categoryShiftMessage,
+            topSmallSpends: sortedByAmount.filter(m => m[1].total < 1000).slice(0, 5).map(([name, data], i) => ({ rank: i+1, name, amount: data.total, count: data.count }))
+        };
+    }, [transactions, startStr, endStr, reimbursementMap, budgetData.totalSpent, mainCategories, selectedMonth, settings.payday]);
+
+    const unverifiedCount = transactions.filter(t => !t.isVerified && !t.isHidden).length;
+    const unlinkedTransfersCount = transactions.filter(t => !t.isHidden && t.type === 'TRANSFER' && (!t.bucketId || t.bucketId === 'INTERNAL') && !t.linkedTransactionId && t.date >= startStr && t.date <= endStr).length;
+    
     const nextDream = useMemo(() => {
         const activeGoals = buckets.filter(b => b.type === 'GOAL' && !b.archivedDate && b.targetAmount > 0);
         if (activeGoals.length === 0) return null;
@@ -414,9 +494,23 @@ export const HomeDashboardView: React.FC<{ onNavigate: (view: any) => void }> = 
                 </div>
             </div>
 
-            {(unverifiedCount > 0 || unlinkedTransfersCount > 0 || analysisData.topSmallSpends.length > 0) && (
+            {(unverifiedCount > 0 || unlinkedTransfersCount > 0 || analysisData.duplicateCount > 0) && (
                 <div className="space-y-3">
                     <h3 className="text-xs font-bold text-slate-400 uppercase tracking-wider px-1 flex items-center gap-2"><Zap size={12} className="text-yellow-400" /> Att Hantera</h3>
+                    
+                    {analysisData.duplicateCount > 0 && (
+                         <div onClick={() => onNavigate('transactions')} className="bg-slate-800 p-4 rounded-xl border-l-4 border-l-rose-500 border-y border-r border-slate-700 flex justify-between items-center cursor-pointer hover:bg-slate-750">
+                            <div className="flex items-center gap-3">
+                                <div className="bg-rose-500/20 p-2 rounded-full text-rose-400"><AlertTriangle size={18} /></div>
+                                <div>
+                                    <div className="font-bold text-white">Varning: Dubbeldragningar</div>
+                                    <div className="text-xs text-slate-400">{analysisData.duplicateCount} potentiella dubbelköp hittade idag.</div>
+                                </div>
+                            </div>
+                            <ChevronRight size={18} className="text-slate-500" />
+                        </div>
+                    )}
+
                     {unverifiedCount > 0 && (
                         <div onClick={() => onNavigate('transactions')} className="bg-slate-800 p-4 rounded-xl border-l-4 border-l-purple-500 border-y border-r border-slate-700 flex justify-between items-center cursor-pointer hover:bg-slate-750 transition-colors">
                             <div className="flex items-center gap-3">
@@ -480,30 +574,61 @@ export const HomeDashboardView: React.FC<{ onNavigate: (view: any) => void }> = 
                          <span className="text-slate-500">Mål: {formatMoney(budgetData.totalLimit)}</span>
                     </div>
                 </div>
-                
-                <p className="text-[10px] text-slate-500 leading-relaxed italic">
-                    Beräknas genom att lägga samman fasta kostnader med den förväntade linjära förbrukningen i rörliga kategorier. Sparande (individuella poster eller hela grupper) är exkluderat, men budget för Dreams (förbrukning) är inkluderat.
-                </p>
             </div>
 
-            {analysisData.topSmallSpends.length > 0 && (
-                <div>
-                    <h3 className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-3 flex items-center gap-2"><Zap size={12} /> Snabba Insikter</h3>
-                    <div className="grid grid-cols-2 gap-3">
-                        <div className="bg-slate-800 p-3 rounded-xl border border-slate-700 col-span-2">
-                            <div className="text-[10px] text-slate-500 uppercase font-bold mb-2 flex items-center gap-1"><Coffee size={10} /> Småutgifter &lt; 200kr</div>
-                            <div className="space-y-1.5">
-                                {analysisData.topSmallSpends.map((item, i) => (
-                                    <div key={i} className="flex justify-between items-center text-xs border-b border-slate-700/50 pb-1 last:border-0 last:pb-0">
-                                        <div className="flex items-center gap-2 overflow-hidden"><span className="text-slate-600 font-bold w-3">{item.rank}.</span><span className="text-slate-300 truncate">{item.name}</span></div>
-                                        <span className="text-white font-mono">{formatMoney(item.amount)}</span>
-                                    </div>
-                                ))}
-                            </div>
+            <div>
+                <h3 className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-3 flex items-center gap-2"><Zap size={12} /> Snabba Insikter</h3>
+                <div className="grid grid-cols-2 gap-3">
+                    {/* Small Spends Insight */}
+                    <div className="bg-slate-800 p-3 rounded-xl border border-slate-700 col-span-2">
+                        <div className="flex justify-between items-center mb-3">
+                            <div className="text-[10px] text-slate-500 uppercase font-bold flex items-center gap-1"><Coffee size={10} /> Småskvättar (&lt; 200kr)</div>
+                            <div className="text-white font-mono font-bold text-sm">{formatMoney(analysisData.smallSpendsTotal)}</div>
+                        </div>
+                        <div className="space-y-1.5">
+                            {analysisData.topSmallSpends.map((item, i) => (
+                                <div key={i} className="flex justify-between items-center text-xs border-b border-slate-700/50 pb-1 last:border-0 last:pb-0">
+                                    <div className="flex items-center gap-2 overflow-hidden"><span className="text-slate-600 font-bold w-3">{i+1}.</span><span className="text-slate-300 truncate">{item.name}</span></div>
+                                    <span className="text-slate-400 font-mono">{formatMoney(item.amount)}</span>
+                                </div>
+                            ))}
                         </div>
                     </div>
+
+                    {/* Money Magnet */}
+                    {analysisData.moneyMagnet && (
+                        <div className="bg-slate-800 p-3 rounded-xl border border-slate-700">
+                             <div className="text-[10px] text-slate-500 uppercase font-bold mb-2 flex items-center gap-1"><Magnet size={10} className="text-blue-400"/> Pengamagneten</div>
+                             <div className="font-bold text-white text-sm truncate">{analysisData.moneyMagnet.name}</div>
+                             <div className="text-xs text-blue-400 font-mono mt-1">{formatMoney(analysisData.moneyMagnet.amount)} totalt</div>
+                        </div>
+                    )}
+
+                    {/* Habitual Animal */}
+                    {analysisData.habitualAnimal && (
+                        <div className="bg-slate-800 p-3 rounded-xl border border-slate-700">
+                             <div className="text-[10px] text-slate-500 uppercase font-bold mb-2 flex items-center gap-1"><Repeat size={10} className="text-orange-400"/> Vanedjuret</div>
+                             <div className="font-bold text-white text-sm truncate">{analysisData.habitualAnimal.name}</div>
+                             <div className="text-xs text-orange-400 font-mono mt-1">{analysisData.habitualAnimal.count} besök</div>
+                        </div>
+                    )}
+
+                    {/* Year-over-Year Comparison */}
+                    {analysisData.hasLastYearData && (
+                        <div className="bg-slate-800 p-3 rounded-xl border border-slate-700 col-span-2">
+                             <div className="flex justify-between items-center mb-2">
+                                <div className="text-[10px] text-slate-500 uppercase font-bold flex items-center gap-1"><History size={10} className="text-indigo-400"/> Årsjämförelse</div>
+                                <div className={cn("text-[10px] font-bold px-1.5 py-0.5 rounded", analysisData.yoyDiff > 0 ? "bg-rose-500/10 text-rose-400" : "bg-emerald-500/10 text-emerald-400")}>
+                                    {analysisData.yoyDiff > 0 ? '+' : ''}{formatMoney(analysisData.yoyDiff)} vs {format(subYears(parseISO(`${selectedMonth}-01`), 1), 'yyyy')}
+                                </div>
+                             </div>
+                             <div className="text-xs text-slate-300 leading-relaxed italic">
+                                 {analysisData.categoryShiftMessage || `Din totala förbrukning är ${formatMoney(Math.abs(analysisData.yoyDiff))} ${analysisData.yoyDiff > 0 ? 'högre' : 'lägre'} än samma period förra året.`}
+                             </div>
+                        </div>
+                    )}
                 </div>
-            )}
+            </div>
 
             {nextDream && (
                 <div onClick={() => onNavigate('dreams')} className="relative cursor-pointer group rounded-2xl overflow-hidden shadow-lg border border-slate-700">

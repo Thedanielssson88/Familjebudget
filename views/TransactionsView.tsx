@@ -465,7 +465,8 @@ export const TransactionsView: React.FC = () => {
         addIgnoredSubscription,
         deleteTransaction,
         deleteAllTransactions,
-        selectedMonth
+        selectedMonth,
+        activeBudgetId // Extracted activeBudgetId from store
     } = useApp();
 
     const [viewMode, setViewMode] = useState<'import' | 'history' | 'smart-transfers' | 'subscriptions' | 'rules'>('import');
@@ -780,7 +781,8 @@ export const TransactionsView: React.FC = () => {
         if (!e.target.files || e.target.files.length === 0 || !selectedAccount) return;
         try {
             const file = e.target.files[0];
-            const rawTxs = await parseBankFile(file, selectedAccount);
+            // Passed required activeBudgetId to parseBankFile
+            const rawTxs = await parseBankFile(file, selectedAccount, activeBudgetId);
             // Run pipeline against ALL existing transactions (to detect dupes and updates)
             const { newTransactions, updatedTransactions } = await runImportPipeline(rawTxs, transactions, importRules, buckets);
             
@@ -1054,8 +1056,10 @@ export const TransactionsView: React.FC = () => {
     };
 
     const handleCreateSubscription = async (sub: any) => {
+        // Added required budgetId to newBucket object
         const newBucket: Bucket = {
             id: generateId(),
+            budgetId: activeBudgetId,
             accountId: sub.accountId,
             name: sub.name,
             type: 'FIXED',
@@ -1616,7 +1620,7 @@ export const TransactionsView: React.FC = () => {
                                             <div className="font-bold text-white flex items-center gap-2">
                                                 {sub.name}
                                                 {alreadyAdded && <span className="text-[10px] bg-emerald-500/20 text-emerald-400 px-2 py-0.5 rounded-full flex items-center gap-1"><CheckCircle2 size={10}/> Budgeterad</span>}
-                                                {sub.confidence === 'medium' && <span className="text-[10px] bg-yellow-500/20 text-yellow-400 px-2 py-0.5 rounded-full flex items-center gap-1" title="Varierande belopp men återkommande datum">⚠️ Varierande</span>}
+                                                {sub.confidence === 'medium' && <span className="text-[10px] bg-yellow-500/20 text-yellow-400 px-2 py-0.5 rounded-full flex items-center gap-1" title="Varierande belopp men perfekt datum">⚠️ Varierande</span>}
                                             </div>
                                             <div className="text-xs text-slate-400 mt-0.5">{sub.frequency === 'monthly' ? 'Månadsvis' : 'Återkommande'} • {sub.occurrences} betalningar hittade</div>
                                             <div className="text-xs text-slate-500 mt-0.5">Senast: {sub.lastDate}</div>

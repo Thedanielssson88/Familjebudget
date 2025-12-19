@@ -450,7 +450,7 @@ const WaterfallOverview: React.FC = () => {
 };
 
 export const DashboardView: React.FC = () => {
-    const [activeTab, setActiveTab] = useState<'waterfall' | 'stats'>('waterfall');
+    const [activeTab, setActiveTab] = useState<'waterfall' | 'stats'>('stats');
 
     return (
         <div className="space-y-6 pb-24">
@@ -462,16 +462,6 @@ export const DashboardView: React.FC = () => {
 
                 <div className="bg-slate-800 p-1 rounded-xl flex gap-1 shadow-lg border border-slate-700">
                     <button 
-                        onClick={() => setActiveTab('waterfall')}
-                        className={cn(
-                            "flex-1 py-3 px-4 rounded-lg text-sm font-bold flex items-center justify-center gap-2 transition-all",
-                            activeTab === 'waterfall' ? "bg-blue-600 text-white shadow-md" : "text-slate-400 hover:text-white hover:bg-slate-700"
-                        )}
-                    >
-                        <LayoutGrid size={16} />
-                        Kassaflöde (Vattenfall)
-                    </button>
-                    <button 
                         onClick={() => setActiveTab('stats')}
                         className={cn(
                             "flex-1 py-3 px-4 rounded-lg text-sm font-bold flex items-center justify-center gap-2 transition-all",
@@ -480,6 +470,16 @@ export const DashboardView: React.FC = () => {
                     >
                         <BarChart3 size={16} />
                         Statistik & Trender
+                    </button>
+                    <button 
+                        onClick={() => setActiveTab('waterfall')}
+                        className={cn(
+                            "flex-1 py-3 px-4 rounded-lg text-sm font-bold flex items-center justify-center gap-2 transition-all",
+                            activeTab === 'waterfall' ? "bg-blue-600 text-white shadow-md" : "text-slate-400 hover:text-white hover:bg-slate-700"
+                        )}
+                    >
+                        <LayoutGrid size={16} />
+                        Kassaflöde (Vattenfall)
                     </button>
                 </div>
             </div>

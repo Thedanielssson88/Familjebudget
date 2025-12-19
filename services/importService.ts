@@ -39,7 +39,8 @@ const parseDate = (val: any): string => {
     return str; // Fallback
 };
 
-export const parseBankFile = async (file: File, accountId: string): Promise<Transaction[]> => {
+// Added budgetId parameter to satisfy required Transaction property
+export const parseBankFile = async (file: File, accountId: string, budgetId: string): Promise<Transaction[]> => {
     const isCsv = file.name.toLowerCase().endsWith('.csv');
     
     if (isCsv) {
@@ -84,6 +85,7 @@ export const parseBankFile = async (file: File, accountId: string): Promise<Tran
                                 return {
                                     id: generateId(),
                                     accountId,
+                                    budgetId, // Included required budgetId
                                     date: parseDate(row[dIdx]),
                                     description: row[tIdx] || 'Okänd transaktion',
                                     amount: parseAmount(row[aIdx]),
@@ -141,6 +143,7 @@ export const parseBankFile = async (file: File, accountId: string): Promise<Tran
                     const transactions = dataRows.map((row) => ({
                          id: generateId(),
                          accountId,
+                         budgetId, // Included required budgetId
                          date: parseDate(row[dIdx]),
                          description: (row[tIdx] || '').toString(),
                          amount: parseAmount(row[aIdx]),
