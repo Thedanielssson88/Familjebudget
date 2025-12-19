@@ -12,7 +12,7 @@ import {
 import { ChevronRight, ChevronDown, Edit2, Check, AlertTriangle, TrendingUp, TrendingDown, Calendar, BarChart3, PieChart as PieIcon, Filter, Info, Plane, X, Sparkles, Zap, Trophy, ShoppingBag, Layers, Clock, DollarSign, Activity, Target, Coffee, Repeat, ArrowRight, ArrowUpRight, ArrowDownRight, AlertOctagon, Utensils, Search, Percent, ThermometerSnowflake, Rocket, Wallet, PiggyBank, LayoutGrid, Eye, EyeOff, Bot, Calculator } from 'lucide-react';
 import { BudgetProgressBar } from '../components/BudgetProgressBar';
 import { cn, Button, Modal } from '../components/components';
-import { BudgetGroup, Bucket, Transaction, MainCategory, SubCategory, Account } from '../types';
+import { BudgetGroup, Bucket, Transaction, MainCategory, SubCategory, Account, BucketData } from '../types';
 import { format, subMonths, parseISO, differenceInDays, startOfDay, endOfDay, areIntervalsOverlapping, addDays, isValid, startOfMonth, endOfMonth, addMonths, getDay, startOfWeek, endOfWeek, subWeeks, getISOWeek, getDate, getDaysInMonth, eachDayOfInterval, subDays, subYears, isAfter, isBefore, isSameMonth } from 'date-fns';
 import { sv } from 'date-fns/locale';
 import { generateMonthlyReport, FinancialSnapshot } from '../services/aiService';
@@ -214,6 +214,7 @@ const BudgetGroupStats = ({ selectedMonth }: { selectedMonth: string }) => {
     const [drillDownData, setDrillDownData] = useState<{ title: string, transactions: Transaction[], grouped?: boolean } | null>(null);
     const [timeframe, setTimeframe] = useState<1 | 3 | 6 | 12>(1);
     const [excludeDreams, setExcludeDreams] = useState(false);
+    const [isTotalBreakdownOpen, setIsTotalBreakdownOpen] = useState(false);
     
     const [budgetBreakdownData, setBudgetBreakdownData] = useState<{ 
         groupName: string; 
@@ -240,6 +241,13 @@ const BudgetGroupStats = ({ selectedMonth }: { selectedMonth: string }) => {
         const rangeLabel = timeframe === 1 
             ? format(parseISO(`${selectedMonth}-01`), 'MMMM yyyy', { locale: sv })
             : `${format(startDateObj, 'MMM', { locale: sv })} - ${format(end, 'MMM yyyy', { locale: sv })}`;
+
+        // Breakdown tallies
+        let dreamSpending = 0;
+        let dreamSaving = 0;
+        let generalSaving = 0;
+        let fixedOps = 0;
+        let variableOps = 0;
 
         // Correct assignment map
         const assignedBucketIds = new Set<string>();
@@ -303,15 +311,34 @@ const BudgetGroupStats = ({ selectedMonth }: { selectedMonth: string }) => {
                 assignedSubs.forEach(sub => {
                     const subBudget = getEffectiveSubCategoryBudget(sub, selectedMonth, budgetTemplates, monthConfigs);
                     childrenSum += subBudget;
-                    if (subBudget > 0) budgetItems.push({ name: sub.name, amount: subBudget, type: 'SUB' });
+                    if (subBudget > 0) {
+                        budgetItems.push({ name: sub.name, amount: subBudget, type: 'SUB' });
+                        if (sub.isSavings || group.forecastType === 'SAVINGS') generalSaving += subBudget;
+                        else if (group.forecastType === 'FIXED') fixedOps += subBudget;
+                        else variableOps += subBudget;
+                    }
                 });
 
                 buckets.filter(b => groupBucketIds.has(b.id)).forEach(b => {
                     let cost = 0;
-                    if (b.type === 'FIXED') cost = calculateFixedBucketCost(b, selectedMonth);
-                    else if (b.type === 'DAILY') cost = calculateDailyBucketCost(b, selectedMonth, settings.payday);
-                    else if (b.type === 'GOAL') {
-                        // Project Budget Calculation
+                    if (b.type === 'FIXED') {
+                        const { data } = getEffectiveBucketData(b, selectedMonth, budgetTemplates, monthConfigs);
+                        cost = data ? data.amount : 0;
+                    } else if (b.type === 'DAILY') {
+                        const { data } = getEffectiveBucketData(b, selectedMonth, budgetTemplates, monthConfigs);
+                        if (data) {
+                            const days = eachDayOfInterval({ start: parseISO(startStr), end: parseISO(endStr) });
+                            const count = days.filter(d => data.activeDays.includes(getDay(d))).length;
+                            cost = count * data.dailyAmount;
+                        }
+                    } else if (b.type === 'GOAL') {
+                        // 1. Savings part
+                        if (b.paymentSource === 'INCOME') {
+                            const goalSaving = calculateGoalBucketCost(b, selectedMonth);
+                            cost += goalSaving;
+                            dreamSaving += goalSaving;
+                        }
+                        // 2. Spending part (Project budget)
                         const { start: budgetStart } = getBudgetInterval(selectedMonth, settings.payday);
                         const currentStartStr = format(budgetStart, 'yyyy-MM-dd');
                         const pastSpent = transactions
@@ -319,17 +346,31 @@ const BudgetGroupStats = ({ selectedMonth }: { selectedMonth: string }) => {
                             .reduce((sum, t) => sum + Math.abs(getEffectiveAmount(t, reimbursementMap)), 0);
                         const remainingProj = Math.max(0, b.targetAmount - pastSpent);
                         const isVisible = (remainingProj > 0 && isBucketActiveInMonth(b, selectedMonth)) || transactions.some(t => t.bucketId === b.id && t.date >= startStr && t.date <= endStr && !t.isHidden);
-                        if (isVisible) cost = remainingProj;
+                        if (isVisible) {
+                            cost += remainingProj;
+                            dreamSpending += remainingProj;
+                        }
                     }
 
                     if (cost > 0 || (b.type !== 'GOAL' && isBucketActiveInMonth(b, selectedMonth))) {
                         childrenSum += cost;
                         budgetItems.push({ name: b.name, amount: cost, type: 'BUCKET' });
+                        if (b.type !== 'GOAL') {
+                            if (b.isSavings || group.forecastType === 'SAVINGS') generalSaving += cost;
+                            else if (group.forecastType === 'FIXED') fixedOps += cost;
+                            else variableOps += cost;
+                        }
                     }
                 });
 
                 plannedBudget = Math.max(childrenSum, manualLimit);
-                if (manualLimit > childrenSum) budgetItems.push({ name: 'Buffert / Ospecificerat', amount: manualLimit - childrenSum, type: 'BUFFER' });
+                if (manualLimit > childrenSum) {
+                    const unallocated = manualLimit - childrenSum;
+                    budgetItems.push({ name: 'Buffert / Ospecificerat', amount: unallocated, type: 'BUFFER' });
+                    if (group.forecastType === 'SAVINGS') generalSaving += unallocated;
+                    else if (group.forecastType === 'FIXED') fixedOps += unallocated;
+                    else variableOps += unallocated;
+                }
 
             } else {
                 let totalOverPeriod = 0;
@@ -341,9 +382,18 @@ const BudgetGroupStats = ({ selectedMonth }: { selectedMonth: string }) => {
                     let mChildren = 0;
                     assignedSubs.forEach(s => mChildren += getEffectiveSubCategoryBudget(s, mKey, budgetTemplates, monthConfigs));
                     buckets.filter(b => groupBucketIds.has(b.id)).forEach(b => {
-                         if (b.type === 'FIXED') mChildren += calculateFixedBucketCost(b, mKey);
-                         else if (b.type === 'DAILY') mChildren += calculateDailyBucketCost(b, mKey, settings.payday);
-                         else if (b.type === 'GOAL' && b.targetAmount > 0) {
+                         if (b.type === 'FIXED') {
+                             const { data } = getEffectiveBucketData(b, mKey, budgetTemplates, monthConfigs);
+                             mChildren += data ? data.amount : 0;
+                         } else if (b.type === 'DAILY') {
+                             const { data } = getEffectiveBucketData(b, mKey, budgetTemplates, monthConfigs);
+                             if (data) {
+                                 const { start: iStart, end: iEnd } = getBudgetInterval(mKey, settings.payday);
+                                 const days = eachDayOfInterval({ start: iStart, end: iEnd });
+                                 const count = days.filter(d => data.activeDays.includes(getDay(d))).length;
+                                 mChildren += count * data.dailyAmount;
+                             }
+                         } else if (b.type === 'GOAL' && b.targetAmount > 0) {
                              const { start: mStart } = getBudgetInterval(mKey, settings.payday);
                              const pastSpent = transactions.filter(t => !t.isHidden && t.bucketId === b.id && t.date < format(mStart, 'yyyy-MM-dd')).reduce((s, t) => s + Math.abs(getEffectiveAmount(t, reimbursementMap)), 0);
                              const rem = Math.max(0, b.targetAmount - pastSpent);
@@ -406,7 +456,10 @@ const BudgetGroupStats = ({ selectedMonth }: { selectedMonth: string }) => {
         const totalLimit = groupStats.reduce((sum, g) => sum + g.limit, 0);
         const totalSpent = groupStats.reduce((sum, g) => sum + g.spent, 0);
         
-        return { groupStats, totalLimit, totalSpent, totalRemaining: totalLimit - totalSpent, rangeLabel };
+        return { 
+            groupStats, totalLimit, totalSpent, totalRemaining: totalLimit - totalSpent, rangeLabel,
+            breakdownTotals: { dreamSpending, dreamSaving, generalSaving, fixedOps, variableOps }
+        };
     }, [budgetGroups, subCategories, transactions, selectedMonth, timeframe, excludeDreams, buckets, settings.payday, reimbursementMap, budgetTemplates, monthConfigs]);
 
     const handleShowBudgetBreakdown = (groupName: string, items: { name: string; amount: number; type: 'SUB'|'BUCKET'|'BUFFER' }[], total: number) => {
@@ -481,9 +534,17 @@ const BudgetGroupStats = ({ selectedMonth }: { selectedMonth: string }) => {
                  <div className="text-center text-xs text-slate-400 bg-slate-800/30 rounded-lg py-1 border border-slate-700/50">Beräkningsperiod: <span className="text-white font-medium">{data.rangeLabel}</span></div>
              </div>
             <div className="grid grid-cols-3 gap-3">
-                <div className="bg-slate-800/80 p-3 rounded-xl border border-slate-700/50 flex flex-col justify-center text-center">
-                    <div className="text-[10px] text-slate-400 uppercase font-bold tracking-wider mb-1">Budget</div>
-                    <div className="text-lg md:text-xl font-mono text-white font-bold truncate">{formatMoney(data.totalLimit)}</div>
+                <div 
+                    onClick={() => timeframe === 1 && setIsTotalBreakdownOpen(true)}
+                    className={cn(
+                        "bg-slate-800/80 p-3 rounded-xl border border-slate-700/50 flex flex-col justify-center text-center transition-all",
+                        timeframe === 1 ? "cursor-pointer hover:bg-slate-750 group" : ""
+                    )}
+                >
+                    <div className="text-[10px] text-slate-400 uppercase font-bold tracking-wider mb-1 flex items-center justify-center gap-1 group-hover:text-blue-400">
+                        Budget {timeframe === 1 && <Info size={10}/>}
+                    </div>
+                    <div className="text-lg md:text-xl font-mono text-white font-bold truncate group-hover:text-blue-300">{formatMoney(data.totalLimit)}</div>
                 </div>
                 <div className="bg-slate-800/80 p-3 rounded-xl border border-slate-700/50 flex flex-col justify-center text-center">
                     <div className="text-[10px] text-slate-500 uppercase font-bold tracking-wider mb-1">{timeframe > 1 ? 'Snitt Utfall' : 'Utfall'}</div>
@@ -633,6 +694,7 @@ const BudgetGroupStats = ({ selectedMonth }: { selectedMonth: string }) => {
                 )}
                 <div className="mt-4 border-t border-slate-700 pt-4 flex justify-end"><Button variant="secondary" onClick={() => setDrillDownData(null)}>Stäng</Button></div>
             </Modal>
+
             <Modal isOpen={!!budgetBreakdownData} onClose={() => setBudgetBreakdownData(null)} title={`Budget: ${budgetBreakdownData?.groupName}`}>
                 <div className="space-y-4">
                     <div className="flex justify-between items-center bg-slate-800 p-4 rounded-xl border border-slate-700">
@@ -657,6 +719,77 @@ const BudgetGroupStats = ({ selectedMonth }: { selectedMonth: string }) => {
                     </div>
                 </div>
             </Modal>
+
+            <Modal isOpen={isTotalBreakdownOpen} onClose={() => setIsTotalBreakdownOpen(false)} title="Budgetuppdelning">
+                <div className="space-y-6">
+                    <div className="bg-slate-800 p-4 rounded-xl border border-slate-700 flex justify-between items-center">
+                        <span className="text-slate-400 text-sm font-bold uppercase tracking-wider">Total Budget</span>
+                        <span className="text-2xl font-bold text-white font-mono">{formatMoney(data.totalLimit)}</span>
+                    </div>
+
+                    <div className="space-y-3">
+                        <div className="flex justify-between items-center p-3 bg-purple-900/20 border border-purple-500/30 rounded-xl">
+                            <div className="flex items-center gap-3">
+                                <div className="p-2 bg-purple-500/20 rounded-lg text-purple-400"><Target size={16} /></div>
+                                <div>
+                                    <div className="text-sm font-bold text-white">Drömmar: Förbrukning</div>
+                                    <div className="text-[10px] text-slate-500">Målprojekt under månaden</div>
+                                </div>
+                            </div>
+                            <div className="font-mono font-bold text-white">{formatMoney(data.breakdownTotals.dreamSpending)}</div>
+                        </div>
+
+                        <div className="flex justify-between items-center p-3 bg-emerald-900/20 border border-emerald-500/30 rounded-xl">
+                            <div className="flex items-center gap-3">
+                                <div className="p-2 bg-emerald-500/20 rounded-lg text-emerald-400"><Rocket size={16} /></div>
+                                <div>
+                                    <div className="text-sm font-bold text-white">Drömmar: Månadssparande</div>
+                                    <div className="text-[10px] text-slate-500">Avsättning till mål</div>
+                                </div>
+                            </div>
+                            <div className="font-mono font-bold text-white">{formatMoney(data.breakdownTotals.dreamSaving)}</div>
+                        </div>
+
+                        <div className="flex justify-between items-center p-3 bg-indigo-900/20 border border-indigo-500/30 rounded-xl">
+                            <div className="flex items-center gap-3">
+                                <div className="p-2 bg-indigo-500/20 rounded-lg text-indigo-400"><PiggyBank size={16} /></div>
+                                <div>
+                                    <div className="text-sm font-bold text-white">Investeringar & Sparande</div>
+                                    <div className="text-[10px] text-slate-500">Allmänt buffertsparande</div>
+                                </div>
+                            </div>
+                            <div className="font-mono font-bold text-white">{formatMoney(data.breakdownTotals.generalSaving)}</div>
+                        </div>
+
+                        <div className="flex justify-between items-center p-3 bg-blue-900/20 border border-blue-500/30 rounded-xl">
+                            <div className="flex items-center gap-3">
+                                <div className="p-2 bg-blue-500/20 rounded-lg text-blue-400"><Calendar size={16} /></div>
+                                <div>
+                                    <div className="text-sm font-bold text-white">Drift: Fasta kostnader</div>
+                                    <div className="text-[10px] text-slate-500">Hyra, el, försäkring etc.</div>
+                                </div>
+                            </div>
+                            <div className="font-mono font-bold text-white">{formatMoney(data.breakdownTotals.fixedOps)}</div>
+                        </div>
+
+                        <div className="flex justify-between items-center p-3 bg-orange-900/20 border border-orange-500/30 rounded-xl">
+                            <div className="flex items-center gap-3">
+                                <div className="p-2 bg-orange-500/20 rounded-lg text-orange-400"><Activity size={16} /></div>
+                                <div>
+                                    <div className="text-sm font-bold text-white">Drift: Rörliga kostnader</div>
+                                    <div className="text-[10px] text-slate-500">Mat, shopping, nöje</div>
+                                </div>
+                            </div>
+                            <div className="font-mono font-bold text-white">{formatMoney(data.breakdownTotals.variableOps)}</div>
+                        </div>
+                    </div>
+
+                    <div className="pt-2">
+                        <Button variant="secondary" onClick={() => setIsTotalBreakdownOpen(false)} className="w-full">Stäng</Button>
+                    </div>
+                </div>
+            </Modal>
+
             <Modal isOpen={isAiModalOpen} onClose={() => setIsAiModalOpen(false)} title={`Ekonomisk Analys - ${data.rangeLabel}`}>
                 <div className="min-h-[300px]">
                     {isAiLoading ? (
@@ -710,9 +843,20 @@ const TrendsAnalysis = () => {
                 const groupBuckets = buckets.filter(b => b.budgetGroupId === group.id || (group.linkedBucketIds && group.linkedBucketIds.includes(b.id)));
                 const bucketBudgetSum = groupBuckets.reduce((s, b) => {
                     let cost = 0;
-                    if (b.type === 'FIXED') cost = calculateFixedBucketCost(b, mKey);
-                    else if (b.type === 'DAILY') cost = calculateDailyBucketCost(b, mKey, settings.payday);
-                    else if (b.type === 'GOAL' && b.paymentSource === 'INCOME') cost = calculateGoalBucketCost(b, mKey);
+                    if (b.type === 'FIXED') {
+                        const { data } = getEffectiveBucketData(b, mKey, budgetTemplates, monthConfigs);
+                        cost = data ? data.amount : 0;
+                    } else if (b.type === 'DAILY') {
+                        const { data } = getEffectiveBucketData(b, mKey, budgetTemplates, monthConfigs);
+                        if (data) {
+                            const { start: iStart, end: iEnd } = getBudgetInterval(mKey, settings.payday);
+                            const days = eachDayOfInterval({ start: iStart, end: iEnd });
+                            const count = days.filter(d => data.activeDays.includes(getDay(d))).length;
+                            cost = count * data.dailyAmount;
+                        }
+                    } else if (b.type === 'GOAL' && b.paymentSource === 'INCOME') {
+                        cost = calculateGoalBucketCost(b, mKey);
+                    }
                     return s + cost;
                 }, 0);
 
@@ -916,7 +1060,7 @@ const TrendsAnalysis = () => {
 
 const AccountStats = () => {
     // Fix: Destructured mainCategories and subCategories from useApp for GroupedDrillDown usage
-    const { accounts, buckets, transactions, selectedMonth, settings, updateTransaction, mainCategories, subCategories, updateAccount } = useApp();
+    const { accounts, buckets, transactions, selectedMonth, settings, updateTransaction, mainCategories, subCategories, updateAccount, budgetTemplates, monthConfigs } = useApp();
     const { startStr, endStr, intervalLabel } = useBudgetMonth(selectedMonth);
     const [timeframe, setTimeframe] = useState<1 | 3 | 6 | 9 | 12>(1);
     const [expandedAccount, setExpandedAccount] = useState<string | null>(null);
@@ -954,7 +1098,19 @@ const AccountStats = () => {
                         bucketItems.push({ id: `${b.id}-spending`, name: b.name, planned: 0, deposit: 0, withdrawal: withdrawalsSum / timeframe, expense: expensesSum / timeframe, rawWithdrawals: withdrawals, rawExpenses: rawExpenses });
                     }
                 } else {
-                    let p = 0; if (b.type === 'FIXED') p = calculateFixedBucketCost(b, selectedMonth); else p = calculateDailyBucketCost(b, selectedMonth, settings.payday);
+                    let p = 0; 
+                    if (b.type === 'FIXED') {
+                        const { data } = getEffectiveBucketData(b, selectedMonth, budgetTemplates, monthConfigs);
+                        p = data ? data.amount : 0;
+                    } else if (b.type === 'DAILY') {
+                        const { data } = getEffectiveBucketData(b, selectedMonth, budgetTemplates, monthConfigs);
+                        if (data) {
+                             const { start, end } = getBudgetInterval(selectedMonth, settings.payday);
+                             const days = eachDayOfInterval({ start, end });
+                             const count = days.filter(d => data.activeDays.includes(getDay(d))).length;
+                             p = count * data.dailyAmount;
+                        }
+                    }
                     bucketItems.push({ id: b.id, name: b.name, planned: p, deposit: depositsSum / timeframe, withdrawal: withdrawalsSum / timeframe, expense: expensesSum / timeframe, rawDeposits: deposits, rawWithdrawals: withdrawals, rawExpenses: rawExpenses });
                 }
             });
@@ -963,7 +1119,7 @@ const AccountStats = () => {
             return { ...acc, standardItems: bucketItems.filter(i => !i.id.includes('goal')), goalItems: bucketItems.filter(i => i.id.includes('goal')), otherStats, netFlow: (bucketItems.reduce((s, b) => s + b.deposit, 0) + otherStats.deposit) - (bucketItems.reduce((s, b) => s + b.withdrawal + b.expense, 0) + otherStats.withdrawal + otherStats.expense) };
         });
         return { processedAccounts, targetLabel };
-    }, [accounts, buckets, transactions, selectedMonth, timeframe, settings.payday, startStr, endStr, reimbursementMap]);
+    }, [accounts, buckets, transactions, selectedMonth, timeframe, settings.payday, startStr, endStr, reimbursementMap, budgetTemplates, monthConfigs]);
 
     const handleDrillDown = (title: string, txs: Transaction[], grouped = false) => { if (txs.length > 0) setDrillDownData({ title, transactions: txs, grouped }); };
 

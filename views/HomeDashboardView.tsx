@@ -101,16 +101,11 @@ export const HomeDashboardView: React.FC<{ onNavigate: (view: any) => void }> = 
 
     // --- 2. SAFE TO SPEND & FORECAST ---
     const budgetData = useMemo(() => {
-        let totalLimit = 0;
-        let totalSpent = 0;
-        let projectedTotal = 0;
+        let consumptionLimitTotal = 0;
+        let consumptionSpentTotal = 0;
+        let consumptionProjectedTotal = 0;
         let disposableTotal = 0;
         
-        // For Forecast UI: Only include consumption (Non-savings)
-        let consumptionLimit = 0;
-        let consumptionSpent = 0;
-        let consumptionProjected = 0;
-
         const groupBreakdown: any[] = [];
 
         // Correct bucket assignment map
@@ -151,120 +146,184 @@ export const HomeDashboardView: React.FC<{ onNavigate: (view: any) => void }> = 
         budgetGroups.forEach(group => {
             const { data: explicitData } = getEffectiveBudgetGroupData(group, selectedMonth, budgetTemplates, monthConfigs);
             const manualLimit = explicitData && !explicitData.isExplicitlyDeleted ? explicitData.limit : 0;
+            const groupType = group.forecastType || 'VARIABLE';
+            const isGroupSavings = groupType === 'SAVINGS';
+
+            // Split items into Consumption vs Savings
+            let groupConsumptionLimit = 0;
+            let groupConsumptionSpent = 0;
+            let groupAllChildrenBudget = 0;
 
             const groupSubs = subCategories.filter(s => s.budgetGroupId === group.id);
-            const assignedSubIds = new Set(groupSubs.map(s => s.id));
-            const subBudgetSum = groupSubs.reduce((sum, sub) => sum + getEffectiveSubCategoryBudget(sub, selectedMonth, budgetTemplates, monthConfigs), 0);
+            
+            groupSubs.forEach(sub => {
+                const b = getEffectiveSubCategoryBudget(sub, selectedMonth, budgetTemplates, monthConfigs);
+                groupAllChildrenBudget += b;
+                
+                const txs = transactions.filter(t => 
+                    !t.isHidden && 
+                    t.date >= startStr && t.date <= endStr && 
+                    t.categorySubId === sub.id && 
+                    !t.bucketId &&
+                    (t.type === 'EXPENSE' || (!t.type && t.amount < 0))
+                );
+                const s = txs.reduce((sum, t) => sum + Math.abs(getEffectiveAmount(t, reimbursementMap)), 0);
+
+                if (!isGroupSavings && !sub.isSavings) {
+                    groupConsumptionLimit += b;
+                    groupConsumptionSpent += s;
+                }
+            });
 
             const groupBucketIds = new Set(groupToBuckets.get(group.id) || []);
-            const bucketBudgetSum = buckets.filter(b => groupBucketIds.has(b.id)).reduce((sum, b) => {
-                let cost = 0;
-                if (b.type === 'FIXED') {
-                    const { data } = getEffectiveBucketData(b, selectedMonth, budgetTemplates, monthConfigs);
-                    cost = data ? data.amount : 0;
-                } else if (b.type === 'DAILY') {
-                    const { data } = getEffectiveBucketData(b, selectedMonth, budgetTemplates, monthConfigs);
+            buckets.filter(b => groupBucketIds.has(b.id)).forEach(bucket => {
+                let currentMonthSavingCost = 0;
+                let consumptionLimit = 0;
+                let consumptionSpent = transactions
+                    .filter(t => !t.isHidden && t.bucketId === bucket.id && t.date >= startStr && t.date <= endStr && (t.type === 'EXPENSE' || (!t.type && t.amount < 0)))
+                    .reduce((sum, t) => sum + Math.abs(getEffectiveAmount(t, reimbursementMap)), 0);
+
+                if (bucket.type === 'FIXED') {
+                    const { data } = getEffectiveBucketData(bucket, selectedMonth, budgetTemplates, monthConfigs);
+                    consumptionLimit = data ? data.amount : 0;
+                } else if (bucket.type === 'DAILY') {
+                    const { data } = getEffectiveBucketData(bucket, selectedMonth, budgetTemplates, monthConfigs);
                     if (data) {
                         const days = eachDayOfInterval({ start, end });
                         const count = days.filter(d => data.activeDays.includes(getDay(d))).length;
-                        cost = count * data.dailyAmount;
+                        consumptionLimit = count * data.dailyAmount;
                     }
-                } else if (b.type === 'GOAL') {
-                    let goalBudget = 0;
-                    if (b.paymentSource === 'INCOME' && b.startSavingDate && b.targetDate) {
+                } else if (bucket.type === 'GOAL') {
+                    // GOAL Part 1: Saving part (Deduction from income)
+                    if (bucket.paymentSource === 'INCOME') {
+                        currentMonthSavingCost = calculateGoalBucketCost(bucket, selectedMonth);
+                    }
+                    
+                    // GOAL Part 2: Consumption part (Remaining project budget)
+                    let isSpendingPhase = false;
+                    if (consumptionSpent > 0) {
+                        isSpendingPhase = true;
+                    } else {
                         const current = parseISO(`${selectedMonth}-01`);
-                        const startSave = parseISO(`${b.startSavingDate}-01`);
-                        const target = parseISO(`${b.targetDate}-01`);
-                        if (isValid(current) && isValid(startSave) && isValid(target)) {
-                            if (!isBefore(current, startSave) && isBefore(current, target)) {
-                                goalBudget += calculateGoalBucketCost(b, selectedMonth);
+                        if (bucket.targetDate) {
+                            const targetDateObj = parseISO(`${bucket.targetDate}-01`);
+                            if (isValid(targetDateObj) && isSameMonth(current, targetDateObj)) {
+                                isSpendingPhase = true;
+                            }
+                        }
+                        if (bucket.eventStartDate && bucket.eventEndDate) {
+                            const evtStart = parseISO(bucket.eventStartDate);
+                            const evtEnd = parseISO(bucket.eventEndDate);
+                            if (isValid(evtStart) && isValid(evtEnd)) {
+                                if (!isAfter(start, evtEnd) && !isBefore(end, evtStart)) {
+                                    isSpendingPhase = true;
+                                }
                             }
                         }
                     }
-                    const hasTxs = transactions.some(t => t.bucketId === b.id && t.date >= startStr && t.date <= endStr && !t.isHidden);
-                    if (hasTxs || isBucketActiveInMonth(b, selectedMonth)) {
-                        if (b.targetAmount > 0) {
-                            const { start: budgetStart } = getBudgetInterval(selectedMonth, settings.payday);
-                            const currentStartStr = format(budgetStart, 'yyyy-MM-dd');
-                            const pastSpent = transactions
-                                .filter(t => !t.isHidden && t.bucketId === b.id && t.date < currentStartStr && (t.type === 'EXPENSE' || (!t.type && t.amount < 0)))
-                                .reduce((s, t) => s + Math.abs(getEffectiveAmount(t, reimbursementMap)), 0);
-                            goalBudget += Math.max(0, b.targetAmount - pastSpent);
+
+                    if (isSpendingPhase) {
+                        // Calculate remaining project budget (Total - Past Spending)
+                        const budgetStart = start;
+                        const currentStartStr = format(budgetStart, 'yyyy-MM-dd');
+                        const pastSpent = transactions
+                            .filter(t => 
+                                !t.isHidden && 
+                                t.bucketId === bucket.id && 
+                                t.date < currentStartStr && 
+                                (t.type === 'EXPENSE' || (!t.type && t.amount < 0))
+                            )
+                            .reduce((sum, t) => sum + Math.abs(getEffectiveAmount(t, reimbursementMap)), 0);
+                        
+                        let projectBudget = Math.max(0, bucket.targetAmount - pastSpent);
+                        
+                        // Handle Archived Goals: Cap budget to actual spent if underspent
+                        const archivedDateObj = bucket.archivedDate ? parseISO(`${bucket.archivedDate}-01`) : null;
+                        const currentMonthObj = parseISO(`${selectedMonth}-01`);
+                        const isArchived = archivedDateObj && isValid(archivedDateObj) && (isSameMonth(currentMonthObj, archivedDateObj) || isAfter(currentMonthObj, archivedDateObj));
+                        
+                        if (isArchived) {
+                            consumptionLimit = Math.min(projectBudget, consumptionSpent);
+                        } else {
+                            consumptionLimit = projectBudget;
                         }
                     }
-                    cost = goalBudget;
                 }
-                return sum + cost;
-            }, 0);
 
-            const limit = Math.max(manualLimit, subBudgetSum + bucketBudgetSum);
+                // Sum up "total parts" for group buffer detection
+                groupAllChildrenBudget += (bucket.type === 'GOAL' ? currentMonthSavingCost : consumptionLimit);
 
-            const groupTxs = transactions.filter(t => {
-                if (t.isHidden || t.date < startStr || t.date > endStr || t.type === 'TRANSFER' || t.type === 'INCOME' || t.amount >= 0) return false;
-                if (t.bucketId) {
-                    if (groupBucketIds.has(t.bucketId)) return true;
-                    if (group.isCatchAll) return !assignedBucketIds.has(t.bucketId);
-                    return false;
+                // Add to consumption totals
+                if (!isGroupSavings && (!bucket.isSavings || bucket.type === 'GOAL')) {
+                    groupConsumptionLimit += consumptionLimit;
+                    groupConsumptionSpent += consumptionSpent;
                 }
-                if (t.categorySubId && assignedSubIds.has(t.categorySubId)) return true;
-                if (group.isCatchAll) {
-                    if (!t.categorySubId) return true;
-                    const sub = subCategories.find(s => s.id === t.categorySubId);
-                    return !sub || !sub.budgetGroupId;
-                }
-                return false;
             });
 
-            const spent = groupTxs.reduce((sum, t) => sum + Math.abs(getEffectiveAmount(t, reimbursementMap)), 0);
-            
-            totalLimit += limit;
-            totalSpent += spent;
+            // Handle Manual Limit Buffer
+            const buffer = Math.max(0, manualLimit - groupAllChildrenBudget);
+            if (!isGroupSavings) {
+                groupConsumptionLimit += buffer;
+            }
 
-            const groupType = group.forecastType || 'VARIABLE';
-            const isSavings = groupType === 'SAVINGS';
+            // Also account for extra unclassified spent in catch-all
+            if (group.isCatchAll) {
+                const extraSpent = transactions.filter(t => 
+                    !t.isHidden && t.date >= startStr && t.date <= endStr &&
+                    (t.type === 'EXPENSE' || (!t.type && t.amount < 0)) &&
+                    !t.bucketId &&
+                    (!t.categorySubId || !subCategories.find(s => s.id === t.categorySubId)?.budgetGroupId)
+                ).reduce((sum, t) => sum + Math.abs(getEffectiveAmount(t, reimbursementMap)), 0);
+                groupConsumptionSpent += extraSpent;
+            }
 
-            let groupDisposable = 0;
+            // PROJECTION LOGIC (FOR CONSUMPTION ONLY)
             let groupProjected = 0;
+            let groupDisposable = 0;
 
-            if (isSavings) {
-                // Savings are reserved. They don't contribute to daily room.
-                groupDisposable = 0; 
-                groupProjected = Math.max(limit, spent); 
-            } else if (groupType === 'FIXED') {
-                // Fixed costs are reserved. Only overspending impacts daily room.
-                const effectiveConsumed = Math.max(limit, spent);
-                groupDisposable = limit - effectiveConsumed;
-                groupProjected = effectiveConsumed;
+            if (isGroupSavings) {
+                groupProjected = 0;
+                groupDisposable = 0;
             } else {
-                // Variable costs project linearly.
-                groupDisposable = limit - spent;
-                const dailyAverage = daysPassed > 0 ? spent / daysPassed : 0;
-                groupProjected = spent + (dailyAverage * futureDays);
+                // FIXED & VARIABLE now allow negative contributions if overspent
+                groupDisposable = groupConsumptionLimit - groupConsumptionSpent;
+                
+                if (groupType === 'FIXED') {
+                    groupProjected = Math.max(groupConsumptionLimit, groupConsumptionSpent);
+                } else {
+                    const dailyAvg = daysPassed > 0 ? groupConsumptionSpent / daysPassed : 0;
+                    groupProjected = groupConsumptionSpent + (dailyAvg * futureDays);
+                }
             }
 
+            consumptionLimitTotal += groupConsumptionLimit;
+            consumptionSpentTotal += groupConsumptionSpent;
+            consumptionProjectedTotal += groupProjected;
             disposableTotal += groupDisposable;
-            projectedTotal += groupProjected;
 
-            // Accumulate Consumption Totals for the Forecast UI
-            if (!isSavings) {
-                consumptionLimit += limit;
-                consumptionSpent += spent;
-                consumptionProjected += groupProjected;
-            }
-
-            groupBreakdown.push({ id: group.id, name: group.name, icon: group.icon, limit, spent, type: groupType, disposable: groupDisposable, projected: groupProjected });
+            groupBreakdown.push({ 
+                id: group.id, 
+                name: group.name, 
+                icon: group.icon, 
+                limit: groupConsumptionLimit, 
+                spent: groupConsumptionSpent, 
+                type: groupType, 
+                disposable: groupDisposable, 
+                projected: groupProjected,
+                isSavingsGroup: isGroupSavings
+            });
         });
 
-        const safeToSpend = daysRemaining > 0 ? Math.max(0, disposableTotal / daysRemaining) : 0;
-        const projectedDiff = consumptionProjected - consumptionLimit;
-        const projectedRoom = consumptionLimit - consumptionProjected;
+        const safeToSpend = daysRemaining > 0 ? disposableTotal / daysRemaining : 0;
+        const projectedDiff = consumptionProjectedTotal - consumptionLimitTotal;
+        const projectedRoom = consumptionLimitTotal - consumptionProjectedTotal;
 
         return { 
-            totalLimit: consumptionLimit, // Max Budget for Consumption
-            totalSpent: consumptionSpent, 
+            totalLimit: consumptionLimitTotal, 
+            totalSpent: consumptionSpentTotal, 
             remaining: disposableTotal, 
             safeToSpend, 
-            projectedTotal: consumptionProjected, 
+            projectedTotal: consumptionProjectedTotal, 
             projectedDiff, 
             projectedRoom, 
             groupBreakdown 
@@ -423,7 +482,7 @@ export const HomeDashboardView: React.FC<{ onNavigate: (view: any) => void }> = 
                 </div>
                 
                 <p className="text-[10px] text-slate-500 leading-relaxed italic">
-                    Beräknas genom att lägga samman fasta kostnader med den förväntade linjära förbrukningen i rörliga kategorier. Sparande är exkluderat.
+                    Beräknas genom att lägga samman fasta kostnader med den förväntade linjära förbrukningen i rörliga kategorier. Sparande (individuella poster eller hela grupper) är exkluderat, men budget för Dreams (förbrukning) är inkluderat.
                 </p>
             </div>
 
@@ -478,7 +537,7 @@ export const HomeDashboardView: React.FC<{ onNavigate: (view: any) => void }> = 
                     <div className="bg-slate-800 p-4 rounded-xl border border-slate-700">
                         <div className="flex justify-between items-end">
                             <div>
-                                <div className="text-[10px] text-slate-500 uppercase font-bold mb-1">Totalt Utrymme</div>
+                                <div className="text-[10px] text-slate-500 uppercase font-bold mb-1">Konsumtionsutrymme</div>
                                 <div className="text-3xl font-bold text-white font-mono">{formatMoney(budgetData.remaining)}</div>
                             </div>
                             <div className="text-right">
@@ -489,7 +548,7 @@ export const HomeDashboardView: React.FC<{ onNavigate: (view: any) => void }> = 
                     </div>
 
                     <div className="space-y-4">
-                        <h3 className="text-xs font-bold text-slate-400 uppercase tracking-wider px-1">Budgetgrupper</h3>
+                        <h3 className="text-xs font-bold text-slate-400 uppercase tracking-wider px-1">Budgetgrupper (Konsumtion)</h3>
                         <div className="space-y-3">
                             {budgetData.groupBreakdown.map(group => (
                                 <div key={group.id} className="bg-slate-900/50 p-3 rounded-xl border border-slate-800">
@@ -499,10 +558,10 @@ export const HomeDashboardView: React.FC<{ onNavigate: (view: any) => void }> = 
                                             <div>
                                                 <div className="font-bold text-white text-sm">{group.name}</div>
                                                 <div className="text-[9px] uppercase tracking-wider flex items-center gap-1 mt-0.5">
-                                                    {group.type === 'FIXED' ? (
-                                                        <span className="text-blue-400 flex items-center gap-0.5"><Calendar size={8}/> Fast</span>
-                                                    ) : group.type === 'SAVINGS' ? (
+                                                    {group.isSavingsGroup ? (
                                                         <span className="text-emerald-400 flex items-center gap-0.5"><PiggyBank size={8}/> Sparande</span>
+                                                    ) : group.type === 'FIXED' ? (
+                                                        <span className="text-blue-400 flex items-center gap-0.5"><Calendar size={8}/> Fast</span>
                                                     ) : (
                                                         <span className="text-indigo-400 flex items-center gap-0.5"><Activity size={8}/> Rörlig</span>
                                                     )}
@@ -510,35 +569,42 @@ export const HomeDashboardView: React.FC<{ onNavigate: (view: any) => void }> = 
                                             </div>
                                         </div>
                                         <div className="text-right">
-                                            <div className={cn("font-mono font-bold text-sm", group.disposable < 0 ? "text-rose-400" : "text-slate-200")}>
+                                            <div className={cn("font-mono font-bold text-sm", group.disposable < 0 && !group.isSavingsGroup ? "text-rose-400" : "text-slate-200")}>
                                                 {group.disposable > 0 ? '+' : ''}{formatMoney(group.disposable)}
                                             </div>
                                             <div className="text-[9px] text-slate-500">Bidrag till utrymme</div>
                                         </div>
                                     </div>
                                     
-                                    <div className="flex justify-between text-[10px] text-slate-500 mb-1">
-                                        <span>Utfall: {formatMoney(group.spent)}</span>
-                                        <span>Budget: {formatMoney(group.limit)}</span>
-                                    </div>
-                                    <BudgetProgressBar spent={group.spent} total={group.limit} compact />
+                                    {!group.isSavingsGroup ? (
+                                        <>
+                                            <div className="flex justify-between text-[10px] text-slate-500 mb-1">
+                                                <span>Utfall: {formatMoney(group.spent)}</span>
+                                                <span>Konsumtionsbudget: {formatMoney(group.limit)}</span>
+                                            </div>
+                                            <BudgetProgressBar spent={group.spent} total={group.limit} compact />
+                                        </>
+                                    ) : (
+                                        <div className="text-[10px] text-slate-500 italic">Hela gruppen är markerad som sparande och exkluderas.</div>
+                                    )}
                                 </div>
                             ))}
                         </div>
                     </div>
 
                     <div className="bg-slate-800/50 p-3 rounded-xl border border-slate-700/50 text-xs text-slate-400 space-y-2">
+                        <p className="text-white font-bold mb-1">Hur räknar vi?</p>
                         <div className="flex items-start gap-2">
                             <Activity size={14} className="text-indigo-400 shrink-0 mt-0.5" />
-                            <p><span className="text-white font-bold">Rörliga grupper:</span> Beräknas som <span className="text-slate-200 italic">Budget - Utfall</span>. Hela det kvarvarande beloppet räknas som tillgängligt att spendera.</p>
+                            <p><span className="text-slate-200 font-bold">Rörliga:</span> <span className="italic">Konsumtionsbudget - Utfall</span>. Hela potten räknas som tillgänglig.</p>
                         </div>
                         <div className="flex items-start gap-2">
                             <Calendar size={14} className="text-blue-400 shrink-0 mt-0.5" />
-                            <p><span className="text-white font-bold">Fasta grupper:</span> Beräknas som <span className="text-slate-200 italic">Budget - max(Budget, Utfall)</span>. Pengarna anses reserverade. Endast om du går över budget minskar det ditt utrymme.</p>
+                            <p><span className="text-slate-200 font-bold">Fasta:</span> <span className="italic">Budget - Utfall</span>. Pengarna är reserverade, endast underförbrukning bidrar till utrymmet.</p>
                         </div>
                         <div className="flex items-start gap-2">
                             <PiggyBank size={14} className="text-emerald-400 shrink-0 mt-0.5" />
-                            <p><span className="text-white font-bold">Sparande:</span> Bidrar med <span className="text-slate-200 italic">0 kr</span> till ditt utrymme. Pengarna är låsta i budgeten för framtida bruk.</p>
+                            <p><span className="text-slate-200 font-bold">Sparande:</span> Alla poster markerade som sparande bidrar med <span className="text-white font-bold">0 kr</span>. Drömmar (förbrukning) räknas dock som konsumtion.</p>
                         </div>
                     </div>
 
