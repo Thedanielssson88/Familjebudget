@@ -75,6 +75,7 @@ interface AppContextType {
 
   setBudgetLimit: (type: 'GROUP'|'SUB'|'BUCKET', id: string, amount: number | BucketData, month: MonthKey, mode: 'TEMPLATE' | 'OVERRIDE') => Promise<void>;
   toggleMonthLock: (month: MonthKey) => Promise<void>;
+  unlockMonth: (month: MonthKey, shouldReset: boolean) => Promise<void>;
   assignTemplateToMonth: (month: MonthKey, templateId: string) => Promise<void>;
   clearBudgetOverride: (type: 'GROUP'|'SUB'|'BUCKET', id: string, month: MonthKey) => Promise<void>;
   
@@ -523,6 +524,28 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     });
   };
 
+  const unlockMonth = async (month: MonthKey, shouldReset: boolean) => {
+    const existingConfig = monthConfigs.find(c => c.monthKey === month);
+    const config = existingConfig || { monthKey: month, budgetId: activeBudgetId, templateId: budgetTemplates.find(t => t.isDefault)?.id || '' };
+    
+    const updated: MonthConfig = { 
+        ...config, 
+        isLocked: false 
+    };
+
+    if (shouldReset) {
+        updated.groupOverrides = {};
+        updated.subCategoryOverrides = {};
+        updated.bucketOverrides = {};
+    }
+
+    await db.monthConfigs.put(updated);
+    setMonthConfigs(prev => {
+        const filtered = prev.filter(c => c.monthKey !== month);
+        return [...filtered, updated];
+    });
+  };
+
   const assignTemplateToMonth = async (month: MonthKey, templateId: string) => {
     const config = monthConfigs.find(c => c.monthKey === month) || { monthKey: month, budgetId: activeBudgetId, templateId };
     const updated = { ...config, templateId, groupOverrides: {}, subCategoryOverrides: {}, bucketOverrides: {} };
@@ -579,7 +602,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     users, accounts, buckets, mainCategories, subCategories, budgetGroups, budgetTemplates, monthConfigs, settings, selectedMonth, transactions, importRules, ignoredSubscriptions,
     setMonth, updateUserIncome, updateUserName, addAccount, updateAccount, deleteAccount, addBucket, updateBucket, deleteBucket, archiveBucket, addMainCategory, deleteMainCategory, addSubCategory, deleteSubCategory, updateSubCategory, resetCategoriesToDefault,
     addBudgetGroup, updateBudgetGroup, deleteBudgetGroup, addTransactions, updateTransaction, deleteTransaction, deleteAllTransactions, addImportRule, deleteImportRule, updateImportRule, addIgnoredSubscription,
-    setPayday, updateSettings, getExportData, importData, setBudgetLimit, toggleMonthLock, assignTemplateToMonth, clearBudgetOverride, addTemplate, updateTemplate, resetMonthToTemplate
+    setPayday, updateSettings, getExportData, importData, setBudgetLimit, toggleMonthLock, unlockMonth, assignTemplateToMonth, clearBudgetOverride, addTemplate, updateTemplate, resetMonthToTemplate
   };
 
   return <AppContext.Provider value={value}>{children}</AppContext.Provider>;

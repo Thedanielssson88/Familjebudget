@@ -60,7 +60,8 @@ import {
     BarChart3,
     AlertTriangle,
     Magnet,
-    History
+    History,
+    Layers
 } from 'lucide-react';
 import { BudgetProgressBar } from '../components/BudgetProgressBar';
 
@@ -76,13 +77,15 @@ export const HomeDashboardView: React.FC<{ onNavigate: (view: any) => void }> = 
         settings,
         budgetTemplates,
         monthConfigs,
-        mainCategories
+        mainCategories,
+        accounts
     } = useApp();
     
     const { start, end, startStr, endStr, intervalLabel } = useBudgetMonth(selectedMonth);
     const reimbursementMap = useMemo(() => calculateReimbursementMap(transactions), [transactions]);
     
     const [isBudgetDrillDownOpen, setIsBudgetDrillDownOpen] = useState(false);
+    const [isDuplicatesModalOpen, setIsDuplicatesModalOpen] = useState(false);
 
     // --- 1. TIME CALCULATIONS ---
     const today = startOfDay(new Date());
@@ -352,32 +355,60 @@ export const HomeDashboardView: React.FC<{ onNavigate: (view: any) => void }> = 
         };
 
         // Potentials Duplicates (Same Day, Same Amount, Same Account, Same Text)
-        const duplicateGroups = new Map<string, number>();
+        const duplicateGroups = new Map<string, import('../types').Transaction[]>();
         currentTxs.forEach(t => {
             const key = `${t.date}_${t.amount}_${t.accountId}_${t.description.trim().toLowerCase()}`;
-            duplicateGroups.set(key, (duplicateGroups.get(key) || 0) + 1);
+            if (!duplicateGroups.has(key)) duplicateGroups.set(key, []);
+            duplicateGroups.get(key)!.push(t);
         });
-        const duplicateCount = Array.from(duplicateGroups.values()).filter(count => count > 1).length;
+        const duplicateList = Array.from(duplicateGroups.values()).filter(group => group.length > 1);
+        const duplicateCount = duplicateList.length;
 
-        // Small Spends summary
-        const smallSpends = expenseTxs.filter(t => Math.abs(getEffectiveAmount(t, reimbursementMap)) < 200);
-        const smallSpendsTotal = smallSpends.reduce((sum, t) => sum + Math.abs(getEffectiveAmount(t, reimbursementMap)), 0);
+        // Money Magnet & Habitual Animal (All expenses)
+        const merchantMap = new Map<string, { total: number, count: number }>();
+        // Small Spends Map (Only individual transactions < 200)
+        const smallSpendsMap = new Map<string, { total: number, count: number }>();
+        
+        let smallSpendsTotal = 0;
 
-        // Money Magnet & Habitual Animal
-        const merchantMap = new Map<string, { total: number, count: number, icon?: string }>();
         expenseTxs.forEach(t => {
             const eff = Math.abs(getEffectiveAmount(t, reimbursementMap));
             if (eff === 0) return;
             const name = cleanName(t.description);
+            
+            // All-expense tracking
             const current = merchantMap.get(name) || { total: 0, count: 0 };
             merchantMap.set(name, { total: current.total + eff, count: current.count + 1 });
+
+            // Small Spends tracking (If this specific purchase was < 200)
+            if (eff < 200) {
+                smallSpendsTotal += eff;
+                const currentSmall = smallSpendsMap.get(name) || { total: 0, count: 0 };
+                smallSpendsMap.set(name, { total: currentSmall.total + eff, count: currentSmall.count + 1 });
+            }
         });
 
-        const sortedByAmount = Array.from(merchantMap.entries()).sort((a, b) => b[1].total - a[1].total);
-        const moneyMagnet = sortedByAmount[0] ? { name: sortedByAmount[0][0], amount: sortedByAmount[0][1].total } : null;
+        // 1. Small Spends List (Sorted by total amount of the small purchases)
+        const topSmallSpends = Array.from(smallSpendsMap.entries())
+            .sort((a, b) => b[1].total - a[1].total)
+            .slice(0, 5)
+            .map(([name, data]) => ({ name, amount: data.total, count: data.count }));
 
-        const sortedByFrequency = Array.from(merchantMap.entries()).sort((a, b) => b[1].count - a[1].count);
-        const habitualAnimal = sortedByFrequency[0] ? { name: sortedByFrequency[0][0], count: sortedByFrequency[0][1].count } : null;
+        // 2. Money Magnets (Top 5 largest INDIVIDUAL transactions)
+        const topMoneyMagnets = expenseTxs
+            .map(t => ({ 
+                name: t.description, 
+                amount: Math.abs(getEffectiveAmount(t, reimbursementMap)),
+                date: t.date 
+            }))
+            .sort((a, b) => b.amount - a.amount)
+            .slice(0, 5);
+
+        // 3. Habitual Animals (Top 5 most frequent merchants)
+        const topHabitualAnimals = Array.from(merchantMap.entries())
+            .sort((a, b) => b[1].count - a[1].count)
+            .slice(0, 5)
+            .map(([name, data]) => ({ name, count: data.count, amount: data.total }));
 
         // Year-over-Year comparison
         const lastYearMonth = format(subYears(parseISO(`${selectedMonth}-01`), 1), 'yyyy-MM');
@@ -424,14 +455,15 @@ export const HomeDashboardView: React.FC<{ onNavigate: (view: any) => void }> = 
 
         return { 
             duplicateCount,
+            duplicateList,
             smallSpendsTotal,
-            moneyMagnet,
-            habitualAnimal,
+            topSmallSpends,
+            topMoneyMagnets,
+            topHabitualAnimals,
             lastYearTotal,
             yoyDiff,
             hasLastYearData,
-            categoryShiftMessage,
-            topSmallSpends: sortedByAmount.filter(m => m[1].total < 1000).slice(0, 5).map(([name, data], i) => ({ rank: i+1, name, amount: data.total, count: data.count }))
+            categoryShiftMessage
         };
     }, [transactions, startStr, endStr, reimbursementMap, budgetData.totalSpent, mainCategories, selectedMonth, settings.payday]);
 
@@ -499,7 +531,7 @@ export const HomeDashboardView: React.FC<{ onNavigate: (view: any) => void }> = 
                     <h3 className="text-xs font-bold text-slate-400 uppercase tracking-wider px-1 flex items-center gap-2"><Zap size={12} className="text-yellow-400" /> Att Hantera</h3>
                     
                     {analysisData.duplicateCount > 0 && (
-                         <div onClick={() => onNavigate('transactions')} className="bg-slate-800 p-4 rounded-xl border-l-4 border-l-rose-500 border-y border-r border-slate-700 flex justify-between items-center cursor-pointer hover:bg-slate-750">
+                         <div onClick={() => setIsDuplicatesModalOpen(true)} className="bg-slate-800 p-4 rounded-xl border-l-4 border-l-rose-500 border-y border-r border-slate-700 flex justify-between items-center cursor-pointer hover:bg-slate-750">
                             <div className="flex items-center gap-3">
                                 <div className="bg-rose-500/20 p-2 rounded-full text-rose-400"><AlertTriangle size={18} /></div>
                                 <div>
@@ -578,44 +610,70 @@ export const HomeDashboardView: React.FC<{ onNavigate: (view: any) => void }> = 
 
             <div>
                 <h3 className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-3 flex items-center gap-2"><Zap size={12} /> Snabba Insikter</h3>
-                <div className="grid grid-cols-2 gap-3">
+                <div className="space-y-3">
                     {/* Small Spends Insight */}
-                    <div className="bg-slate-800 p-3 rounded-xl border border-slate-700 col-span-2">
+                    <div className="bg-slate-800 p-3 rounded-xl border border-slate-700">
                         <div className="flex justify-between items-center mb-3">
-                            <div className="text-[10px] text-slate-500 uppercase font-bold flex items-center gap-1"><Coffee size={10} /> Småskvättar (&lt; 200kr)</div>
+                            <div className="text-[10px] text-slate-500 uppercase font-bold flex items-center gap-1"><Coffee size={10} /> Småköp under 200kr</div>
                             <div className="text-white font-mono font-bold text-sm">{formatMoney(analysisData.smallSpendsTotal)}</div>
                         </div>
                         <div className="space-y-1.5">
                             {analysisData.topSmallSpends.map((item, i) => (
                                 <div key={i} className="flex justify-between items-center text-xs border-b border-slate-700/50 pb-1 last:border-0 last:pb-0">
-                                    <div className="flex items-center gap-2 overflow-hidden"><span className="text-slate-600 font-bold w-3">{i+1}.</span><span className="text-slate-300 truncate">{item.name}</span></div>
-                                    <span className="text-slate-400 font-mono">{formatMoney(item.amount)}</span>
+                                    <div className="flex items-center gap-2 overflow-hidden">
+                                        <span className="text-slate-600 font-bold w-3">{i+1}.</span>
+                                        <span className="text-slate-300 truncate">{item.name}</span>
+                                    </div>
+                                    <div className="flex items-center gap-3">
+                                        <span className="text-[10px] text-slate-500 font-medium">{item.count} köp</span>
+                                        <span className="text-slate-400 font-mono w-16 text-right">{formatMoney(item.amount)}</span>
+                                    </div>
                                 </div>
                             ))}
                         </div>
                     </div>
 
-                    {/* Money Magnet */}
-                    {analysisData.moneyMagnet && (
-                        <div className="bg-slate-800 p-3 rounded-xl border border-slate-700">
-                             <div className="text-[10px] text-slate-500 uppercase font-bold mb-2 flex items-center gap-1"><Magnet size={10} className="text-blue-400"/> Pengamagneten</div>
-                             <div className="font-bold text-white text-sm truncate">{analysisData.moneyMagnet.name}</div>
-                             <div className="text-xs text-blue-400 font-mono mt-1">{formatMoney(analysisData.moneyMagnet.amount)} totalt</div>
+                    {/* Money Magnets (Top 5 largest individual transactions) */}
+                    <div className="bg-slate-800 p-3 rounded-xl border border-slate-700">
+                        <div className="text-[10px] text-slate-500 uppercase font-bold mb-3 flex items-center gap-1"><Magnet size={10} className="text-blue-400"/> Pengamagneten (Top 5 utlägg)</div>
+                        <div className="space-y-1.5">
+                            {analysisData.topMoneyMagnets.map((item, i) => (
+                                <div key={i} className="flex justify-between items-center text-xs border-b border-slate-700/50 pb-1 last:border-0 last:pb-0">
+                                    <div className="flex flex-col min-w-0 pr-2">
+                                        <div className="flex items-center gap-2 overflow-hidden">
+                                            <span className="text-slate-600 font-bold w-3">{i+1}.</span>
+                                            <span className="text-slate-300 truncate">{item.name}</span>
+                                        </div>
+                                        <span className="text-[10px] text-slate-600 ml-5">{item.date}</span>
+                                    </div>
+                                    <span className="text-blue-400 font-mono font-bold whitespace-nowrap">{formatMoney(item.amount)}</span>
+                                </div>
+                            ))}
                         </div>
-                    )}
+                    </div>
 
-                    {/* Habitual Animal */}
-                    {analysisData.habitualAnimal && (
-                        <div className="bg-slate-800 p-3 rounded-xl border border-slate-700">
-                             <div className="text-[10px] text-slate-500 uppercase font-bold mb-2 flex items-center gap-1"><Repeat size={10} className="text-orange-400"/> Vanedjuret</div>
-                             <div className="font-bold text-white text-sm truncate">{analysisData.habitualAnimal.name}</div>
-                             <div className="text-xs text-orange-400 font-mono mt-1">{analysisData.habitualAnimal.count} besök</div>
+                    {/* Habitual Animals (Top 5 frequency) */}
+                    <div className="bg-slate-800 p-3 rounded-xl border border-slate-700">
+                        <div className="text-[10px] text-slate-500 uppercase font-bold mb-3 flex items-center gap-1"><Repeat size={10} className="text-orange-400"/> Vanedjuret (Flest besök)</div>
+                        <div className="space-y-1.5">
+                            {analysisData.topHabitualAnimals.map((item, i) => (
+                                <div key={i} className="flex justify-between items-center text-xs border-b border-slate-700/50 pb-1 last:border-0 last:pb-0">
+                                    <div className="flex items-center gap-2 overflow-hidden">
+                                        <span className="text-slate-600 font-bold w-3">{i+1}.</span>
+                                        <span className="text-slate-300 truncate">{item.name}</span>
+                                    </div>
+                                    <div className="flex items-center gap-3">
+                                        <span className="text-orange-400 font-bold">{item.count} besök</span>
+                                        <span className="text-slate-500 font-mono w-16 text-right">{formatMoney(item.amount)}</span>
+                                    </div>
+                                </div>
+                            ))}
                         </div>
-                    )}
+                    </div>
 
                     {/* Year-over-Year Comparison */}
                     {analysisData.hasLastYearData && (
-                        <div className="bg-slate-800 p-3 rounded-xl border border-slate-700 col-span-2">
+                        <div className="bg-slate-800 p-3 rounded-xl border border-slate-700">
                              <div className="flex justify-between items-center mb-2">
                                 <div className="text-[10px] text-slate-500 uppercase font-bold flex items-center gap-1"><History size={10} className="text-indigo-400"/> Årsjämförelse</div>
                                 <div className={cn("text-[10px] font-bold px-1.5 py-0.5 rounded", analysisData.yoyDiff > 0 ? "bg-rose-500/10 text-rose-400" : "bg-emerald-500/10 text-emerald-400")}>
@@ -656,6 +714,51 @@ export const HomeDashboardView: React.FC<{ onNavigate: (view: any) => void }> = 
                     </div>
                 </div>
             )}
+
+            {/* DUPLICATES MODAL */}
+            <Modal isOpen={isDuplicatesModalOpen} onClose={() => setIsDuplicatesModalOpen(false)} title="Potentiella Dubbeldragningar">
+                <div className="space-y-4">
+                    <div className="bg-rose-500/10 border border-rose-500/20 p-4 rounded-xl text-rose-300 text-xs flex gap-3 items-start">
+                        <AlertTriangle className="shrink-0 w-4 h-4" />
+                        <p>Dessa transaktioner delar exakt datum, belopp och konto. Kontrollera om din bank har debiterat dig två gånger av misstag.</p>
+                    </div>
+
+                    <div className="space-y-4 max-h-[60vh] overflow-y-auto pr-1 no-scrollbar">
+                        {analysisData.duplicateList.map((group, groupIdx) => (
+                            <div key={groupIdx} className="bg-slate-900/50 rounded-xl border border-slate-700 overflow-hidden">
+                                <div className="bg-slate-800 px-3 py-2 text-[10px] font-bold uppercase tracking-widest text-slate-400 flex items-center gap-2">
+                                    <Layers size={12}/> Grupp {groupIdx + 1}
+                                </div>
+                                <div className="divide-y divide-slate-700/50">
+                                    {group.map(tx => {
+                                        const account = accounts.find(a => a.id === tx.accountId);
+                                        return (
+                                            <div key={tx.id} className="p-3 flex justify-between items-center bg-slate-800/20">
+                                                <div className="min-w-0 pr-4">
+                                                    <div className="text-white font-medium text-sm truncate">{tx.description}</div>
+                                                    <div className="text-[10px] text-slate-500 flex items-center gap-2 mt-0.5">
+                                                        <span>{tx.date}</span>
+                                                        <span>•</span>
+                                                        <span>{account?.icon} {account?.name}</span>
+                                                    </div>
+                                                </div>
+                                                <div className="font-mono font-bold text-rose-400 whitespace-nowrap">
+                                                    {formatMoney(tx.amount)}
+                                                </div>
+                                            </div>
+                                        );
+                                    })}
+                                </div>
+                            </div>
+                        ))}
+                    </div>
+                    
+                    <div className="flex gap-2 pt-2 border-t border-slate-700">
+                        <Button variant="secondary" onClick={() => setIsDuplicatesModalOpen(false)} className="flex-1">Stäng</Button>
+                        <Button onClick={() => { setIsDuplicatesModalOpen(false); onNavigate('transactions'); }} className="flex-1 bg-blue-600">Gå till Import</Button>
+                    </div>
+                </div>
+            </Modal>
 
             <Modal isOpen={isBudgetDrillDownOpen} onClose={() => setIsBudgetDrillDownOpen(false)} title="Beräkning: Kvar att använda">
                 <div className="space-y-6">
