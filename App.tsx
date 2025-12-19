@@ -10,7 +10,6 @@ import { TransactionsView } from './views/TransactionsView';
 import { SettingsCategories } from './views/SettingsCategories';
 import { SettingsAccounts } from './views/SettingsAccounts'; 
 import { HousingCalculator } from './views/HousingCalculator';
-// Added missing X and Check icons to lucide-react imports
 import { LayoutGrid, Wallet, PieChart, ArrowLeftRight, Calendar, Settings, Sparkles, Cloud, RefreshCw, Trash2, Download, Receipt, Database, AlertTriangle, Home, ChevronDown, Plus, Layout, X, Check } from 'lucide-react';
 import { cn, Button, Modal, Input } from './components/components';
 import { format, subMonths, addMonths } from 'date-fns';
@@ -263,7 +262,7 @@ const MainApp = () => {
               <div>
                   <label className="text-xs font-bold text-slate-500 uppercase tracking-widest mb-2 block">Välj Ikon</label>
                   <div className="flex gap-3 overflow-x-auto no-scrollbar pb-2">
-                      {['🏠', '👤', '💼', '💼', '💳', '📈', '🚀', '🛠️'].map(emoji => (
+                      {['🏠', '👤', '💼', '💳', '📈', '🚀', '🛠️'].map(emoji => (
                           <button 
                             key={emoji}
                             onClick={() => setNewBudgetIcon(emoji)}

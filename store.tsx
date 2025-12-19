@@ -111,7 +111,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
           await db.budgets.add(defaultBudget);
           b = [defaultBudget];
           
-          // Migration of orphan records
+          // Migration of orphan records to the new default budget
           const tablesToMigrate = ['users', 'accounts', 'buckets', 'budgetGroups', 'budgetTemplates', 'monthConfigs', 'transactions', 'importRules', 'ignoredSubscriptions'] as const;
           for (const table of tablesToMigrate) {
               await (db[table] as any).toCollection().modify((item: any) => {
@@ -128,12 +128,13 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     init();
   }, []);
 
-  // Load Budget-Specific Data
+  // Load Budget-Specific Data whenever the active budget changes
   useEffect(() => {
     if (!activeBudgetId) return;
     localStorage.setItem('last_active_budget_id', activeBudgetId);
 
     const loadData = async () => {
+      // 1. Users
       const u = await db.users.where('budgetId').equals(activeBudgetId).toArray();
       if (u.length === 0) {
           const initialUser: User = { id: generateId(), budgetId: activeBudgetId, name: 'Jag', avatar: '👤', incomeData: {} };
@@ -143,6 +144,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
           setUsers(u);
       }
 
+      // 2. Filtered data by activeBudgetId
       setAccounts(await db.accounts.where('budgetId').equals(activeBudgetId).toArray());
       setBuckets(await db.buckets.where('budgetId').equals(activeBudgetId).toArray());
       setBudgetGroups(await db.budgetGroups.where('budgetId').equals(activeBudgetId).toArray());
@@ -169,7 +171,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       setImportRules(await db.importRules.where('budgetId').equals(activeBudgetId).toArray());
       setIgnoredSubscriptions(await db.ignoredSubscriptions.where('budgetId').equals(activeBudgetId).toArray());
 
-      // Global Settings (same across budgets for now, or could be split)
+      // Global Settings
       const s = await db.settings.toArray();
       if (s.length > 0) setSettings(s[0]);
     };
@@ -177,7 +179,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     loadData();
   }, [activeBudgetId]);
 
-  // Load Categories (Shared)
+  // Load Categories (Shared across budgets)
   useEffect(() => {
       const loadCategories = async () => {
           const mc = await db.mainCategories.toArray();
